@@ -9,6 +9,7 @@ import torch
 from einops import rearrange
 from torch import Tensor, nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 from flux2.model import Flux2, Flux2Params, apply_rope, timestep_embedding
 
@@ -75,13 +76,21 @@ class Flux2FACTModel(Flux2):
         self.action_out = nn.Linear(self.hidden_size, action_dim, bias=False)
         self.state_out = nn.Linear(self.hidden_size, state_dim, bias=False)
         self.value_out = nn.Linear(self.hidden_size, value_dim, bias=False)
+        self.gradient_checkpointing = False
+
+    def enable_gradient_checkpointing(self) -> None:
+        self.gradient_checkpointing = True
+
+    def disable_gradient_checkpointing(self) -> None:
+        self.gradient_checkpointing = False
 
     def _condition_vec(self, timestep: Tensor, guidance: Tensor | None) -> Tensor:
-        vec = self.time_in(timestep_embedding(timestep, 256))
+        condition_dtype = self.time_in.in_layer.weight.dtype
+        vec = self.time_in(timestep_embedding(timestep, 256).to(dtype=condition_dtype))
         if self.use_guidance_embed:
             if guidance is None:
                 raise ValueError("guidance is required by this FLUX.2 configuration")
-            vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
+            vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(dtype=condition_dtype))
         return vec
 
     @staticmethod
@@ -238,7 +247,19 @@ class Flux2FACTModel(Flux2):
         double_txt = self.double_stream_modulation_txt(vec_clean)
 
         for block in self.double_blocks:
-            img, txt = self._double_block_forward(block, img, txt, pe_img, pe_txt, double_img, double_txt, bias)
+            if self.gradient_checkpointing and self.training:
+                img, txt = checkpoint(
+                    lambda img_, txt_, block_=block: self._double_block_forward(
+                        block_, img_, txt_, pe_img, pe_txt, double_img, double_txt, bias
+                    ),
+                    img,
+                    txt,
+                    use_reentrant=False,
+                )
+            else:
+                img, txt = self._double_block_forward(
+                    block, img, txt, pe_img, pe_txt, double_img, double_txt, bias
+                )
 
         hidden = torch.cat([txt, img], dim=1)
         pe = torch.cat([pe_txt, pe_img], dim=2)
@@ -259,7 +280,16 @@ class Flux2FACTModel(Flux2):
             ]
         )
         for block in self.single_blocks:
-            hidden = self._single_block_forward(block, hidden, pe, single_mod, bias)
+            if self.gradient_checkpointing and self.training:
+                hidden = checkpoint(
+                    lambda hidden_, block_=block: self._single_block_forward(
+                        block_, hidden_, pe, single_mod, bias
+                    ),
+                    hidden,
+                    use_reentrant=False,
+                )
+            else:
+                hidden = self._single_block_forward(block, hidden, pe, single_mod, bias)
 
         image_hidden = hidden[:, segments.future_image]
         action_hidden = hidden[:, segments.pred_action]
@@ -272,4 +302,3 @@ class Flux2FACTModel(Flux2):
             value=self.value_out(value_hidden),
             segments=segments,
         )
-

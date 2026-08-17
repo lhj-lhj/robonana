@@ -55,3 +55,30 @@ def test_model_inherits_flux2_and_runs_shared_blocks():
     assert model.double_blocks[0].img_attn.qkv.weight.grad is not None
     assert model.single_blocks[0].linear1.weight.grad is not None
 
+
+def test_gradient_checkpointed_shared_blocks_run_backward():
+    torch.manual_seed(0)
+    model = _tiny_model()
+    model.enable_gradient_checkpointing()
+    model.train()
+    batch = 1
+    ids = lambda length: torch.zeros(batch, length, 4)
+    output = model(
+        context=torch.randn(batch, 2, 16),
+        context_ids=ids(2),
+        current_latents=torch.randn(batch, 1, 8),
+        current_ids=ids(1),
+        noisy_future_latents=torch.randn(batch, 1, 8),
+        future_ids=ids(1),
+        state=torch.randn(batch, 1, 6),
+        noisy_pred_action=torch.randn(batch, 2, 6),
+        gt_action_cond=torch.randn(batch, 2, 6),
+        horizon_idx=torch.tensor([1]),
+        noisy_future_state=torch.randn(batch, 1, 6),
+        noisy_value=torch.randn(batch, 1, 1),
+        action_timestep=torch.rand(batch),
+        wm_timestep=torch.rand(batch),
+    )
+    (output.image.square().mean() + output.action.square().mean()).backward()
+    assert model.double_blocks[0].img_attn.qkv.weight.grad is not None
+    assert model.single_blocks[0].linear1.weight.grad is not None

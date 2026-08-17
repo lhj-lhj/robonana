@@ -25,5 +25,19 @@ All verification is run on `pyromind-west1-58` under `/workspace/hongjia/robonan
 bash scripts/verify_remote.sh
 ```
 
-See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact reuse boundary.
+The checkpoint-backed BS=1 graph smoke test loads the official FLUX.2 Klein
+Base 4B DiT checkpoint (not WAN2.2):
 
+```bash
+CUDA_VISIBLE_DEVICES=<free-gpu> PYTHONPATH="$PWD/src:$PWD/third_party/flux2/src" \
+  .venv/bin/python scripts/smoke_train.py \
+  --checkpoint checkpoints/FLUX.2-klein-base-4B/flux-2-klein-base-4b.safetensors \
+  --batch-size 1 --train-mode adapters --memory-limit-gib 14
+```
+
+The script checks free memory before creating a CUDA tensor. `adapters` is a
+low-memory wiring test; the intended shared-DiT experiment uses `--train-mode
+full` and is refused when there is not enough room for weights, gradients, and
+AdamW state.
+
+See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact reuse boundary.
