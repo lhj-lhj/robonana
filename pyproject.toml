@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robonana"
+version = "0.1.0"
+description = "A minimal FACT data-path and FLUX.2 shared-DiT world-action model scaffold."
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.6",
+  "einops>=0.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+fact = ["nvidia-ml-py>=13"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
