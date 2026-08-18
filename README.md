@@ -71,6 +71,14 @@ PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
   --dataset-root /workspace/datasets/RoboTwin/hf_dataset
 ```
 
+Verify one real batch before allocating the 4B backbone:
+
+```bash
+PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
+  .venv/bin/python scripts/smoke_real_dataloader.py \
+  --dataset-root /workspace/datasets/RoboTwin/hf_dataset
+```
+
 Launch full shared-DiT training. `ROBONANA_GPU_IDS` defaults to `0,2,5,7`,
 batch size defaults to one per GPU, and multi-GPU execution reuses FACT's
 DeepSpeed ZeRO-2 config.
