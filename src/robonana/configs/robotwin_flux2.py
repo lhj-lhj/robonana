@@ -22,6 +22,8 @@ GPU_IDS = [int(value) for value in os.environ.get("ROBONANA_GPU_IDS", "0,2,5,7")
 MAX_STEPS = int(os.environ.get("ROBONANA_MAX_STEPS", "150000"))
 BATCH_SIZE_PER_GPU = int(os.environ.get("ROBONANA_BATCH_SIZE", "1"))
 NUM_WORKERS = int(os.environ.get("ROBONANA_NUM_WORKERS", "4"))
+TRAIN_MODE = os.environ.get("ROBONANA_TRAIN_MODE", "full")
+PIXEL_EVAL_INTERVAL = int(os.environ.get("ROBONANA_PIXEL_EVAL_INTERVAL", "200"))
 
 DEEPSPEED_CONFIG = (
     REPO_ROOT / "third_party" / "FACT" / "fact_train" / "distributed" / "accelerate_configs" / "zero2.json"
@@ -65,7 +67,7 @@ config = dict(
         action_dim=14,
         state_dim=14,
         max_horizon=48,
-        train_mode="full",
+        train_mode=TRAIN_MODE,
         gradient_checkpointing=True,
         vae_dtype="float32",
     ),
@@ -96,7 +98,7 @@ config = dict(
         tracker_project_name="robonana",
         tracker_init_kwargs=dict(wandb=dict(entity="hongjia-liu-aalto-university")),
         log_interval=10,
-        pixel_eval_interval=200,
+        pixel_eval_interval=PIXEL_EVAL_INTERVAL,
         latent_grid_height=12,
         latent_grid_width=24,
         flow_shift=1.0,
