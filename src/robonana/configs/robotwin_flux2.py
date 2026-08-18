@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 
@@ -43,6 +44,7 @@ config = dict(
         gpu_ids=GPU_IDS,
         distributed_type="DEEPSPEED",
         deepspeed_config=dict(deepspeed_config_file=str(DEEPSPEED_CONFIG)),
+        executable=f"{sys.executable} -m accelerate.commands.accelerate_cli",
         until_completion=False,
     ),
     dataloaders=dict(
