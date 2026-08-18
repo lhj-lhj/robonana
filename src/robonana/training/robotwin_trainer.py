@@ -168,26 +168,31 @@ class RoboNanaTrainer(Trainer):
         action_timestep: Tensor,
         wm_timestep: Tensor,
     ) -> None:
-        horizons = batch_dict["eval_horizon_idx"][0].to(device=self.device, dtype=torch.long)
+        sample_index = self.accelerator.process_index % context.shape[0]
+        horizons = batch_dict["eval_horizon_idx"][sample_index].to(device=self.device, dtype=torch.long)
         count = horizons.numel()
 
-        def repeat_first(value: Tensor) -> Tensor:
-            return value[:1].expand(count, *value.shape[1:])
+        def repeat_selected(value: Tensor) -> Tensor:
+            return value[sample_index : sample_index + 1].expand(count, *value.shape[1:])
 
-        eval_future = batch_dict["eval_future_latents"][0].to(device=self.device, dtype=self.dtype)
-        eval_future_state = batch_dict["eval_future_state"][0].to(device=self.device, dtype=self.dtype).unsqueeze(1)
-        eval_value = batch_dict["eval_value"][0].to(device=self.device, dtype=self.dtype).reshape(count, 1, 1)
-        eval_action_timestep = action_timestep[:1].expand(count)
-        eval_wm_timestep = wm_timestep[:1].expand(count)
-        eval_action = repeat_first(action)
+        eval_future = batch_dict["eval_future_latents"][sample_index].to(device=self.device, dtype=self.dtype)
+        eval_future_state = (
+            batch_dict["eval_future_state"][sample_index].to(device=self.device, dtype=self.dtype).unsqueeze(1)
+        )
+        eval_value = (
+            batch_dict["eval_value"][sample_index].to(device=self.device, dtype=self.dtype).reshape(count, 1, 1)
+        )
+        eval_action_timestep = action_timestep[sample_index : sample_index + 1].expand(count)
+        eval_wm_timestep = wm_timestep[sample_index : sample_index + 1].expand(count)
+        eval_action = repeat_selected(action)
         noisy_action = self._shared_noise_flow(eval_action, eval_action_timestep)
         noisy_future = self._shared_noise_flow(eval_future, eval_wm_timestep)
         noisy_future_state = self._shared_noise_flow(eval_future_state, eval_wm_timestep)
         noisy_value = self._shared_noise_flow(eval_value, eval_wm_timestep)
-        eval_context = repeat_first(context)
-        eval_context_mask = repeat_first(context_mask)
-        eval_current = repeat_first(current)
-        eval_state = repeat_first(state)
+        eval_context = repeat_selected(context)
+        eval_context_mask = repeat_selected(context_mask)
+        eval_current = repeat_selected(current)
+        eval_state = repeat_selected(state)
         context_ids = text_position_ids(count, eval_context.shape[1], self.device)
         current_ids = image_position_ids(
             count,
@@ -230,8 +235,22 @@ class RoboNanaTrainer(Trainer):
             if model_was_training:
                 self.model.train()
 
+        gathered_current = self.accelerator.gather(
+            current[sample_index : sample_index + 1].detach()
+        )
+        gathered_targets = self.accelerator.gather(eval_future.detach())
+        gathered_predictions = self.accelerator.gather(predicted_x0.detach())
+        gathered_horizons = self.accelerator.gather(horizons)
         if self.vae is None:
             return
+
+        num_currents = gathered_current.shape[0]
+        expected_futures = num_currents * count
+        if gathered_targets.shape[0] != expected_futures or gathered_predictions.shape[0] != expected_futures:
+            raise RuntimeError("distributed fixed-horizon eval gathered an unexpected number of future samples")
+        horizon_matrix = gathered_horizons.reshape(num_currents, count)
+        if not torch.equal(horizon_matrix, horizon_matrix[:1].expand_as(horizon_matrix)):
+            raise RuntimeError("all ranks must use the same fixed eval horizons")
 
         def decode_each(tokens: Tensor) -> Tensor:
             return torch.cat(
@@ -248,16 +267,19 @@ class RoboNanaTrainer(Trainer):
             )
 
         with torch.no_grad():
-            decoded_current = decode_each(current[:1])
-            decoded_targets = decode_each(eval_future)
-            decoded_predictions = decode_each(predicted_x0)
+            decoded_current = decode_each(gathered_current)
+            decoded_targets_flat = decode_each(gathered_targets)
+            decoded_targets = decoded_targets_flat.reshape(
+                num_currents, count, *decoded_targets_flat.shape[1:]
+            )
+            decoded_predictions = decode_each(gathered_predictions).reshape_as(decoded_targets)
         log_pixel_eval(
             accelerator=self.accelerator,
             step=self.cur_step,
             current=decoded_current,
             targets=decoded_targets,
             predictions=decoded_predictions,
-            horizons=horizons,
+            horizons=horizon_matrix[0],
         )
 
     def forward_step(self, batch_dict: dict[str, Any]):
