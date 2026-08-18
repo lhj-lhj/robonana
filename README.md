@@ -93,8 +93,11 @@ Every 200 optimizer steps, the trainer evaluates the same current frame at
 fixed horizons `idx_h = 12, 24, 48`. Rank 0 decodes the current frame plus all
 ground-truth and predicted FLUX tokens through the frozen FLUX.2 AE, then
 uploads one 2x4 grid to W&B: current/GT on the top row and current/prediction
-on the bottom row. This is a train-time denoising preview, not a multi-step
-rollout metric.
+on the bottom row. Evaluation mirrors inference: it first samples action from
+pure noise, feeds the resulting clean action into the teacher-forcing track,
+then jointly samples future image/state/value from pure noise with 20-step
+Flow-Euler. Set `ROBONANA_NUM_INFERENCE_STEPS` to use a different shared
+eval/inference step count.
 
 See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact reuse boundary.
 

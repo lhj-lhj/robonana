@@ -8,13 +8,6 @@ import torch
 from torch import Tensor
 
 
-def flow_prediction_to_x0(noisy: Tensor, predicted_flow: Tensor, timestep: Tensor) -> Tensor:
-    sigma = timestep.to(device=noisy.device, dtype=noisy.dtype)
-    while sigma.ndim < noisy.ndim:
-        sigma = sigma.unsqueeze(-1)
-    return noisy - predicted_flow.to(dtype=noisy.dtype) * sigma
-
-
 def unpack_flux2_tokens(tokens: Tensor, vae, *, grid_height: int = 12, grid_width: int = 24) -> Tensor:
     """Invert RoboNana's FLUX patchify + BatchNorm cache representation."""
 
@@ -56,6 +49,7 @@ def log_pixel_eval(
     targets: Tensor,
     predictions: Tensor,
     horizons: Tensor,
+    num_inference_steps: int,
 ) -> None:
     """Upload one two-row panel for fixed horizons of the same current frame."""
 
@@ -87,6 +81,8 @@ def log_pixel_eval(
                 ),
             ),
             "eval/fixed_horizons": ",".join(str(value) for value in horizon_values),
+            "eval/sampling": "two_stage_flow_euler_from_pure_noise",
+            "eval/num_inference_steps": int(num_inference_steps),
         },
         step=int(step),
         commit=False,

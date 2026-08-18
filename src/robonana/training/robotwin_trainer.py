@@ -13,10 +13,10 @@ from flux2.model import Klein4BParams
 # Imports register the raw HDF5 dataset and sampler with FACT.
 from robonana.data import robotwin_hdf5 as _robotwin_hdf5  # noqa: F401
 from robonana.models.pretrained import configure_trainable_parameters, load_flux2_fact_checkpoint
+from robonana.sampling import flow_euler_schedule, flow_euler_step
 from robonana.training.losses import joint_flow_loss
 from robonana.training.visualization import (
     decode_flux2_tokens,
-    flow_prediction_to_x0,
     log_pixel_eval,
     should_log_pixel_eval,
 )
@@ -75,6 +75,9 @@ class RoboNanaTrainer(Trainer):
         self.grid_height = int(self.kwargs.get("latent_grid_height", 12))
         self.grid_width = int(self.kwargs.get("latent_grid_width", 24))
         self.flow_shift = float(self.kwargs.get("flow_shift", 1.0))
+        self.num_inference_steps = int(self.kwargs.get("num_inference_steps", 20))
+        if self.num_inference_steps <= 0:
+            raise ValueError("num_inference_steps must be positive")
         self.vae = None
 
     def get_models(self, model_config):
@@ -150,12 +153,6 @@ class RoboNanaTrainer(Trainer):
                 )
         super().print_after_train()
 
-    @staticmethod
-    def _shared_noise_flow(clean: Tensor, timestep: Tensor) -> Tensor:
-        noise = torch.randn_like(clean[:1]).expand_as(clean)
-        sigma = _expand_timestep(timestep, clean)
-        return clean * (1.0 - sigma) + noise * sigma
-
     def _run_fixed_horizon_eval(
         self,
         *,
@@ -165,8 +162,6 @@ class RoboNanaTrainer(Trainer):
         current: Tensor,
         state: Tensor,
         action: Tensor,
-        action_timestep: Tensor,
-        wm_timestep: Tensor,
     ) -> None:
         horizons = batch_dict["eval_horizon_idx"][0].to(device=self.device, dtype=torch.long)
         count = horizons.numel()
@@ -177,13 +172,6 @@ class RoboNanaTrainer(Trainer):
         eval_future = batch_dict["eval_future_latents"][0].to(device=self.device, dtype=self.dtype)
         eval_future_state = batch_dict["eval_future_state"][0].to(device=self.device, dtype=self.dtype).unsqueeze(1)
         eval_value = batch_dict["eval_value"][0].to(device=self.device, dtype=self.dtype).reshape(count, 1, 1)
-        eval_action_timestep = action_timestep[:1].expand(count)
-        eval_wm_timestep = wm_timestep[:1].expand(count)
-        eval_action = repeat_first(action)
-        noisy_action = self._shared_noise_flow(eval_action, eval_action_timestep)
-        noisy_future = self._shared_noise_flow(eval_future, eval_wm_timestep)
-        noisy_future_state = self._shared_noise_flow(eval_future_state, eval_wm_timestep)
-        noisy_value = self._shared_noise_flow(eval_value, eval_wm_timestep)
         eval_context = repeat_first(context)
         eval_context_mask = repeat_first(context_mask)
         eval_current = repeat_first(current)
@@ -203,29 +191,86 @@ class RoboNanaTrainer(Trainer):
             time_coord=horizons,
             device=self.device,
         )
+        schedule = flow_euler_schedule(
+            self.num_inference_steps,
+            flow_shift=self.flow_shift,
+            device=self.device,
+        )
 
         model_was_training = self.model.training
         self.model.eval()
         try:
             with torch.no_grad():
-                output = self.model(
-                    context=eval_context,
-                    context_ids=context_ids,
-                    current_latents=eval_current,
-                    current_ids=current_ids,
-                    noisy_future_latents=noisy_future,
-                    future_ids=future_ids,
-                    state=eval_state,
-                    noisy_pred_action=noisy_action,
-                    gt_action_cond=eval_action,
-                    horizon_idx=horizons,
-                    noisy_future_state=noisy_future_state,
-                    noisy_value=noisy_value,
-                    action_timestep=eval_action_timestep,
-                    wm_timestep=eval_wm_timestep,
-                    context_mask=eval_context_mask,
+                # Stage 1 mirrors FACT inference: denoise action alone from pure
+                # Gaussian noise. The attention mask makes the action sink
+                # independent of every dummy suffix token supplied here.
+                sampled_action = torch.randn_like(action[:1])
+                dummy_gt_action = torch.zeros_like(sampled_action)
+                dummy_future = torch.zeros_like(eval_future[:1])
+                dummy_future_state = torch.zeros_like(eval_future_state[:1])
+                dummy_value = torch.zeros_like(eval_value[:1])
+                clean_time = torch.zeros(1, device=self.device, dtype=torch.float32)
+                for sigma, sigma_next in zip(schedule[:-1], schedule[1:]):
+                    action_time = sigma.expand(1)
+                    action_output = self.model(
+                        context=eval_context[:1],
+                        context_ids=context_ids[:1],
+                        current_latents=eval_current[:1],
+                        current_ids=current_ids[:1],
+                        noisy_future_latents=dummy_future,
+                        future_ids=future_ids[:1],
+                        state=eval_state[:1],
+                        noisy_pred_action=sampled_action,
+                        gt_action_cond=dummy_gt_action,
+                        horizon_idx=horizons[:1],
+                        noisy_future_state=dummy_future_state,
+                        noisy_value=dummy_value,
+                        action_timestep=action_time,
+                        wm_timestep=clean_time,
+                        context_mask=eval_context_mask[:1],
+                    )
+                    sampled_action = flow_euler_step(
+                        sampled_action, action_output.action, sigma, sigma_next
+                    )
+
+                # Stage 2 uses the fully denoised Stage-1 action as the clean
+                # teacher-forcing track and jointly denoises world targets.
+                clean_action_cond = sampled_action.expand(count, -1, -1)
+                pred_action_dummy = torch.zeros_like(clean_action_cond)
+                sampled_future = torch.randn_like(eval_future[:1]).expand_as(eval_future).clone()
+                sampled_future_state = (
+                    torch.randn_like(eval_future_state[:1]).expand_as(eval_future_state).clone()
                 )
-                predicted_x0 = flow_prediction_to_x0(noisy_future, output.image, eval_wm_timestep)
+                sampled_value = torch.randn_like(eval_value[:1]).expand_as(eval_value).clone()
+                clean_action_time = torch.zeros(count, device=self.device, dtype=torch.float32)
+                for sigma, sigma_next in zip(schedule[:-1], schedule[1:]):
+                    wm_time = sigma.expand(count)
+                    world_output = self.model(
+                        context=eval_context,
+                        context_ids=context_ids,
+                        current_latents=eval_current,
+                        current_ids=current_ids,
+                        noisy_future_latents=sampled_future,
+                        future_ids=future_ids,
+                        state=eval_state,
+                        noisy_pred_action=pred_action_dummy,
+                        gt_action_cond=clean_action_cond,
+                        horizon_idx=horizons,
+                        noisy_future_state=sampled_future_state,
+                        noisy_value=sampled_value,
+                        action_timestep=clean_action_time,
+                        wm_timestep=wm_time,
+                        context_mask=eval_context_mask,
+                    )
+                    sampled_future = flow_euler_step(
+                        sampled_future, world_output.image, sigma, sigma_next
+                    )
+                    sampled_future_state = flow_euler_step(
+                        sampled_future_state, world_output.future_state, sigma, sigma_next
+                    )
+                    sampled_value = flow_euler_step(
+                        sampled_value, world_output.value, sigma, sigma_next
+                    )
         finally:
             if model_was_training:
                 self.model.train()
@@ -250,7 +295,7 @@ class RoboNanaTrainer(Trainer):
         with torch.no_grad():
             decoded_current = decode_each(current[:1])
             decoded_targets = decode_each(eval_future)
-            decoded_predictions = decode_each(predicted_x0)
+            decoded_predictions = decode_each(sampled_future)
         log_pixel_eval(
             accelerator=self.accelerator,
             step=self.cur_step,
@@ -258,6 +303,7 @@ class RoboNanaTrainer(Trainer):
             targets=decoded_targets,
             predictions=decoded_predictions,
             horizons=horizons,
+            num_inference_steps=self.num_inference_steps,
         )
 
     def forward_step(self, batch_dict: dict[str, Any]):
@@ -327,8 +373,6 @@ class RoboNanaTrainer(Trainer):
                 current=current,
                 state=state,
                 action=action,
-                action_timestep=action_timestep,
-                wm_timestep=wm_timestep,
             )
 
         return joint_flow_loss(
