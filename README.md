@@ -41,3 +41,33 @@ full` and is refused when there is not enough room for weights, gradients, and
 AdamW state.
 
 See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact reuse boundary.
+
+## RoboTwin FLUX caches
+
+Raw RoboTwin HDF5 tasks are converted without changing FACT's three-view
+layout. Qwen3 is run once per task and every RGB frame is encoded once; the
+training loader selects current/future tokens using `current_index` and
+`idx_h`.
+
+```bash
+PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
+  .venv/bin/python scripts/preprocess_robotwin_flux.py \
+  --dataset-root /workspace/datasets/RoboTwin/hf_dataset \
+  --checkpoint checkpoints/FLUX.2-klein-base-4B \
+  --stage language
+
+PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
+  .venv/bin/python -m torch.distributed.run --standalone --nproc-per-node 8 \
+  scripts/preprocess_robotwin_flux.py \
+  --dataset-root /workspace/datasets/RoboTwin/hf_dataset \
+  --checkpoint checkpoints/FLUX.2-klein-base-4B \
+  --stage images --batch-size 16
+```
+
+On west1-58, the resumable four-GPU launcher defaults to the currently agreed
+physical GPUs `0,2,5,7`:
+
+```bash
+setsid -f bash scripts/run_robotwin_flux_cache.sh
+tail -f logs/preprocess_robotwin_flux_full.log
+```

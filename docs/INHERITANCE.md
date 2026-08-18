@@ -44,3 +44,14 @@ There is no MoT, ActionDiT, or second transformer backbone.
 
 The attention mask is applied inside every reused FLUX.2 double-stream and single-stream block.
 
+## Offline cache path
+
+```text
+RoboTwin instruction -> official FLUX.2 Qwen3Embedder.forward -> language_context.pt
+RoboTwin HDF5 cameras -> FACT build_robotwin_three_view_tensor -> FLUX.2 AE -> frame tokens
+```
+
+The cache adds no alternative preprocessing geometry. It calls FACT's existing
+three-view layout helper and reproduces the official FLUX.2 Klein VAE
+patchify/BatchNorm sequence. One episode tensor is indexed as both
+`current_latent[t]` and `future_latent[min(t + idx_h, T - 1)]`.
