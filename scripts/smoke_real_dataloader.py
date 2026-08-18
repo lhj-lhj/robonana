@@ -45,6 +45,11 @@ def main() -> int:
         "action": [1, 48, 14],
         "future_state": [1, 14],
         "value": [1, 1],
+        "eval_horizon_idx": [1, 3],
+        "eval_future_latents": [1, 3, 288, 128],
+        "eval_future_state": [1, 3, 14],
+        "eval_value": [1, 3, 1],
+        "eval_future_index": [1, 3],
     }
     for key, shape in expected.items():
         if shapes[key]["shape"] != shape:
