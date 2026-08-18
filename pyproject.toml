@@ -22,6 +22,7 @@ preprocess = [
   "Pillow>=10",
   "transformers>=4.57",
 ]
+tracking = ["wandb>=0.27"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

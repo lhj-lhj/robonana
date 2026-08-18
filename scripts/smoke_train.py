@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -14,6 +15,7 @@ from flux2.model import Klein4BParams
 from robonana.models.pretrained import configure_trainable_parameters, load_flux2_fact_checkpoint
 from robonana.training.losses import joint_flow_loss
 from robonana.training.memory import GIB, memory_preflight
+from robonana.training.tracking import WANDB_MODES, finish_wandb, init_wandb, log_wandb
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,6 +36,10 @@ def parse_args() -> argparse.Namespace:
         help="Cap this process to simulate a smaller amount of available GPU memory.",
     )
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--wandb-mode", choices=WANDB_MODES, default=os.environ.get("WANDB_MODE", "online"))
+    parser.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY", "hongjia-liu-aalto-university"))
+    parser.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "robonana"))
+    parser.add_argument("--wandb-run-name", default=None)
     return parser.parse_args()
 
 
@@ -64,26 +70,48 @@ def main() -> int:
         mode=args.train_mode,
         headroom_bytes=int(args.headroom_gib * GIB),
     )
-    print(
-        json.dumps(
-            {
-                "event": "memory_preflight",
-                "device": str(device),
-                "batch_size": args.batch_size,
-                "train_mode": args.train_mode,
-                "free_gib": round(free_bytes / GIB, 3),
-                "total_gib": round(total_bytes / GIB, 3),
-                "checkpoint_gib": round(checkpoint_bytes / GIB, 3),
-                "required_free_gib": round(preflight.required_free_bytes / GIB, 3),
-                "process_memory_limit_gib": args.memory_limit_gib,
-                "can_run": preflight.can_run,
-            },
-            sort_keys=True,
-        ),
-        flush=True,
+    preflight_metrics = {
+        "event": "memory_preflight",
+        "device": str(device),
+        "batch_size": args.batch_size,
+        "train_mode": args.train_mode,
+        "free_gib": round(free_bytes / GIB, 3),
+        "total_gib": round(total_bytes / GIB, 3),
+        "checkpoint_gib": round(checkpoint_bytes / GIB, 3),
+        "required_free_gib": round(preflight.required_free_bytes / GIB, 3),
+        "process_memory_limit_gib": args.memory_limit_gib,
+        "can_run": preflight.can_run,
+    }
+    print(json.dumps(preflight_metrics, sort_keys=True), flush=True)
+
+    run = init_wandb(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        run_name=args.wandb_run_name or f"checkpoint-smoke-{args.train_mode}",
+        mode=args.wandb_mode,
+        config={
+            "checkpoint": str(args.checkpoint),
+            "batch_size": args.batch_size,
+            "train_mode": args.train_mode,
+            "action_dim": args.action_dim,
+            "state_dim": args.state_dim,
+            "action_chunk": args.action_chunk,
+            "learning_rate": args.learning_rate,
+            "gradient_checkpointing": args.gradient_checkpointing,
+        },
+    )
+    log_wandb(
+        run,
+        {
+            "system/free_gib": preflight_metrics["free_gib"],
+            "system/required_free_gib": preflight_metrics["required_free_gib"],
+            "system/preflight_can_run": int(preflight.can_run),
+        },
+        step=0,
     )
     if not preflight.can_run:
         print("ROBONANA_SMOKE_SKIPPED_INSUFFICIENT_FREE_MEMORY", flush=True)
+        finish_wandb(run, exit_code=3)
         return 3
 
     torch.cuda.reset_peak_memory_stats(device)
@@ -147,22 +175,30 @@ def main() -> int:
 
     total_parameters = sum(parameter.numel() for parameter in model.parameters())
     trainable_parameter_count = sum(parameter.numel() for parameter in trainable_parameters)
-    print(
-        json.dumps(
-            {
-                "event": "train_step_complete",
-                "checkpoint_parameters": report.checkpoint_parameters,
-                "total_parameters": total_parameters,
-                "trainable_parameters": trainable_parameter_count,
-                "trainable_tensors": len(trainable_names),
-                "loss": float(loss.detach()),
-                "peak_allocated_gib": round(torch.cuda.max_memory_allocated(device) / GIB, 3),
-                "peak_reserved_gib": round(torch.cuda.max_memory_reserved(device) / GIB, 3),
-            },
-            sort_keys=True,
-        ),
-        flush=True,
+    result_metrics = {
+        "event": "train_step_complete",
+        "checkpoint_parameters": report.checkpoint_parameters,
+        "total_parameters": total_parameters,
+        "trainable_parameters": trainable_parameter_count,
+        "trainable_tensors": len(trainable_names),
+        "loss": float(loss.detach()),
+        "peak_allocated_gib": round(torch.cuda.max_memory_allocated(device) / GIB, 3),
+        "peak_reserved_gib": round(torch.cuda.max_memory_reserved(device) / GIB, 3),
+    }
+    print(json.dumps(result_metrics, sort_keys=True), flush=True)
+    log_wandb(
+        run,
+        {
+            "train/loss": result_metrics["loss"],
+            **{f"train/{name}": float(value.detach()) for name, value in losses.items()},
+            "model/total_parameters": total_parameters,
+            "model/trainable_parameters": trainable_parameter_count,
+            "system/peak_allocated_gib": result_metrics["peak_allocated_gib"],
+            "system/peak_reserved_gib": result_metrics["peak_reserved_gib"],
+        },
+        step=1,
     )
+    finish_wandb(run)
     print("ROBONANA_SMOKE_OK", flush=True)
     return 0
 

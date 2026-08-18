@@ -40,6 +40,21 @@ low-memory wiring test; the intended shared-DiT experiment uses `--train-mode
 full` and is refused when there is not enough room for weights, gradients, and
 AdamW state.
 
+## W&B tracking
+
+Training and checkpoint-backed smoke runs upload to the `robonana` project in
+the `hongjia-liu-aalto-university` entity by default. Authenticate once on each
+training host with `wandb login`; never place the API key in Git, Notion, a
+launcher, or a config file committed to this repository.
+
+```bash
+WANDB_MODE=online .venv/bin/python scripts/smoke_train.py \
+  --checkpoint checkpoints/FLUX.2-klein-base-4B/flux-2-klein-base-4b.safetensors \
+  --batch-size 1 --train-mode adapters
+```
+
+Use `--wandb-mode disabled` only for unit tests that must not create a run.
+
 See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact reuse boundary.
 
 ## RoboTwin FLUX caches

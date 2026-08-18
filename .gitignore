@@ -1,4 +1,6 @@
 .venv/
+.hf-cli-venv/
+.env
 __pycache__/
 .pytest_cache/
 *.py[cod]
@@ -11,4 +13,4 @@ datasets/
 cache/
 outputs/
 wandb/
-
+logs/
