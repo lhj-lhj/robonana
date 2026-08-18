@@ -62,6 +62,13 @@ class RoboNanaTrainer(Trainer):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self.memory_limit_gib = float(self.kwargs.get("memory_limit_gib", 0.0))
+        if self.memory_limit_gib > 0 and self.device.type == "cuda":
+            total_bytes = torch.cuda.get_device_properties(self.device).total_memory
+            limit_bytes = int(self.memory_limit_gib * 1024**3)
+            torch.cuda.set_per_process_memory_fraction(min(1.0, limit_bytes / total_bytes), self.device)
+        if self.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(self.device)
         self.pixel_eval_interval = int(self.kwargs.get("pixel_eval_interval", 200))
         if self.pixel_eval_interval and self.pixel_eval_interval % self.log_interval:
             raise ValueError("pixel_eval_interval must be divisible by log_interval for atomic W&B logging")
@@ -124,6 +131,24 @@ class RoboNanaTrainer(Trainer):
         if bool(self.kwargs.get("disable_checkpointing", False)):
             return
         super().save_checkpoint_step()
+
+    def print_after_train(self) -> None:
+        if self.device.type == "cuda":
+            local_peak = torch.tensor(
+                [torch.cuda.max_memory_allocated(self.device), torch.cuda.max_memory_reserved(self.device)],
+                device=self.device,
+                dtype=torch.float64,
+            )
+            all_peaks = self.accelerator.gather(local_peak).reshape(-1, 2)
+            if self.is_main_process:
+                peak = all_peaks.max(dim=0).values.cpu().tolist()
+                self.logger.info(
+                    "Peak CUDA memory across ranks: allocated=%.3f GiB, reserved=%.3f GiB, cap=%.3f GiB",
+                    peak[0] / 1024**3,
+                    peak[1] / 1024**3,
+                    self.memory_limit_gib,
+                )
+        super().print_after_train()
 
     def forward_step(self, batch_dict: dict[str, Any]):
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)

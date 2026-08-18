@@ -25,6 +25,7 @@ NUM_WORKERS = int(os.environ.get("ROBONANA_NUM_WORKERS", "4"))
 TRAIN_MODE = os.environ.get("ROBONANA_TRAIN_MODE", "full")
 PIXEL_EVAL_INTERVAL = int(os.environ.get("ROBONANA_PIXEL_EVAL_INTERVAL", "200"))
 LOG_INTERVAL = int(os.environ.get("ROBONANA_LOG_INTERVAL", "10"))
+MEMORY_LIMIT_GIB = float(os.environ.get("ROBONANA_MEMORY_LIMIT_GIB", "0"))
 DISABLE_CHECKPOINTING = os.environ.get("ROBONANA_DISABLE_CHECKPOINTING", "0").lower() in {
     "1",
     "true",
@@ -110,6 +111,7 @@ config = dict(
         latent_grid_width=24,
         flow_shift=1.0,
         max_grad_norm=1.0,
+        memory_limit_gib=MEMORY_LIMIT_GIB,
         loss_weights=dict(
             image_loss=1.0,
             action_loss=10.0,
