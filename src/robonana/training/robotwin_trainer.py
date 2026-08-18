@@ -13,7 +13,7 @@ from flux2.model import Klein4BParams
 # Imports register the raw HDF5 dataset and sampler with FACT.
 from robonana.data import robotwin_hdf5 as _robotwin_hdf5  # noqa: F401
 from robonana.models.pretrained import configure_trainable_parameters, load_flux2_fact_checkpoint
-from robonana.sampling import flow_euler_schedule, flow_euler_step
+from robonana.sampling import flow_euler_schedule, sample_two_stage_flow
 from robonana.training.losses import joint_flow_loss
 from robonana.training.visualization import (
     decode_flux2_tokens,
@@ -204,13 +204,14 @@ class RoboNanaTrainer(Trainer):
                 # Stage 1 mirrors FACT inference: denoise action alone from pure
                 # Gaussian noise. The attention mask makes the action sink
                 # independent of every dummy suffix token supplied here.
-                sampled_action = torch.randn_like(action[:1])
-                dummy_gt_action = torch.zeros_like(sampled_action)
+                action_noise = torch.randn_like(action[:1])
+                dummy_gt_action = torch.zeros_like(action_noise)
                 dummy_future = torch.zeros_like(eval_future[:1])
                 dummy_future_state = torch.zeros_like(eval_future_state[:1])
                 dummy_value = torch.zeros_like(eval_value[:1])
                 clean_time = torch.zeros(1, device=self.device, dtype=torch.float32)
-                for sigma, sigma_next in zip(schedule[:-1], schedule[1:]):
+
+                def predict_action(sampled_action: Tensor, sigma: Tensor) -> Tensor:
                     action_time = sigma.expand(1)
                     action_output = self.model(
                         context=eval_context[:1],
@@ -229,21 +230,26 @@ class RoboNanaTrainer(Trainer):
                         wm_timestep=clean_time,
                         context_mask=eval_context_mask[:1],
                     )
-                    sampled_action = flow_euler_step(
-                        sampled_action, action_output.action, sigma, sigma_next
-                    )
+                    return action_output.action
 
                 # Stage 2 uses the fully denoised Stage-1 action as the clean
                 # teacher-forcing track and jointly denoises world targets.
-                clean_action_cond = sampled_action.expand(count, -1, -1)
-                pred_action_dummy = torch.zeros_like(clean_action_cond)
-                sampled_future = torch.randn_like(eval_future[:1]).expand_as(eval_future).clone()
-                sampled_future_state = (
+                future_noise = torch.randn_like(eval_future[:1]).expand_as(eval_future).clone()
+                future_state_noise = (
                     torch.randn_like(eval_future_state[:1]).expand_as(eval_future_state).clone()
                 )
-                sampled_value = torch.randn_like(eval_value[:1]).expand_as(eval_value).clone()
+                value_noise = torch.randn_like(eval_value[:1]).expand_as(eval_value).clone()
                 clean_action_time = torch.zeros(count, device=self.device, dtype=torch.float32)
-                for sigma, sigma_next in zip(schedule[:-1], schedule[1:]):
+
+                def predict_world(
+                    sampled_future: Tensor,
+                    sampled_future_state: Tensor,
+                    sampled_value: Tensor,
+                    sampled_action: Tensor,
+                    sigma: Tensor,
+                ) -> tuple[Tensor, Tensor, Tensor]:
+                    clean_action_cond = sampled_action.expand(count, -1, -1)
+                    pred_action_dummy = torch.zeros_like(clean_action_cond)
                     wm_time = sigma.expand(count)
                     world_output = self.model(
                         context=eval_context,
@@ -262,15 +268,17 @@ class RoboNanaTrainer(Trainer):
                         wm_timestep=wm_time,
                         context_mask=eval_context_mask,
                     )
-                    sampled_future = flow_euler_step(
-                        sampled_future, world_output.image, sigma, sigma_next
-                    )
-                    sampled_future_state = flow_euler_step(
-                        sampled_future_state, world_output.future_state, sigma, sigma_next
-                    )
-                    sampled_value = flow_euler_step(
-                        sampled_value, world_output.value, sigma, sigma_next
-                    )
+                    return world_output.image, world_output.future_state, world_output.value
+
+                samples = sample_two_stage_flow(
+                    action_noise=action_noise,
+                    future_noise=future_noise,
+                    future_state_noise=future_state_noise,
+                    value_noise=value_noise,
+                    schedule=schedule,
+                    predict_action=predict_action,
+                    predict_world=predict_world,
+                )
         finally:
             if model_was_training:
                 self.model.train()
@@ -295,7 +303,7 @@ class RoboNanaTrainer(Trainer):
         with torch.no_grad():
             decoded_current = decode_each(current[:1])
             decoded_targets = decode_each(eval_future)
-            decoded_predictions = decode_each(sampled_future)
+            decoded_predictions = decode_each(samples.future)
         log_pixel_eval(
             accelerator=self.accelerator,
             step=self.cur_step,
