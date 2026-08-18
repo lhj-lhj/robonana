@@ -108,6 +108,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         action_dim: int = 14,
         max_horizon: int = 48,
         fixed_horizon: int = 0,
+        eval_horizons: tuple[int, ...] | list[int] = (12, 24, 48),
         latent_cache_size: int = 4,
         language_cache_size: int = 8,
         hdf5_cache_size: int = 4,
@@ -120,6 +121,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self.action_dim = int(action_dim)
         self.max_horizon = int(max_horizon)
         self.fixed_horizon = int(fixed_horizon)
+        self.eval_horizons = tuple(int(value) for value in eval_horizons)
         self.latent_cache_size = int(latent_cache_size)
         self.language_cache_size = int(language_cache_size)
         self.hdf5_cache_size = int(hdf5_cache_size)
@@ -129,6 +131,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
             raise ValueError(f"action_dim must lie in [1, {ALOHA_DELTA_MASK.size}]")
         if self.fixed_horizon < 0 or self.fixed_horizon > self.max_horizon:
             raise ValueError("fixed_horizon must be 0 or lie in [1, max_horizon]")
+        if not self.eval_horizons or any(value < 1 or value > self.max_horizon for value in self.eval_horizons):
+            raise ValueError("eval_horizons must be non-empty and lie in [1, max_horizon]")
         if min(self.latent_cache_size, self.language_cache_size, self.hdf5_cache_size) < 1:
             raise ValueError("all cache sizes must be at least one")
 
@@ -222,6 +226,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
         record, frame_index = self._locate(int(index))
         horizon_idx = self._sample_horizon()
         future_index = min(frame_index + horizon_idx, record.length - 1)
+        eval_horizon_indices = np.asarray(self.eval_horizons, dtype=np.int64)
+        eval_future_indices = np.minimum(frame_index + eval_horizon_indices, record.length - 1)
         action_indices = np.clip(
             frame_index + np.arange(self.action_chunk, dtype=np.int64),
             0,
@@ -237,6 +243,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         state_raw = vector[frame_index]
         action_raw = vector[action_indices]
         future_state_raw = vector[future_index]
+        eval_future_state_raw = vector[eval_future_indices]
 
         assert self._stats is not None
         state_mean = _stats_array(self._stats, "observation.state", "mean", self.action_dim)
@@ -251,12 +258,18 @@ class RoboTwinHDF5Dataset(BaseDataset):
         delta[:, delta_mask] -= state_raw[None, delta_mask]
         norm_state = (state_raw - state_mean) / state_std
         norm_future_state = (future_state_raw - state_mean) / state_std
+        norm_eval_future_state = (eval_future_state_raw - state_mean) / state_std
         norm_action = (delta - action_mean) / action_std
 
         remaining_value = 0.0 if record.length <= 1 else (record.length - future_index - 1) / (record.length - 1)
         value_min = float(np.asarray(self._stats["norm_stats"]["value"]["min"]).reshape(-1)[0])
         value_max = float(np.asarray(self._stats["norm_stats"]["value"]["max"]).reshape(-1)[0])
         value_normalized = ((remaining_value - value_min) / max(value_max - value_min, 1e-8)) * 2.0 - 1.0
+        if record.length <= 1:
+            eval_remaining_values = np.zeros(len(self.eval_horizons), dtype=np.float32)
+        else:
+            eval_remaining_values = (record.length - eval_future_indices - 1) / (record.length - 1)
+        eval_values = ((eval_remaining_values - value_min) / max(value_max - value_min, 1e-8)) * 2.0 - 1.0
 
         frame_latents = self._latents(record)
         if frame_latents.shape[0] != record.length:
@@ -265,6 +278,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
                 f"{record.length}: {record.source}"
             )
         current_latent, future_latent = select_current_future_latents(frame_latents, frame_index, horizon_idx)
+        eval_future_latents = frame_latents[torch.from_numpy(eval_future_indices)]
         context = self._context(record)
         return {
             "context": context,
@@ -276,6 +290,11 @@ class RoboTwinHDF5Dataset(BaseDataset):
             "future_state": torch.from_numpy(norm_future_state.copy()),
             "value": torch.tensor([value_normalized], dtype=torch.float32),
             "horizon_idx": torch.tensor(horizon_idx, dtype=torch.long),
+            "eval_horizon_idx": torch.from_numpy(eval_horizon_indices.copy()),
+            "eval_future_latents": eval_future_latents,
+            "eval_future_state": torch.from_numpy(norm_eval_future_state.copy()),
+            "eval_value": torch.from_numpy(eval_values.astype(np.float32, copy=False))[:, None],
+            "eval_future_index": torch.from_numpy(eval_future_indices.copy()),
             "action_loss_mask": torch.tensor(1.0, dtype=torch.float32),
             "frame_index": torch.tensor(frame_index, dtype=torch.long),
             "future_index": torch.tensor(future_index, dtype=torch.long),

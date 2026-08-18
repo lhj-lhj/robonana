@@ -58,6 +58,7 @@ config = dict(
                 action_chunk=48,
                 action_dim=14,
                 max_horizon=48,
+                eval_horizons=(12, 24, 48),
             ),
             batch_size_per_gpu=BATCH_SIZE_PER_GPU,
             num_workers=NUM_WORKERS,

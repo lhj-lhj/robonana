@@ -150,6 +150,116 @@ class RoboNanaTrainer(Trainer):
                 )
         super().print_after_train()
 
+    @staticmethod
+    def _shared_noise_flow(clean: Tensor, timestep: Tensor) -> Tensor:
+        noise = torch.randn_like(clean[:1]).expand_as(clean)
+        sigma = _expand_timestep(timestep, clean)
+        return clean * (1.0 - sigma) + noise * sigma
+
+    def _run_fixed_horizon_eval(
+        self,
+        *,
+        batch_dict: dict[str, Any],
+        context: Tensor,
+        context_mask: Tensor,
+        current: Tensor,
+        state: Tensor,
+        action: Tensor,
+        action_timestep: Tensor,
+        wm_timestep: Tensor,
+    ) -> None:
+        horizons = batch_dict["eval_horizon_idx"][0].to(device=self.device, dtype=torch.long)
+        count = horizons.numel()
+
+        def repeat_first(value: Tensor) -> Tensor:
+            return value[:1].expand(count, *value.shape[1:])
+
+        eval_future = batch_dict["eval_future_latents"][0].to(device=self.device, dtype=self.dtype)
+        eval_future_state = batch_dict["eval_future_state"][0].to(device=self.device, dtype=self.dtype).unsqueeze(1)
+        eval_value = batch_dict["eval_value"][0].to(device=self.device, dtype=self.dtype).reshape(count, 1, 1)
+        eval_action_timestep = action_timestep[:1].expand(count)
+        eval_wm_timestep = wm_timestep[:1].expand(count)
+        eval_action = repeat_first(action)
+        noisy_action = self._shared_noise_flow(eval_action, eval_action_timestep)
+        noisy_future = self._shared_noise_flow(eval_future, eval_wm_timestep)
+        noisy_future_state = self._shared_noise_flow(eval_future_state, eval_wm_timestep)
+        noisy_value = self._shared_noise_flow(eval_value, eval_wm_timestep)
+        eval_context = repeat_first(context)
+        eval_context_mask = repeat_first(context_mask)
+        eval_current = repeat_first(current)
+        eval_state = repeat_first(state)
+        context_ids = text_position_ids(count, eval_context.shape[1], self.device)
+        current_ids = image_position_ids(
+            count,
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
+            time_coord=torch.zeros_like(horizons),
+            device=self.device,
+        )
+        future_ids = image_position_ids(
+            count,
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
+            time_coord=horizons,
+            device=self.device,
+        )
+
+        model_was_training = self.model.training
+        self.model.eval()
+        try:
+            with torch.no_grad():
+                output = self.model(
+                    context=eval_context,
+                    context_ids=context_ids,
+                    current_latents=eval_current,
+                    current_ids=current_ids,
+                    noisy_future_latents=noisy_future,
+                    future_ids=future_ids,
+                    state=eval_state,
+                    noisy_pred_action=noisy_action,
+                    gt_action_cond=eval_action,
+                    horizon_idx=horizons,
+                    noisy_future_state=noisy_future_state,
+                    noisy_value=noisy_value,
+                    action_timestep=eval_action_timestep,
+                    wm_timestep=eval_wm_timestep,
+                    context_mask=eval_context_mask,
+                )
+                predicted_x0 = flow_prediction_to_x0(noisy_future, output.image, eval_wm_timestep)
+        finally:
+            if model_was_training:
+                self.model.train()
+
+        if self.vae is None:
+            return
+
+        def decode_each(tokens: Tensor) -> Tensor:
+            return torch.cat(
+                [
+                    decode_flux2_tokens(
+                        self.vae,
+                        tokens[index : index + 1],
+                        grid_height=self.grid_height,
+                        grid_width=self.grid_width,
+                    ).cpu()
+                    for index in range(tokens.shape[0])
+                ],
+                dim=0,
+            )
+
+        with torch.no_grad():
+            decoded_current = decode_each(current[:1])
+            decoded_targets = decode_each(eval_future)
+            decoded_predictions = decode_each(predicted_x0)
+        log_pixel_eval(
+            accelerator=self.accelerator,
+            step=self.cur_step,
+            current=decoded_current,
+            targets=decoded_targets,
+            predictions=decoded_predictions,
+            horizons=horizons,
+        )
+
     def forward_step(self, batch_dict: dict[str, Any]):
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
         current = batch_dict["current_latents"].to(device=self.device, dtype=self.dtype)
@@ -209,25 +319,16 @@ class RoboNanaTrainer(Trainer):
             context_mask=context_mask,
         )
 
-        if self.vae is not None and should_log_pixel_eval(self.cur_step, self.pixel_eval_interval):
-            with torch.no_grad():
-                predicted_x0 = flow_prediction_to_x0(noisy_future, output.image, wm_timestep)
-                decoded_current = decode_flux2_tokens(
-                    self.vae, current[:1], grid_height=self.grid_height, grid_width=self.grid_width
-                ).cpu()
-                decoded_target = decode_flux2_tokens(
-                    self.vae, future[:1], grid_height=self.grid_height, grid_width=self.grid_width
-                ).cpu()
-                decoded_prediction = decode_flux2_tokens(
-                    self.vae, predicted_x0[:1], grid_height=self.grid_height, grid_width=self.grid_width
-                ).cpu()
-            log_pixel_eval(
-                accelerator=self.accelerator,
-                step=self.cur_step,
-                current=decoded_current,
-                target=decoded_target,
-                prediction=decoded_prediction,
-                horizon_idx=int(horizon[0].item()),
+        if should_log_pixel_eval(self.cur_step, self.pixel_eval_interval):
+            self._run_fixed_horizon_eval(
+                batch_dict=batch_dict,
+                context=context,
+                context_mask=context_mask,
+                current=current,
+                state=state,
+                action=action,
+                action_timestep=action_timestep,
+                wm_timestep=wm_timestep,
             )
 
         return joint_flow_loss(

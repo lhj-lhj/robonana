@@ -75,13 +75,15 @@ def test_pixel_eval_stages_images_for_same_step_commit(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(Image=FakeImage))
     image = torch.zeros(1, 3, 4, 5)
+    future_images = torch.zeros(3, 3, 4, 5)
     log_pixel_eval(
         accelerator=FakeAccelerator(),
         step=200,
         current=image,
-        target=image,
-        prediction=image,
-        horizon_idx=7,
+        targets=future_images,
+        predictions=future_images,
+        horizons=torch.tensor([12, 24, 48]),
     )
     assert calls[0][1] == {"step": 200, "commit": False}
-    assert calls[0][0]["eval/current_gt_prediction"].tensor.shape == (3, 4, 15)
+    assert calls[0][0]["eval/fixed_horizon_grid"].tensor.shape == (3, 8, 20)
+    assert calls[0][0]["eval/fixed_horizons"] == "12,24,48"

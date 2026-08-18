@@ -39,6 +39,7 @@ def test_hdf5_dataset_uses_fact_tail_clip_and_cached_flux_tokens(tmp_path):
         action_chunk=4,
         max_horizon=4,
         fixed_horizon=4,
+        eval_horizons=(1, 2, 4),
     )
     sample = dataset[3]
 
@@ -46,6 +47,9 @@ def test_hdf5_dataset_uses_fact_tail_clip_and_cached_flux_tokens(tmp_path):
     assert sample["future_index"].item() == 4
     torch.testing.assert_close(sample["current_latents"], frame_latents[3])
     torch.testing.assert_close(sample["future_latents"], frame_latents[4])
+    assert sample["eval_horizon_idx"].tolist() == [1, 2, 4]
+    assert sample["eval_future_index"].tolist() == [4, 4, 4]
+    torch.testing.assert_close(sample["eval_future_latents"], frame_latents[4].expand(3, -1, -1))
     expected = torch.from_numpy(vectors[[3, 4, 4, 4]].copy())
     delta_mask = torch.tensor([True] * 6 + [False] + [True] * 6 + [False])
     expected[:, delta_mask] -= torch.from_numpy(vectors[3].copy())[delta_mask]
@@ -63,7 +67,9 @@ def test_episode_sampler_returns_valid_indices(tmp_path):
     torch.save(torch.zeros(2, 3), task_dir / "flux_cache" / "language_context.pt")
     stats_path = root / "norm_stats.json"
     stats_path.write_text(json.dumps(_stats()), encoding="utf-8")
-    dataset = RoboTwinHDF5Dataset(str(root), stats_path=str(stats_path), fixed_horizon=1)
+    dataset = RoboTwinHDF5Dataset(
+        str(root), stats_path=str(stats_path), fixed_horizon=1, eval_horizons=(1,)
+    )
     sampler = RoboTwinEpisodeSampler(dataset, infinite=False, sample_epoch_size=7, seed=3)
     indices = list(iter(sampler))
     assert len(indices) == 7
