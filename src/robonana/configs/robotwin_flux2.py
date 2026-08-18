@@ -24,6 +24,7 @@ BATCH_SIZE_PER_GPU = int(os.environ.get("ROBONANA_BATCH_SIZE", "1"))
 NUM_WORKERS = int(os.environ.get("ROBONANA_NUM_WORKERS", "4"))
 TRAIN_MODE = os.environ.get("ROBONANA_TRAIN_MODE", "full")
 PIXEL_EVAL_INTERVAL = int(os.environ.get("ROBONANA_PIXEL_EVAL_INTERVAL", "200"))
+LOG_INTERVAL = int(os.environ.get("ROBONANA_LOG_INTERVAL", "10"))
 DISABLE_CHECKPOINTING = os.environ.get("ROBONANA_DISABLE_CHECKPOINTING", "0").lower() in {
     "1",
     "true",
@@ -103,7 +104,7 @@ config = dict(
         log_with="wandb",
         tracker_project_name="robonana",
         tracker_init_kwargs=dict(wandb=dict(entity="hongjia-liu-aalto-university")),
-        log_interval=10,
+        log_interval=LOG_INTERVAL,
         pixel_eval_interval=PIXEL_EVAL_INTERVAL,
         latent_grid_height=12,
         latent_grid_width=24,
