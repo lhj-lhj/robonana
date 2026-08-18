@@ -55,6 +55,38 @@ WANDB_MODE=online .venv/bin/python scripts/smoke_train.py \
 
 Use `--wandb-mode disabled` only for unit tests that must not create a run.
 
+## Real RoboTwin training
+
+The production path now uses FACT's `Trainer`, `DefaultCollator`, sampler
+registry, optimizer/scheduler builders, Accelerate/DeepSpeed wrapping,
+checkpointing, and W&B scalar logging. RoboNana adds only a raw-HDF5 dataset
+adapter and the FLUX-specific forward step.
+
+Generate the portable episode index and FACT-compatible normalization stats
+once after the FLUX/Qwen caches are complete:
+
+```bash
+PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
+  .venv/bin/python scripts/compute_robotwin_metadata.py \
+  --dataset-root /workspace/datasets/RoboTwin/hf_dataset
+```
+
+Launch full shared-DiT training. `ROBONANA_GPU_IDS` defaults to `0,2,5,7`,
+batch size defaults to one per GPU, and multi-GPU execution reuses FACT's
+DeepSpeed ZeRO-2 config.
+
+```bash
+ROBONANA_GPU_IDS=0,2,5,7 \
+PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
+  .venv/bin/python scripts/train_robotwin.py
+```
+
+Every 200 optimizer steps, rank 0 reconstructs the training batch's predicted
+future `x0`, decodes current/ground-truth/predicted FLUX tokens through the
+frozen FLUX.2 AE, and uploads the three images plus a side-by-side panel to
+W&B. This is a cheap train-time denoising preview, not a multi-step rollout
+metric.
+
 See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact reuse boundary.
 
 ## RoboTwin FLUX caches

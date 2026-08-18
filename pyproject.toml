@@ -16,6 +16,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 fact = ["nvidia-ml-py>=13"]
+train = [
+  "accelerate>=1.10",
+  "diffusers>=0.38",
+  "h5py>=3.10",
+  "wandb>=0.27",
+]
 preprocess = [
   "diffusers>=0.38",
   "h5py>=3.10",
