@@ -57,7 +57,7 @@ def log_pixel_eval(
     predictions: Tensor,
     horizons: Tensor,
 ) -> None:
-    """Upload one row per distributed rank for its fixed-horizon predictions."""
+    """Upload one two-row panel for fixed horizons of the same current frame."""
 
     if not accelerator.is_main_process:
         return
@@ -66,41 +66,27 @@ def log_pixel_eval(
     except ImportError as error:
         raise RuntimeError("Pixel eval logging requires wandb") from error
 
-    current_images = current.detach().cpu()
+    current_image = current[0].detach().cpu()
     target_images = targets.detach().cpu()
     prediction_images = predictions.detach().cpu()
     horizon_values = [int(value) for value in horizons.detach().cpu().reshape(-1).tolist()]
-    expected_shape = (current_images.shape[0], len(horizon_values))
-    if target_images.shape[:2] != expected_shape or prediction_images.shape[:2] != expected_shape:
-        raise ValueError("targets and predictions must be [num_currents, num_horizons, C, H, W]")
-    rows = []
-    for rank_index in range(current_images.shape[0]):
-        cells = [current_images[rank_index]]
-        for horizon_index in range(len(horizon_values)):
-            cells.extend(
-                [
-                    target_images[rank_index, horizon_index],
-                    prediction_images[rank_index, horizon_index],
-                ]
-            )
-        rows.append(torch.cat(cells, dim=-1))
-    panel = torch.cat(rows, dim=-2)
-    future_columns = " | ".join(
-        column
-        for value in horizon_values
-        for column in (f"GT h={value}", f"Pred h={value}")
-    )
+    if target_images.shape[0] != len(horizon_values) or prediction_images.shape[0] != len(horizon_values):
+        raise ValueError("targets, predictions, and horizons must have the same leading length")
+    top_row = torch.cat([current_image, *target_images.unbind(0)], dim=-1)
+    bottom_row = torch.cat([current_image, *prediction_images.unbind(0)], dim=-1)
+    panel = torch.cat([top_row, bottom_row], dim=-2)
+    horizon_caption = " | ".join(f"h={value}" for value in horizon_values)
     tracker = accelerator.get_tracker("wandb", unwrap=True)
     tracker.log(
         {
             "eval/fixed_horizon_grid": wandb.Image(
                 panel,
                 caption=(
-                    f"one row per distributed rank; columns: current | {future_columns}"
+                    f"columns: current | {horizon_caption}; "
+                    "top row: current + GT futures; bottom row: current + predicted futures"
                 ),
             ),
             "eval/fixed_horizons": ",".join(str(value) for value in horizon_values),
-            "eval/num_current_frames": int(current_images.shape[0]),
         },
         step=int(step),
         commit=False,

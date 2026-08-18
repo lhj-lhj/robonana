@@ -89,12 +89,12 @@ PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
   .venv/bin/python scripts/train_robotwin.py
 ```
 
-Every 200 optimizer steps, every distributed rank evaluates a different local
-current frame at fixed horizons `idx_h = 12, 24, 48`. The latent results are
-gathered to rank 0 and decoded through the frozen FLUX.2 AE, then uploaded as
-one W&B grid with one row per rank and columns `current | GT12 | Pred12 | GT24 |
-Pred24 | GT48 | Pred48`. This is a train-time denoising preview, not a
-multi-step rollout metric.
+Every 200 optimizer steps, the trainer evaluates the same current frame at
+fixed horizons `idx_h = 12, 24, 48`. Rank 0 decodes the current frame plus all
+ground-truth and predicted FLUX tokens through the frozen FLUX.2 AE, then
+uploads one 2x4 grid to W&B: current/GT on the top row and current/prediction
+on the bottom row. This is a train-time denoising preview, not a multi-step
+rollout metric.
 
 See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact reuse boundary.
 
