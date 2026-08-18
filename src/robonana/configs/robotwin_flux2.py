@@ -24,6 +24,11 @@ BATCH_SIZE_PER_GPU = int(os.environ.get("ROBONANA_BATCH_SIZE", "1"))
 NUM_WORKERS = int(os.environ.get("ROBONANA_NUM_WORKERS", "4"))
 TRAIN_MODE = os.environ.get("ROBONANA_TRAIN_MODE", "full")
 PIXEL_EVAL_INTERVAL = int(os.environ.get("ROBONANA_PIXEL_EVAL_INTERVAL", "200"))
+DISABLE_CHECKPOINTING = os.environ.get("ROBONANA_DISABLE_CHECKPOINTING", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 DEEPSPEED_CONFIG = (
     REPO_ROOT / "third_party" / "FACT" / "fact_train" / "distributed" / "accelerate_configs" / "zero2.json"
@@ -93,6 +98,7 @@ config = dict(
         checkpoint_interval=1000,
         checkpoint_total_limit=1,
         checkpoint_save_optimizer=False,
+        disable_checkpointing=DISABLE_CHECKPOINTING,
         resume=True,
         log_with="wandb",
         tracker_project_name="robonana",

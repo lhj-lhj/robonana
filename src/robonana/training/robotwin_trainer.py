@@ -120,6 +120,11 @@ class RoboNanaTrainer(Trainer):
             sigma = self.flow_shift * sigma / (1.0 + (self.flow_shift - 1.0) * sigma)
         return sigma
 
+    def save_checkpoint_step(self) -> None:
+        if bool(self.kwargs.get("disable_checkpointing", False)):
+            return
+        super().save_checkpoint_step()
+
     def forward_step(self, batch_dict: dict[str, Any]):
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
         current = batch_dict["current_latents"].to(device=self.device, dtype=self.dtype)
