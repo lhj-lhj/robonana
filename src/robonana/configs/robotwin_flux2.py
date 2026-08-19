@@ -6,9 +6,16 @@ import os
 import sys
 from pathlib import Path
 
+# A config can be consumed by standalone DataLoader tools before the Trainer is
+# imported, so register RoboNana's dataset and samplers here explicitly.
+from robonana.data import robotwin_hdf5 as _robotwin_hdf5  # noqa: F401
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DATASET_ROOT = Path(os.environ.get("ROBONANA_DATASET_ROOT", "/workspace/datasets/RoboTwin/hf_dataset"))
+ROLLOUT_DATASET_ROOT_VALUE = os.environ.get("ROBONANA_ROLLOUT_DATASET_ROOT", "").strip()
+ROLLOUT_DATASET_ROOT = Path(ROLLOUT_DATASET_ROOT_VALUE) if ROLLOUT_DATASET_ROOT_VALUE else None
+ROLLOUT_DATASET_WEIGHT = float(os.environ.get("ROBONANA_ROLLOUT_DATASET_WEIGHT", "1.0"))
 CHECKPOINT_DIR = Path(
     os.environ.get("ROBONANA_FLUX_CHECKPOINT_DIR", REPO_ROOT / "checkpoints" / "FLUX.2-klein-base-4B")
 )
@@ -45,6 +52,38 @@ DEEPSPEED_CONFIG = (
     REPO_ROOT / "third_party" / "FACT" / "fact_train" / "distributed" / "accelerate_configs" / "zero2.json"
 )
 
+
+def _dataset_config(root: Path, task_glob: str, *, stats_path: Path | None = None) -> dict:
+    return dict(
+        _class_name="RoboTwinHDF5Dataset",
+        data_path=str(root),
+        stats_path=str(stats_path or (root / "robonana_norm_stats.json")),
+        index_path=str(root / "robonana_index.json"),
+        task_glob=task_glob,
+        action_chunk=48,
+        action_dim=14,
+        max_horizon=48,
+        rollout_horizon=ROLLOUT_HORIZON,
+        rollout_horizon_prob=ROLLOUT_HORIZON_PROB,
+        eval_horizons=(12, 24, 48),
+    )
+
+
+INITIAL_DATA_CONFIG = _dataset_config(DATASET_ROOT, "*/aloha-agilex_clean_50")
+if ROLLOUT_DATASET_ROOT is None:
+    TRAIN_DATA_CONFIG = INITIAL_DATA_CONFIG
+    TRAIN_SAMPLER = dict(type="RoboTwinEpisodeSampler", infinite=True)
+else:
+    TRAIN_DATA_CONFIG = [
+        INITIAL_DATA_CONFIG,
+        _dataset_config(ROLLOUT_DATASET_ROOT, "*/robonana_rollout"),
+    ]
+    TRAIN_SAMPLER = dict(
+        type="RoboTwinMixtureSampler",
+        infinite=True,
+        dataset_weights=[1.0, ROLLOUT_DATASET_WEIGHT],
+    )
+
 config = dict(
     project_dir=PROJECT_DIR,
     runners=["robonana.training.robotwin_trainer.RoboNanaTrainer"],
@@ -57,26 +96,14 @@ config = dict(
     ),
     dataloaders=dict(
         train=dict(
-            data_or_config=dict(
-                _class_name="RoboTwinHDF5Dataset",
-                data_path=str(DATASET_ROOT),
-                stats_path=str(DATASET_ROOT / "robonana_norm_stats.json"),
-                index_path=str(DATASET_ROOT / "robonana_index.json"),
-                task_glob="*/aloha-agilex_clean_50",
-                action_chunk=48,
-                action_dim=14,
-                max_horizon=48,
-                rollout_horizon=ROLLOUT_HORIZON,
-                rollout_horizon_prob=ROLLOUT_HORIZON_PROB,
-                eval_horizons=(12, 24, 48),
-            ),
+            data_or_config=TRAIN_DATA_CONFIG,
             batch_size_per_gpu=BATCH_SIZE_PER_GPU,
             num_workers=NUM_WORKERS,
             pin_memory=True,
             persistent_workers=NUM_WORKERS > 0,
             prefetch_factor=4 if NUM_WORKERS > 0 else None,
             transform=None,
-            sampler=dict(type="RoboTwinEpisodeSampler", infinite=True),
+            sampler=TRAIN_SAMPLER,
             collator=dict(is_equal=True),
         ),
         test=dict(),

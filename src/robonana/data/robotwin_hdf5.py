@@ -17,7 +17,12 @@ from fact_datasets.datasets.base_dataset import BaseDataset
 from fact_datasets.datasets.dataset import register_dataset
 from fact_train.samplers.build import SAMPLERS
 
-from .flux_cache import episode_cache_path, language_context_path, select_current_future_latents
+from .flux_cache import (
+    episode_cache_path,
+    episode_language_context_path,
+    language_context_path,
+    select_current_future_latents,
+)
 
 
 ALOHA_DELTA_MASK = np.asarray(
@@ -33,6 +38,7 @@ class EpisodeRecord:
     source: Path
     episode_index: int
     length: int
+    success: bool = True
 
 
 def _episode_index(path: Path) -> int:
@@ -49,6 +55,7 @@ def discover_episode_records(dataset_root: str | Path, task_glob: str) -> list[E
         for source in sorted((task_dir / "data").glob("episode*.hdf5"), key=_episode_index):
             with h5py.File(source, "r") as handle:
                 length = int(handle["joint_action/vector"].shape[0])
+                success = bool(handle.attrs.get("success", True))
             if length <= 0:
                 continue
             records.append(
@@ -58,6 +65,7 @@ def discover_episode_records(dataset_root: str | Path, task_glob: str) -> list[E
                     source=source.resolve(),
                     episode_index=_episode_index(source),
                     length=length,
+                    success=success,
                 )
             )
     if not records:
@@ -81,6 +89,7 @@ def load_episode_records(dataset_root: str | Path, task_glob: str, index_path: s
                 source=root / row["source"],
                 episode_index=int(row["episode_index"]),
                 length=int(row["length"]),
+                success=bool(row.get("success", True)),
             )
         )
     return records
@@ -215,7 +224,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
         )
 
     def _context(self, record: EpisodeRecord) -> torch.Tensor:
-        path = language_context_path(record.task_dir)
+        episode_path = episode_language_context_path(record.task_dir, record.episode_index)
+        path = episode_path if episode_path.is_file() else language_context_path(record.task_dir)
         return self._lru_get(
             self._language_cache,
             path,
@@ -272,12 +282,17 @@ class RoboTwinHDF5Dataset(BaseDataset):
 
         # Episodes are short (~140 steps). Reading the small action array once also
         # avoids h5py's strict-increasing-index restriction at tail-clipped repeats.
-        vector = np.asarray(
-            self._handle(record.source)["joint_action/vector"][:, : self.action_dim],
-            dtype=np.float32,
-        )
+        handle = self._handle(record.source)
+        vector = np.asarray(handle["joint_action/vector"][:, : self.action_dim], dtype=np.float32)
+        action_key = "policy_action/vector" if "policy_action/vector" in handle else "joint_action/vector"
+        policy_action = np.asarray(handle[action_key][:, : self.action_dim], dtype=np.float32)
+        if policy_action.shape[0] != record.length:
+            raise RuntimeError(
+                f"Policy action length {policy_action.shape[0]} disagrees with episode length "
+                f"{record.length}: {record.source}"
+            )
         state_raw = vector[frame_index]
-        action_raw = vector[action_indices]
+        action_raw = policy_action[action_indices]
         future_state_raw = vector[future_index]
 
         assert self._stats is not None
@@ -298,7 +313,10 @@ class RoboTwinHDF5Dataset(BaseDataset):
         remaining_value = 0.0 if record.length <= 1 else (record.length - future_index - 1) / (record.length - 1)
         value_min = float(np.asarray(self._stats["norm_stats"]["value"]["min"]).reshape(-1)[0])
         value_max = float(np.asarray(self._stats["norm_stats"]["value"]["max"]).reshape(-1)[0])
+        if not record.success:
+            remaining_value += 1.0
         value_normalized = ((remaining_value - value_min) / max(value_max - value_min, 1e-8)) * 2.0 - 1.0
+        value_normalized = float(np.clip(value_normalized, -1.0, 1.0))
 
         frame_latents = self._latents(record)
         if frame_latents.shape[0] != record.length:
@@ -318,7 +336,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
             "future_state": torch.from_numpy(norm_future_state.copy()),
             "value": torch.tensor([value_normalized], dtype=torch.float32),
             "horizon_idx": torch.tensor(horizon_idx, dtype=torch.long),
-            "action_loss_mask": torch.tensor(1.0, dtype=torch.float32),
+            "action_loss_mask": torch.tensor(float(record.success), dtype=torch.float32),
+            "failure_episode_mask": torch.tensor(float(not record.success), dtype=torch.float32),
             "sample_index": torch.tensor(index, dtype=torch.long),
             "frame_index": torch.tensor(frame_index, dtype=torch.long),
             "future_index": torch.tensor(future_index, dtype=torch.long),
@@ -362,6 +381,82 @@ class RoboTwinEpisodeSampler(torch.utils.data.Sampler[int]):
             lengths = self.dataset.episode_stops[episodes] - self.dataset.episode_starts[episodes]
             offsets = (rng.random(self.total_size) * lengths).astype(np.int64)
             indices = self.dataset.episode_starts[episodes] + offsets
+            if self.shuffle:
+                rng.shuffle(indices)
+            yield from indices.tolist()
+            if not self.infinite:
+                return
+
+
+@SAMPLERS.register
+class RoboTwinMixtureSampler(torch.utils.data.Sampler[int]):
+    """Episode-uniform sampling across physically separate RoboTwin datasets."""
+
+    def __init__(
+        self,
+        dataset,
+        batch_size: int | None = None,
+        shuffle: bool = True,
+        infinite: bool = True,
+        seed: int = 6666,
+        dataset_weights: list[float] | None = None,
+        sample_epoch_size: int | None = None,
+    ) -> None:
+        children = getattr(dataset, "datasets", None)
+        if not children:
+            raise TypeError("RoboTwinMixtureSampler requires a ConcatDataset")
+        self.dataset = dataset
+        self.children = list(children)
+        for child in self.children:
+            if not isinstance(child, RoboTwinHDF5Dataset):
+                raise TypeError(
+                    f"RoboTwinMixtureSampler only supports RoboTwinHDF5Dataset children, got {type(child)}"
+                )
+            child._ensure_index()
+        weights = np.asarray(
+            dataset_weights if dataset_weights is not None else [1.0] * len(self.children),
+            dtype=np.float64,
+        )
+        if weights.shape != (len(self.children),) or np.any(weights < 0) or weights.sum() <= 0:
+            raise ValueError("dataset_weights must be non-negative with one positive value per dataset")
+        self.dataset_probabilities = weights / weights.sum()
+        self.offsets = np.cumsum([0] + [len(child) for child in self.children[:-1]], dtype=np.int64)
+        self.shuffle = bool(shuffle)
+        self.infinite = bool(infinite)
+        self.seed = int(seed)
+        self.epoch = 0
+        size = int(sample_epoch_size or sum(len(child) for child in self.children))
+        self.total_size = size if batch_size is None else int(np.ceil(size / batch_size) * batch_size)
+
+    def __len__(self) -> int:
+        return self.total_size
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __iter__(self) -> Iterator[int]:
+        while True:
+            rng = np.random.default_rng(self.seed + self.epoch)
+            self.epoch += 1
+            child_indices = rng.choice(
+                len(self.children),
+                size=self.total_size,
+                p=self.dataset_probabilities,
+            )
+            indices = np.empty(self.total_size, dtype=np.int64)
+            for child_index, child in enumerate(self.children):
+                mask = child_indices == child_index
+                count = int(mask.sum())
+                if count == 0:
+                    continue
+                episode_positions = rng.integers(0, len(child.records), size=count)
+                lengths = child.episode_stops[episode_positions] - child.episode_starts[episode_positions]
+                frame_offsets = (rng.random(count) * lengths).astype(np.int64)
+                indices[mask] = (
+                    self.offsets[child_index]
+                    + child.episode_starts[episode_positions]
+                    + frame_offsets
+                )
             if self.shuffle:
                 rng.shuffle(indices)
             yield from indices.tolist()

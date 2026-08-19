@@ -12,6 +12,24 @@ from torch import Tensor
 CACHE_SCHEMA_VERSION = 1
 LANGUAGE_CONTEXT_NAME = "language_context.pt"
 LATENT_FOLDER_NAME = "latents"
+EPISODE_LANGUAGE_FOLDER_NAME = "language"
+
+
+def instruction_for_episode(task_dir: str | Path, episode_index: int) -> tuple[str, Path | None]:
+    """Return the recorded instruction for one episode, with task fallback."""
+
+    task_dir = Path(task_dir)
+    path = task_dir / "instructions" / f"episode{episode_index}.json"
+    if path.is_file():
+        with path.open("r", encoding="utf-8") as handle:
+            row = json.load(handle)
+        for split in ("seen", "unseen"):
+            prompts = row.get(split, [])
+            if isinstance(prompts, list):
+                for prompt in prompts:
+                    if isinstance(prompt, str) and prompt.strip():
+                        return prompt.strip(), path
+    return canonical_instruction(task_dir)
 
 
 def canonical_instruction(task_dir: str | Path) -> tuple[str, Path | None]:
@@ -37,6 +55,15 @@ def episode_cache_path(task_dir: str | Path, episode_index: int) -> Path:
 
 def language_context_path(task_dir: str | Path) -> Path:
     return Path(task_dir) / "flux_cache" / LANGUAGE_CONTEXT_NAME
+
+
+def episode_language_context_path(task_dir: str | Path, episode_index: int) -> Path:
+    return (
+        Path(task_dir)
+        / "flux_cache"
+        / EPISODE_LANGUAGE_FOLDER_NAME
+        / f"episode_{episode_index:06d}.pt"
+    )
 
 
 def select_current_future_latents(

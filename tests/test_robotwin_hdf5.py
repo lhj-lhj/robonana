@@ -4,7 +4,12 @@ import h5py
 import numpy as np
 import torch
 
-from robonana.data.robotwin_hdf5 import RoboTwinEpisodeSampler, RoboTwinHDF5Dataset
+from fact_datasets.datasets import ConcatDataset
+from robonana.data.robotwin_hdf5 import (
+    RoboTwinEpisodeSampler,
+    RoboTwinHDF5Dataset,
+    RoboTwinMixtureSampler,
+)
 
 
 def _stats(dim=14):
@@ -93,3 +98,60 @@ def test_horizon_sampler_mixes_rollout_anchor_and_uniform(monkeypatch):
     monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(0.75))
     monkeypatch.setattr(torch, "randint", lambda *args, **kwargs: torch.tensor(37))
     assert dataset._sample_horizon() == 37
+
+
+def _write_minimal_dataset(root, task, variant, *, success=True, policy_value=None):
+    task_dir = root / task / variant
+    (task_dir / "data").mkdir(parents=True)
+    (task_dir / "flux_cache" / "latents").mkdir(parents=True)
+    (task_dir / "flux_cache" / "language").mkdir(parents=True)
+    states = np.zeros((3, 14), dtype=np.float32)
+    with h5py.File(task_dir / "data" / "episode0.hdf5", "w") as handle:
+        handle.attrs["success"] = success
+        handle.create_dataset("joint_action/vector", data=states)
+        if policy_value is not None:
+            handle.create_dataset(
+                "policy_action/vector",
+                data=np.full((3, 14), policy_value, dtype=np.float32),
+            )
+    torch.save(torch.zeros(3, 2, 4), task_dir / "flux_cache/latents/episode_000000.pt")
+    torch.save(torch.zeros(2, 3), task_dir / "flux_cache/language/episode_000000.pt")
+    stats_path = root / "norm_stats.json"
+    stats_path.write_text(json.dumps(_stats()), encoding="utf-8")
+    return RoboTwinHDF5Dataset(
+        str(root),
+        stats_path=str(stats_path),
+        task_glob=f"*/{variant}",
+        fixed_horizon=1,
+        eval_horizons=(1,),
+    )
+
+
+def test_failure_rollout_uses_policy_action_and_disables_action_loss(tmp_path):
+    dataset = _write_minimal_dataset(
+        tmp_path / "rollout",
+        "task",
+        "robonana_rollout",
+        success=False,
+        policy_value=2.0,
+    )
+    sample = dataset[0]
+    torch.testing.assert_close(sample["action"], torch.full((48, 14), 2.0))
+    assert sample["action_loss_mask"].item() == 0.0
+    assert sample["failure_episode_mask"].item() == 1.0
+
+
+def test_mixture_sampler_keeps_roots_separate_and_respects_weights(tmp_path):
+    initial = _write_minimal_dataset(tmp_path / "initial", "task", "aloha-agilex_clean_50")
+    rollout = _write_minimal_dataset(tmp_path / "rollout", "task", "robonana_rollout")
+    combined = ConcatDataset([initial, rollout])
+    sampler = RoboTwinMixtureSampler(
+        combined,
+        infinite=False,
+        sample_epoch_size=8,
+        dataset_weights=[0.0, 1.0],
+        seed=4,
+    )
+    indices = list(sampler)
+    assert len(indices) == 8
+    assert all(index >= len(initial) for index in indices)

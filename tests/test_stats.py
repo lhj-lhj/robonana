@@ -23,3 +23,19 @@ def test_metadata_uses_fact_tail_clipped_action_chunks(tmp_path):
     # Delta joint dimensions see [0, 2, 0, 0], while grippers remain [0, 2, 2, 2].
     assert stats["norm_stats"]["action"]["mean"][0] == 0.5
     assert stats["norm_stats"]["action"]["mean"][6] == 1.5
+
+
+def test_metadata_records_failure_and_uses_executed_policy_action(tmp_path):
+    root = tmp_path / "rollouts"
+    task_dir = root / "task" / "robonana_rollout"
+    (task_dir / "data").mkdir(parents=True)
+    with h5py.File(task_dir / "data" / "episode0.hdf5", "w") as handle:
+        handle.attrs["success"] = False
+        handle.create_dataset("joint_action/vector", data=np.zeros((2, 14), dtype=np.float32))
+        handle.create_dataset("policy_action/vector", data=np.full((2, 14), 3.0, dtype=np.float32))
+
+    records = discover_episode_records(root, "*/robonana_rollout")
+    index, stats = compute_robotwin_metadata(records, dataset_root=root, action_chunk=1)
+
+    assert index["episodes"][0]["failure_episode"] is True
+    assert stats["norm_stats"]["action"]["mean"][0] == 3.0

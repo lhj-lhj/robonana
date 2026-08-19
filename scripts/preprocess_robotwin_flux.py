@@ -10,6 +10,7 @@ needed because cache files are independent.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import re
@@ -39,6 +40,8 @@ from robonana.data.flux_cache import (
     CACHE_SCHEMA_VERSION,
     canonical_instruction,
     episode_cache_path,
+    episode_language_context_path,
+    instruction_for_episode,
     language_context_path,
 )
 from robonana.encoding import LocalQwen3Embedder, encode_flux2_image_tokens
@@ -116,19 +119,42 @@ def write_manifest(task_dir: Path, checkpoint: Path) -> None:
 
 
 @torch.inference_mode()
-def cache_language(tasks: Iterable[Path], checkpoint: Path, device: torch.device, overwrite: bool) -> None:
-    pending = [task for task in tasks if overwrite or not language_context_path(task).is_file()]
+def cache_language(
+    tasks: Iterable[Path],
+    checkpoint: Path,
+    device: torch.device,
+    overwrite: bool,
+    *,
+    per_episode: bool = False,
+) -> None:
+    tasks = list(tasks)
+    if per_episode:
+        pending = []
+        for task_dir in tasks:
+            for source in sorted((task_dir / "data").glob("episode*.hdf5"), key=episode_index):
+                index = episode_index(source)
+                output = episode_language_context_path(task_dir, index)
+                if overwrite or not output.is_file():
+                    prompt, prompt_source = instruction_for_episode(task_dir, index)
+                    pending.append((task_dir, index, prompt, prompt_source, output))
+    else:
+        pending = []
+        for task_dir in tasks:
+            output = language_context_path(task_dir)
+            if overwrite or not output.is_file():
+                prompt, prompt_source = canonical_instruction(task_dir)
+                pending.append((task_dir, None, prompt, prompt_source, output))
     if not pending:
         print("[language] all contexts already exist", flush=True)
         return
     print(f"[language] loading Qwen3 from {checkpoint / 'text_encoder'} on {device}", flush=True)
     embedder = LocalQwen3Embedder(checkpoint, device)
-    for task_dir in pending:
-        prompt, source_path = canonical_instruction(task_dir)
+    for task_dir, index, prompt, source_path, output in pending:
         context = embedder([prompt])[0].detach().to(device="cpu", dtype=torch.bfloat16).contiguous()
         if tuple(context.shape) != (MAX_LENGTH, 7680):
             raise RuntimeError(f"Unexpected Qwen3 context shape for {task_dir}: {tuple(context.shape)}")
-        atomic_torch_save(context, language_context_path(task_dir))
+        atomic_torch_save(context, output)
+        metadata_name = "language_context.json" if index is None else f"language/episode_{index:06d}.json"
         atomic_json_save(
             {
                 "prompt": prompt,
@@ -136,9 +162,14 @@ def cache_language(tasks: Iterable[Path], checkpoint: Path, device: torch.device
                 "shape": list(context.shape),
                 "dtype": str(context.dtype).removeprefix("torch."),
             },
-            task_dir / "flux_cache" / "language_context.json",
+            task_dir / "flux_cache" / metadata_name,
         )
-        print(f"[language] {task_dir.parent.name}: {prompt}", flush=True)
+        episode_label = "shared" if index is None else f"episode{index}"
+        print(f"[language] {task_dir.parent.name}/{episode_label}: {prompt}", flush=True)
+    del embedder
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
 
 def decode_rgb_batch(dataset: h5py.Dataset, start: int, stop: int) -> torch.Tensor:
@@ -247,6 +278,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tasks", type=int, default=0)
     parser.add_argument("--max-episodes-per-task", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--per-episode-language",
+        action="store_true",
+        help="Cache each episode instruction separately (required for policy rollouts).",
+    )
     return parser.parse_args()
 
 
@@ -267,7 +303,13 @@ def main() -> None:
             write_manifest(task_dir, args.checkpoint)
         print(f"Discovered {len(tasks)} tasks under {args.dataset_root}", flush=True)
     if args.stage in ("all", "language") and rank == 0:
-        cache_language(tasks, args.checkpoint, device, args.overwrite)
+        cache_language(
+            tasks,
+            args.checkpoint,
+            device,
+            args.overwrite,
+            per_episode=args.per_episode_language,
+        )
     if args.stage in ("all", "images"):
         cache_images(
             tasks,

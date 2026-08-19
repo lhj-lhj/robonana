@@ -183,8 +183,14 @@ class RoboNanaTrainer(Trainer):
 
     def _run_fixed_horizon_eval(self, payload: dict[str, Tensor]) -> None:
         dataset = self.dataloader.dataset
-        while not hasattr(dataset, "load_eval_future_latents") and hasattr(dataset, "dataset"):
-            dataset = dataset.dataset
+        while not hasattr(dataset, "load_eval_future_latents"):
+            if hasattr(dataset, "dataset"):
+                dataset = dataset.dataset
+            elif getattr(dataset, "datasets", None):
+                # Pixel monitoring always uses the clean initial-data child.
+                dataset = dataset.datasets[0]
+            else:
+                break
         if not hasattr(dataset, "load_eval_future_latents") or not hasattr(dataset, "eval_horizons"):
             raise TypeError("pixel eval requires RoboTwinHDF5Dataset eval accessors")
         horizons = torch.tensor(dataset.eval_horizons, device=self.device, dtype=torch.long)

@@ -159,3 +159,58 @@ SERVER_TIMEOUT_MS=600000 SERVER_WAIT_SECONDS=600 EVAL_VIDEO_LOG=0 \
 bash third_party/FACT/evaluation/robotwin/launch_client.sh \
   beat_block_hammer demo_clean step100 0
 ```
+
+## Separate rollout collection and retraining
+
+Policy-generated data is never written into the initial RoboTwin root.  Each
+collection has its own dataset root:
+
+```text
+/workspace/hongjia/robonana_rollouts/<collection>/
+  robonana_collection.json
+  robonana_index.json
+  robonana_norm_stats.json
+  robonana_ready.json
+  <task>/robonana_rollout/
+    data/episode0.hdf5
+    instructions/episode0.json
+    metadata/episode0.json
+    flux_cache/language/episode_000000.pt
+    flux_cache/latents/episode_000000.pt
+```
+
+One command runs RoboTwin, records aligned three-view RGB/state/executed action,
+stops its temporary inference server, builds the episode index, copies the
+initial normalization contract, and generates episode-level Qwen3 plus FLUX AE
+caches:
+
+```bash
+export ROBONANA_TRAINED_CHECKPOINT="$PWD/experiments/<run>/models/<checkpoint>/transformer/diffusion_pytorch_model.bin"
+TEST_NUM=1 PORT=8095 \
+ROBONANA_SERVER_GPU_IDS=6,7 \
+ROBONANA_CLIENT_GPU_ID=7 \
+ROBONANA_PREPARE_GPU_ID=7 \
+bash scripts/collect_prepare_robotwin_rollouts.sh \
+  beat_block_hammer demo_clean step1000_failures 0
+```
+
+The writer rejects any rollout root nested inside
+`/workspace/datasets/RoboTwin/hf_dataset`.  It stores observed state in
+`joint_action/vector` and the action actually sent to RoboTwin separately in
+`policy_action/vector`.  Failed episodes carry `success=false`, use the FACT
+failure value penalty, and return `action_loss_mask=0` in the dataset.
+
+To continue training, restart the same experiment directory with the collection
+enabled.  The checkpoint resumes normally, while the initial and rollout files
+remain in separate roots and are joined only by the sampler:
+
+```bash
+export ROBONANA_PROJECT_DIR="$PWD/experiments/<run>"
+export ROBONANA_ROLLOUT_DATASET_ROOT=/workspace/hongjia/robonana_rollouts/step1000_failures
+export ROBONANA_ROLLOUT_DATASET_WEIGHT=1.0
+bash scripts/run_robotwin_train.sh
+```
+
+`ROBONANA_ROLLOUT_DATASET_WEIGHT` is the rollout collection's sampling weight
+relative to the initial dataset's fixed weight of `1.0`.  Restart training after
+adding episodes so DataLoader workers rebuild the collection index.

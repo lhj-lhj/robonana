@@ -59,10 +59,12 @@ def compute_robotwin_metadata(
     for record in records:
         with h5py.File(record.source, "r") as handle:
             vector = np.asarray(handle["joint_action/vector"], dtype=np.float32)[:, :action_dim]
+            action_key = "policy_action/vector" if "policy_action/vector" in handle else "joint_action/vector"
+            policy_action = np.asarray(handle[action_key], dtype=np.float32)[:, :action_dim]
         state_moments.update(vector)
         time = np.arange(record.length, dtype=np.int64)[:, None]
         offsets = np.arange(action_chunk, dtype=np.int64)[None]
-        chunk = vector[np.clip(time + offsets, 0, record.length - 1)].copy()
+        chunk = policy_action[np.clip(time + offsets, 0, record.length - 1)].copy()
         chunk[:, :, delta_mask] -= vector[:, None, delta_mask]
         action_moments.update(chunk)
 
@@ -75,6 +77,8 @@ def compute_robotwin_metadata(
                 "source": str(record.source.relative_to(root)),
                 "episode_index": record.episode_index,
                 "length": record.length,
+                "success": record.success,
+                "failure_episode": not record.success,
             }
             for record in records
         ],
