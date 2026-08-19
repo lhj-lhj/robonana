@@ -195,10 +195,7 @@ class RoboNanaTrainer(Trainer):
         action: Tensor,
     ) -> None:
         self._pending_pixel_eval = {
-            "horizons": batch_dict["eval_horizon_idx"][0].to(device=self.device, dtype=torch.long),
-            "future": batch_dict["eval_future_latents"][0].to(device=self.device, dtype=self.dtype),
-            "future_state": batch_dict["eval_future_state"][0].to(device=self.device, dtype=self.dtype),
-            "value": batch_dict["eval_value"][0].to(device=self.device, dtype=self.dtype),
+            "sample_index": batch_dict["sample_index"][0].detach().cpu(),
             "context": context[:1].detach(),
             "context_mask": context_mask[:1].detach(),
             "current": current[:1].detach(),
@@ -207,7 +204,12 @@ class RoboNanaTrainer(Trainer):
         }
 
     def _run_fixed_horizon_eval(self, payload: dict[str, Tensor]) -> None:
-        horizons = payload["horizons"]
+        dataset = self.dataloader.dataset
+        while not hasattr(dataset, "load_eval_future_latents") and hasattr(dataset, "dataset"):
+            dataset = dataset.dataset
+        if not hasattr(dataset, "load_eval_future_latents") or not hasattr(dataset, "eval_horizons"):
+            raise TypeError("pixel eval requires RoboTwinHDF5Dataset eval accessors")
+        horizons = torch.tensor(dataset.eval_horizons, device=self.device, dtype=torch.long)
         count = horizons.numel()
         if self.is_main_process:
             self.logger.info(
@@ -220,14 +222,14 @@ class RoboNanaTrainer(Trainer):
         def repeat_first(value: Tensor) -> Tensor:
             return value[:1].expand(count, *value.shape[1:])
 
-        eval_future = payload["future"]
-        eval_future_state = payload["future_state"].unsqueeze(1)
-        eval_value = payload["value"].reshape(count, 1, 1)
         eval_context = repeat_first(payload["context"])
         eval_context_mask = repeat_first(payload["context_mask"])
         eval_current = repeat_first(payload["current"])
         eval_state = repeat_first(payload["state"])
         action = payload["action"]
+        future_template = eval_current
+        future_state_template = eval_state
+        value_template = torch.empty(count, 1, 1, device=self.device, dtype=self.dtype)
         context_ids = text_position_ids(count, eval_context.shape[1], self.device)
         current_ids = image_position_ids(
             count,
@@ -258,9 +260,9 @@ class RoboNanaTrainer(Trainer):
                 # independent of every dummy suffix token supplied here.
                 action_noise = torch.randn_like(action[:1])
                 dummy_gt_action = torch.zeros_like(action_noise)
-                dummy_future = torch.zeros_like(eval_future[:1])
-                dummy_future_state = torch.zeros_like(eval_future_state[:1])
-                dummy_value = torch.zeros_like(eval_value[:1])
+                dummy_future = torch.zeros_like(future_template[:1])
+                dummy_future_state = torch.zeros_like(future_state_template[:1])
+                dummy_value = torch.zeros_like(value_template[:1])
                 clean_time = torch.zeros(1, device=self.device, dtype=torch.float32)
 
                 def predict_action(sampled_action: Tensor, sigma: Tensor) -> Tensor:
@@ -286,11 +288,9 @@ class RoboNanaTrainer(Trainer):
 
                 # Stage 2 uses the fully denoised Stage-1 action as the clean
                 # teacher-forcing track and jointly denoises world targets.
-                future_noise = torch.randn_like(eval_future[:1]).expand_as(eval_future).clone()
-                future_state_noise = (
-                    torch.randn_like(eval_future_state[:1]).expand_as(eval_future_state).clone()
-                )
-                value_noise = torch.randn_like(eval_value[:1]).expand_as(eval_value).clone()
+                future_noise = torch.randn_like(future_template)
+                future_state_noise = torch.randn_like(future_state_template)
+                value_noise = torch.randn_like(value_template)
                 clean_action_time = torch.zeros(count, device=self.device, dtype=torch.float32)
 
                 def predict_world(
@@ -334,6 +334,15 @@ class RoboNanaTrainer(Trainer):
         finally:
             if model_was_training:
                 self.model.train()
+
+        # Ground-truth future images are visualization-only. They are loaded
+        # after pure-noise inference and only on periodic eval steps.
+        eval_future = dataset.load_eval_future_latents(
+            int(payload["sample_index"].item()),
+            horizons.detach().cpu().tolist(),
+        ).to(device=self.device, dtype=self.dtype)
+        if self.is_main_process:
+            self.logger.info("Lazily loaded GT future latents after pure-noise sampling")
 
         if self.vae_checkpoint_dir is None:
             raise RuntimeError("VAE checkpoint directory was not configured")

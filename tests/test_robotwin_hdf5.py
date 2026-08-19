@@ -45,11 +45,12 @@ def test_hdf5_dataset_uses_fact_tail_clip_and_cached_flux_tokens(tmp_path):
 
     assert sample["horizon_idx"].item() == 4
     assert sample["future_index"].item() == 4
+    assert sample["sample_index"].item() == 3
     torch.testing.assert_close(sample["current_latents"], frame_latents[3])
     torch.testing.assert_close(sample["future_latents"], frame_latents[4])
-    assert sample["eval_horizon_idx"].tolist() == [1, 2, 4]
-    assert sample["eval_future_index"].tolist() == [4, 4, 4]
-    torch.testing.assert_close(sample["eval_future_latents"], frame_latents[4].expand(3, -1, -1))
+    assert not any(key.startswith("eval_") for key in sample)
+    eval_future = dataset.load_eval_future_latents(3, (1, 2, 4))
+    torch.testing.assert_close(eval_future, frame_latents[4].expand(3, -1, -1))
     expected = torch.from_numpy(vectors[[3, 4, 4, 4]].copy())
     delta_mask = torch.tensor([True] * 6 + [False] + [True] * 6 + [False])
     expected[:, delta_mask] -= torch.from_numpy(vectors[3].copy())[delta_mask]

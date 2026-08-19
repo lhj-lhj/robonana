@@ -222,12 +222,34 @@ class RoboTwinHDF5Dataset(BaseDataset):
             return self.fixed_horizon
         return int(torch.randint(1, self.max_horizon + 1, ()).item())
 
+    def load_eval_future_latents(
+        self,
+        sample_index: int,
+        horizons: tuple[int, ...] | list[int] | np.ndarray,
+    ) -> torch.Tensor:
+        """Load fixed-horizon GT images only when a periodic eval requests them."""
+
+        record, frame_index = self._locate(int(sample_index))
+        horizon_indices = np.asarray(horizons, dtype=np.int64).reshape(-1)
+        if (
+            horizon_indices.size == 0
+            or np.any(horizon_indices < 1)
+            or np.any(horizon_indices > self.max_horizon)
+        ):
+            raise ValueError("eval horizons must lie in [1, max_horizon]")
+        future_indices = np.minimum(frame_index + horizon_indices, record.length - 1)
+        frame_latents = self._latents(record)
+        if frame_latents.shape[0] != record.length:
+            raise RuntimeError(
+                f"FLUX cache length {frame_latents.shape[0]} disagrees with HDF5 length "
+                f"{record.length}: {record.source}"
+            )
+        return frame_latents[torch.from_numpy(future_indices)]
+
     def _get_data(self, index: int) -> dict[str, Any]:
         record, frame_index = self._locate(int(index))
         horizon_idx = self._sample_horizon()
         future_index = min(frame_index + horizon_idx, record.length - 1)
-        eval_horizon_indices = np.asarray(self.eval_horizons, dtype=np.int64)
-        eval_future_indices = np.minimum(frame_index + eval_horizon_indices, record.length - 1)
         action_indices = np.clip(
             frame_index + np.arange(self.action_chunk, dtype=np.int64),
             0,
@@ -243,7 +265,6 @@ class RoboTwinHDF5Dataset(BaseDataset):
         state_raw = vector[frame_index]
         action_raw = vector[action_indices]
         future_state_raw = vector[future_index]
-        eval_future_state_raw = vector[eval_future_indices]
 
         assert self._stats is not None
         state_mean = _stats_array(self._stats, "observation.state", "mean", self.action_dim)
@@ -258,27 +279,20 @@ class RoboTwinHDF5Dataset(BaseDataset):
         delta[:, delta_mask] -= state_raw[None, delta_mask]
         norm_state = (state_raw - state_mean) / state_std
         norm_future_state = (future_state_raw - state_mean) / state_std
-        norm_eval_future_state = (eval_future_state_raw - state_mean) / state_std
         norm_action = (delta - action_mean) / action_std
 
         remaining_value = 0.0 if record.length <= 1 else (record.length - future_index - 1) / (record.length - 1)
         value_min = float(np.asarray(self._stats["norm_stats"]["value"]["min"]).reshape(-1)[0])
         value_max = float(np.asarray(self._stats["norm_stats"]["value"]["max"]).reshape(-1)[0])
         value_normalized = ((remaining_value - value_min) / max(value_max - value_min, 1e-8)) * 2.0 - 1.0
-        if record.length <= 1:
-            eval_remaining_values = np.zeros(len(self.eval_horizons), dtype=np.float32)
-        else:
-            eval_remaining_values = (record.length - eval_future_indices - 1) / (record.length - 1)
-        eval_values = ((eval_remaining_values - value_min) / max(value_max - value_min, 1e-8)) * 2.0 - 1.0
 
         frame_latents = self._latents(record)
         if frame_latents.shape[0] != record.length:
             raise RuntimeError(
                 f"FLUX cache length {frame_latents.shape[0]} disagrees with HDF5 length "
                 f"{record.length}: {record.source}"
-            )
+        )
         current_latent, future_latent = select_current_future_latents(frame_latents, frame_index, horizon_idx)
-        eval_future_latents = frame_latents[torch.from_numpy(eval_future_indices)]
         context = self._context(record)
         return {
             "context": context,
@@ -290,12 +304,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
             "future_state": torch.from_numpy(norm_future_state.copy()),
             "value": torch.tensor([value_normalized], dtype=torch.float32),
             "horizon_idx": torch.tensor(horizon_idx, dtype=torch.long),
-            "eval_horizon_idx": torch.from_numpy(eval_horizon_indices.copy()),
-            "eval_future_latents": eval_future_latents,
-            "eval_future_state": torch.from_numpy(norm_eval_future_state.copy()),
-            "eval_value": torch.from_numpy(eval_values.astype(np.float32, copy=False))[:, None],
-            "eval_future_index": torch.from_numpy(eval_future_indices.copy()),
             "action_loss_mask": torch.tensor(1.0, dtype=torch.float32),
+            "sample_index": torch.tensor(index, dtype=torch.long),
             "frame_index": torch.tensor(frame_index, dtype=torch.long),
             "future_index": torch.tensor(future_index, dtype=torch.long),
             "episode_length": torch.tensor(record.length, dtype=torch.long),

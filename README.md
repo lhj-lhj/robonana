@@ -101,6 +101,10 @@ track, then jointly samples future image/state/value from pure noise with
 20-step Flow-Euler. Set `ROBONANA_NUM_INFERENCE_STEPS` to use a different
 shared eval/inference step count.
 
+Ordinary training batches do not carry fixed-horizon eval targets. They retain
+only a scalar sample index; after periodic pure-noise sampling completes, the
+three GT future latents are loaded lazily for W&B comparison only.
+
 The launcher tees combined stdout/stderr to a timestamped file under
 `$ROBONANA_PROJECT_DIR/logs`. In addition to the normal 1000-step checkpoint
 interval, step 100 is saved by default; override it with a comma-separated

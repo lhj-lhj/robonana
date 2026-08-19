@@ -45,16 +45,28 @@ def main() -> int:
         "action": [1, 48, 14],
         "future_state": [1, 14],
         "value": [1, 1],
-        "eval_horizon_idx": [1, 3],
-        "eval_future_latents": [1, 3, 288, 128],
-        "eval_future_state": [1, 3, 14],
-        "eval_value": [1, 3, 1],
-        "eval_future_index": [1, 3],
+        "sample_index": [1],
     }
     for key, shape in expected.items():
         if shapes[key]["shape"] != shape:
             raise RuntimeError(f"unexpected {key} shape: {shapes[key]['shape']} != {shape}")
-    print(json.dumps({"dataset_length": len(dataset), "batch": shapes}, indent=2))
+    if any(key.startswith("eval_") for key in batch):
+        raise RuntimeError("ordinary training batches must not carry periodic eval targets")
+    eval_future = dataset.load_eval_future_latents(
+        int(batch["sample_index"][0].item()), dataset.eval_horizons
+    )
+    if list(eval_future.shape) != [3, 288, 128]:
+        raise RuntimeError(f"unexpected lazy eval future shape: {list(eval_future.shape)}")
+    print(
+        json.dumps(
+            {
+                "dataset_length": len(dataset),
+                "batch": shapes,
+                "lazy_eval_future_latents": list(eval_future.shape),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
