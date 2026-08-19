@@ -25,35 +25,12 @@ All verification is run on `pyromind-west1-58` under `/workspace/hongjia/robonan
 bash scripts/verify_remote.sh
 ```
 
-The checkpoint-backed BS=1 graph smoke test loads the official FLUX.2 Klein
-Base 4B DiT checkpoint (not WAN2.2):
-
-```bash
-CUDA_VISIBLE_DEVICES=<free-gpu> PYTHONPATH="$PWD/src:$PWD/third_party/flux2/src" \
-  .venv/bin/python scripts/smoke_train.py \
-  --checkpoint checkpoints/FLUX.2-klein-base-4B/flux-2-klein-base-4b.safetensors \
-  --batch-size 1 --train-mode adapters --memory-limit-gib 14
-```
-
-The script checks free memory before creating a CUDA tensor. `adapters` is a
-low-memory wiring test; the intended shared-DiT experiment uses `--train-mode
-full` and is refused when there is not enough room for weights, gradients, and
-AdamW state.
-
 ## W&B tracking
 
-Training and checkpoint-backed smoke runs upload to the `robonana` project in
-the `hongjia-liu-aalto-university` entity by default. Authenticate once on each
+Training uploads to the `robonana` project in the
+`hongjia-liu-aalto-university` entity by default. Authenticate once on each
 training host with `wandb login`; never place the API key in Git, Notion, a
-launcher, or a config file committed to this repository.
-
-```bash
-WANDB_MODE=online .venv/bin/python scripts/smoke_train.py \
-  --checkpoint checkpoints/FLUX.2-klein-base-4B/flux-2-klein-base-4b.safetensors \
-  --batch-size 1 --train-mode adapters
-```
-
-Use `--wandb-mode disabled` only for unit tests that must not create a run.
+launcher, or a committed config file.
 
 ## Real RoboTwin training
 
@@ -68,14 +45,6 @@ once after the FLUX/Qwen caches are complete:
 ```bash
 PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
   .venv/bin/python scripts/compute_robotwin_metadata.py \
-  --dataset-root /workspace/datasets/RoboTwin/hf_dataset
-```
-
-Verify one real batch before allocating the 4B backbone:
-
-```bash
-PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
-  .venv/bin/python scripts/smoke_real_dataloader.py \
   --dataset-root /workspace/datasets/RoboTwin/hf_dataset
 ```
 

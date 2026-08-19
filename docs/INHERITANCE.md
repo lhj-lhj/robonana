@@ -3,23 +3,21 @@
 ## Runtime graph
 
 ```text
-FACT LeRobotDataset
-  -> FACT WATransformsLerobot
-    -> RoboNanaTransforms (adds horizon_idx only)
-      -> Flux2FACTModel (subclasses official Flux2)
-        -> existing Flux2.double_blocks
-        -> existing Flux2.single_blocks
-        -> existing Flux2.final_layer for image output
-        -> small action/state/value heads
+RoboTwinHDF5Dataset
+  -> FACT sampler + DefaultCollator + Trainer
+    -> Flux2FACTModel (subclasses official Flux2)
+      -> existing Flux2.double_blocks
+      -> existing Flux2.single_blocks
+      -> existing Flux2.final_layer for image output
+      -> small action/state/value heads
 ```
 
 ## Reused without copying
 
 | Upstream | Reused code | robonana extension |
 |---|---|---|
-| FACT | `fact_datasets` and RoboTwin sampling | none |
-| FACT | `WATransformsLerobot` normalization/failure fields | `RoboNanaTransforms` adds `horizon_idx` |
-| FACT | `CasualWATrainer` orchestration contract | later thin trainer override |
+| FACT | sampler registry and `DefaultCollator` | raw-HDF5 RoboTwin dataset adapter |
+| FACT | `Trainer` loop, Accelerate/DeepSpeed, optimizer, checkpoint and logging | FLUX-specific forward/eval hooks |
 | FLUX.2 | `Flux2`, image/text projections, RoPE and modulation | `Flux2FACTModel` subclass |
 | FLUX.2 | all `DoubleStreamBlock` parameters | masked forward using existing private helpers |
 | FLUX.2 | all `SingleStreamBlock` parameters | masked forward using existing private helpers |

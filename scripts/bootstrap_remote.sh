@@ -8,7 +8,7 @@ cd "${ROOT}"
 if [[ ! -x .venv/bin/python ]]; then
     "${BASE_PYTHON}" -m venv --system-site-packages .venv
 fi
-.venv/bin/python -m pip install pytest nvidia-ml-py
+.venv/bin/python -m pip install pytest
 
 mkdir -p third_party
 if [[ ! -d third_party/FACT/.git ]]; then

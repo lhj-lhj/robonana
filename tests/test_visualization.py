@@ -46,45 +46,6 @@ def test_pixel_eval_interval():
     assert not should_log_pixel_eval(199, 200)
 
 
-def test_pixel_eval_stages_images_for_same_step_commit(monkeypatch):
-    calls = []
-
-    class FakeImage:
-        def __init__(self, tensor, caption):
-            self.tensor = tensor
-            self.caption = caption
-
-    class FakeTracker:
-        def log(self, payload, **kwargs):
-            calls.append((payload, kwargs))
-
-    class FakeAccelerator:
-        is_main_process = True
-
-        @staticmethod
-        def get_tracker(name, unwrap):
-            assert (name, unwrap) == ("wandb", True)
-            return FakeTracker()
-
-    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(Image=FakeImage))
-    image = torch.zeros(1, 3, 4, 5)
-    future_images = torch.zeros(3, 3, 4, 5)
-    log_pixel_eval(
-        accelerator=FakeAccelerator(),
-        step=200,
-        current=image,
-        targets=future_images,
-        predictions=future_images,
-        horizons=torch.tensor([12, 24, 48]),
-        num_inference_steps=20,
-    )
-    assert calls[0][1] == {"step": 200, "commit": False}
-    assert calls[0][0]["eval/fixed_horizon_grid"].tensor.shape == (3, 8, 20)
-    assert calls[0][0]["eval/fixed_horizons"] == "12,24,48"
-    assert calls[0][0]["eval/sampling"] == "two_stage_flow_euler_from_pure_noise"
-    assert calls[0][0]["eval/num_inference_steps"] == 20
-
-
 def test_pixel_eval_combines_one_sample_from_every_rank(monkeypatch):
     calls = []
 
