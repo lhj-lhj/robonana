@@ -75,3 +75,21 @@ def test_episode_sampler_returns_valid_indices(tmp_path):
     indices = list(iter(sampler))
     assert len(indices) == 7
     assert all(0 <= index < len(dataset) for index in indices)
+
+
+def test_horizon_sampler_mixes_rollout_anchor_and_uniform(monkeypatch):
+    dataset = object.__new__(RoboTwinHDF5Dataset)
+    dataset._hdf5_cache = {}
+    dataset._latent_cache = {}
+    dataset._language_cache = {}
+    dataset.fixed_horizon = 0
+    dataset.max_horizon = 48
+    dataset.rollout_horizon = 24
+    dataset.rollout_horizon_prob = 0.5
+
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(0.25))
+    assert dataset._sample_horizon() == 24
+
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(0.75))
+    monkeypatch.setattr(torch, "randint", lambda *args, **kwargs: torch.tensor(37))
+    assert dataset._sample_horizon() == 37

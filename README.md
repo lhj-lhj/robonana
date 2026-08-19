@@ -74,6 +74,12 @@ Ordinary training batches do not carry fixed-horizon eval targets. They retain
 only a scalar sample index; after periodic pure-noise sampling completes, the
 three GT future latents are loaded lazily for W&B comparison only.
 
+Training horizons use a rollout-aligned mixture by default: 50% of samples use
+`idx_h = 24`, while the remaining 50% draw uniformly from `1..48`. Override the
+anchor and mixture probability with `ROBONANA_ROLLOUT_HORIZON` and
+`ROBONANA_ROLLOUT_HORIZON_PROB`. Current-frame inputs remain clean cached FLUX
+latents; no online pixel augmentation or VAE encoding is performed.
+
 The launcher tees combined stdout/stderr to a timestamped file under
 `$ROBONANA_PROJECT_DIR/logs`. In addition to the normal 1000-step checkpoint
 interval, step 100 is saved by default; override it with a comma-separated

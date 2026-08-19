@@ -108,6 +108,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
         action_dim: int = 14,
         max_horizon: int = 48,
         fixed_horizon: int = 0,
+        rollout_horizon: int | None = None,
+        rollout_horizon_prob: float = 0.5,
         eval_horizons: tuple[int, ...] | list[int] = (12, 24, 48),
         latent_cache_size: int = 4,
         language_cache_size: int = 8,
@@ -121,6 +123,12 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self.action_dim = int(action_dim)
         self.max_horizon = int(max_horizon)
         self.fixed_horizon = int(fixed_horizon)
+        self.rollout_horizon = (
+            max(1, self.max_horizon // 2)
+            if rollout_horizon is None
+            else int(rollout_horizon)
+        )
+        self.rollout_horizon_prob = float(rollout_horizon_prob)
         self.eval_horizons = tuple(int(value) for value in eval_horizons)
         self.latent_cache_size = int(latent_cache_size)
         self.language_cache_size = int(language_cache_size)
@@ -131,6 +139,10 @@ class RoboTwinHDF5Dataset(BaseDataset):
             raise ValueError(f"action_dim must lie in [1, {ALOHA_DELTA_MASK.size}]")
         if self.fixed_horizon < 0 or self.fixed_horizon > self.max_horizon:
             raise ValueError("fixed_horizon must be 0 or lie in [1, max_horizon]")
+        if self.rollout_horizon < 1 or self.rollout_horizon > self.max_horizon:
+            raise ValueError("rollout_horizon must lie in [1, max_horizon]")
+        if not 0.0 <= self.rollout_horizon_prob <= 1.0:
+            raise ValueError("rollout_horizon_prob must lie in [0, 1]")
         if not self.eval_horizons or any(value < 1 or value > self.max_horizon for value in self.eval_horizons):
             raise ValueError("eval_horizons must be non-empty and lie in [1, max_horizon]")
         if min(self.latent_cache_size, self.language_cache_size, self.hdf5_cache_size) < 1:
@@ -220,6 +232,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
     def _sample_horizon(self) -> int:
         if self.fixed_horizon:
             return self.fixed_horizon
+        if torch.rand(()).item() < self.rollout_horizon_prob:
+            return self.rollout_horizon
         return int(torch.randint(1, self.max_horizon + 1, ()).item())
 
     def load_eval_future_latents(
