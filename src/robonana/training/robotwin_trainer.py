@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from typing import Any
 
 import torch
@@ -57,18 +58,27 @@ def image_position_ids(
     return ids
 
 
+def resolve_cuda_device_index(device: torch.device) -> int | None:
+    if device.type != "cuda":
+        return None
+    return device.index if device.index is not None else torch.cuda.current_device()
+
+
 class RoboNanaTrainer(Trainer):
     """Reuse FACT's DataLoader, Accelerate, optimizer, checkpoint, and logging loop."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.memory_limit_gib = float(self.kwargs.get("memory_limit_gib", 0.0))
+        self.cuda_device_index = resolve_cuda_device_index(self.device)
         if self.memory_limit_gib > 0 and self.device.type == "cuda":
-            total_bytes = torch.cuda.get_device_properties(self.device).total_memory
+            total_bytes = torch.cuda.get_device_properties(self.cuda_device_index).total_memory
             limit_bytes = int(self.memory_limit_gib * 1024**3)
-            torch.cuda.set_per_process_memory_fraction(min(1.0, limit_bytes / total_bytes), self.device)
+            torch.cuda.set_per_process_memory_fraction(
+                min(1.0, limit_bytes / total_bytes), self.cuda_device_index
+            )
         if self.device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(self.device)
+            torch.cuda.reset_peak_memory_stats(self.cuda_device_index)
         self.pixel_eval_interval = int(self.kwargs.get("pixel_eval_interval", 200))
         if self.pixel_eval_interval and self.pixel_eval_interval % self.log_interval:
             raise ValueError("pixel_eval_interval must be divisible by log_interval for atomic W&B logging")
@@ -78,7 +88,10 @@ class RoboNanaTrainer(Trainer):
         self.num_inference_steps = int(self.kwargs.get("num_inference_steps", 20))
         if self.num_inference_steps <= 0:
             raise ValueError("num_inference_steps must be positive")
-        self.vae = None
+        self._pending_pixel_eval: dict[str, Tensor] | None = None
+        self._optimizer_step_succeeded = False
+        self.vae_checkpoint_dir: str | None = None
+        self.vae_dtype = torch.float32
 
     def get_models(self, model_config):
         checkpoint = str(model_config.checkpoint)
@@ -101,19 +114,12 @@ class RoboNanaTrainer(Trainer):
         model.train()
         self.model_name = "transformer"
 
-        if self.is_main_process and self.pixel_eval_interval > 0:
-            from diffusers.models import AutoencoderKLFlux2
-
-            vae_dtype_name = str(model_config.get("vae_dtype", "float32"))
-            vae_dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[vae_dtype_name]
-            self.vae = AutoencoderKLFlux2.from_pretrained(
-                str(model_config.checkpoint_dir),
-                subfolder="vae",
-                torch_dtype=vae_dtype,
-                local_files_only=True,
-            ).eval()
-            self.vae.requires_grad_(False)
-            self.vae.to(self.device)
+        self.vae_checkpoint_dir = str(model_config.checkpoint_dir)
+        vae_dtype_name = str(model_config.get("vae_dtype", "float32"))
+        try:
+            self.vae_dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[vae_dtype_name]
+        except KeyError as error:
+            raise ValueError(f"unsupported VAE dtype: {vae_dtype_name}") from error
 
         if self.is_main_process:
             self.logger.info(
@@ -133,12 +139,37 @@ class RoboNanaTrainer(Trainer):
     def save_checkpoint_step(self) -> None:
         if bool(self.kwargs.get("disable_checkpointing", False)):
             return
+        early_steps = {int(step) for step in self.kwargs.get("early_checkpoint_steps", ())}
+        if self.cur_step in early_steps and self.cur_step % int(self.checkpoint_interval):
+            checkpoint_interval = self.checkpoint_interval
+            try:
+                self.checkpoint_interval = 1
+                super().save_checkpoint_step()
+            finally:
+                self.checkpoint_interval = checkpoint_interval
+            return
         super().save_checkpoint_step()
+
+    def backward_step(self, loss: Tensor) -> None:
+        loss_is_finite = bool(torch.isfinite(loss.detach()).all().item())
+        super().backward_step(loss)
+        self._optimizer_step_succeeded = loss_is_finite and self.accelerator.sync_gradients
+
+    def print_step(self) -> None:
+        pending_eval = self._pending_pixel_eval
+        self._pending_pixel_eval = None
+        if self._optimizer_step_succeeded and pending_eval is not None:
+            self._run_fixed_horizon_eval(pending_eval)
+        self._optimizer_step_succeeded = False
+        super().print_step()
 
     def print_after_train(self) -> None:
         if self.device.type == "cuda":
             local_peak = torch.tensor(
-                [torch.cuda.max_memory_allocated(self.device), torch.cuda.max_memory_reserved(self.device)],
+                [
+                    torch.cuda.max_memory_allocated(self.cuda_device_index),
+                    torch.cuda.max_memory_reserved(self.cuda_device_index),
+                ],
                 device=self.device,
                 dtype=torch.float64,
             )
@@ -153,7 +184,7 @@ class RoboNanaTrainer(Trainer):
                 )
         super().print_after_train()
 
-    def _run_fixed_horizon_eval(
+    def _stage_fixed_horizon_eval(
         self,
         *,
         batch_dict: dict[str, Any],
@@ -163,19 +194,40 @@ class RoboNanaTrainer(Trainer):
         state: Tensor,
         action: Tensor,
     ) -> None:
-        horizons = batch_dict["eval_horizon_idx"][0].to(device=self.device, dtype=torch.long)
+        self._pending_pixel_eval = {
+            "horizons": batch_dict["eval_horizon_idx"][0].to(device=self.device, dtype=torch.long),
+            "future": batch_dict["eval_future_latents"][0].to(device=self.device, dtype=self.dtype),
+            "future_state": batch_dict["eval_future_state"][0].to(device=self.device, dtype=self.dtype),
+            "value": batch_dict["eval_value"][0].to(device=self.device, dtype=self.dtype),
+            "context": context[:1].detach(),
+            "context_mask": context_mask[:1].detach(),
+            "current": current[:1].detach(),
+            "state": state[:1].detach(),
+            "action": action[:1].detach(),
+        }
+
+    def _run_fixed_horizon_eval(self, payload: dict[str, Tensor]) -> None:
+        horizons = payload["horizons"]
         count = horizons.numel()
+        if self.is_main_process:
+            self.logger.info(
+                "Start post-optimizer pixel eval: ranks=%d, horizons=%s, inference_steps=%d",
+                self.accelerator.num_processes,
+                horizons.detach().cpu().tolist(),
+                self.num_inference_steps,
+            )
 
         def repeat_first(value: Tensor) -> Tensor:
             return value[:1].expand(count, *value.shape[1:])
 
-        eval_future = batch_dict["eval_future_latents"][0].to(device=self.device, dtype=self.dtype)
-        eval_future_state = batch_dict["eval_future_state"][0].to(device=self.device, dtype=self.dtype).unsqueeze(1)
-        eval_value = batch_dict["eval_value"][0].to(device=self.device, dtype=self.dtype).reshape(count, 1, 1)
-        eval_context = repeat_first(context)
-        eval_context_mask = repeat_first(context_mask)
-        eval_current = repeat_first(current)
-        eval_state = repeat_first(state)
+        eval_future = payload["future"]
+        eval_future_state = payload["future_state"].unsqueeze(1)
+        eval_value = payload["value"].reshape(count, 1, 1)
+        eval_context = repeat_first(payload["context"])
+        eval_context_mask = repeat_first(payload["context_mask"])
+        eval_current = repeat_first(payload["current"])
+        eval_state = repeat_first(payload["state"])
+        action = payload["action"]
         context_ids = text_position_ids(count, eval_context.shape[1], self.device)
         current_ids = image_position_ids(
             count,
@@ -200,7 +252,7 @@ class RoboNanaTrainer(Trainer):
         model_was_training = self.model.training
         self.model.eval()
         try:
-            with torch.no_grad():
+            with torch.inference_mode():
                 # Stage 1 mirrors FACT inference: denoise action alone from pure
                 # Gaussian noise. The attention mask makes the action sink
                 # independent of every dummy suffix token supplied here.
@@ -283,36 +335,71 @@ class RoboNanaTrainer(Trainer):
             if model_was_training:
                 self.model.train()
 
-        if self.vae is None:
-            return
+        gathered_current = self.accelerator.gather(payload["current"])
+        gathered_targets = self.accelerator.gather(eval_future.unsqueeze(0))
+        gathered_predictions = self.accelerator.gather(samples.future.unsqueeze(0))
+        gathered_horizons = self.accelerator.gather(horizons.unsqueeze(0))
 
-        def decode_each(tokens: Tensor) -> Tensor:
-            return torch.cat(
-                [
-                    decode_flux2_tokens(
-                        self.vae,
-                        tokens[index : index + 1],
-                        grid_height=self.grid_height,
-                        grid_width=self.grid_width,
-                    ).cpu()
-                    for index in range(tokens.shape[0])
-                ],
-                dim=0,
-            )
+        try:
+            if not self.is_main_process:
+                return
+            if self.vae_checkpoint_dir is None:
+                raise RuntimeError("VAE checkpoint directory was not configured")
+            from diffusers.models import AutoencoderKLFlux2
 
-        with torch.no_grad():
-            decoded_current = decode_each(current[:1])
-            decoded_targets = decode_each(eval_future)
-            decoded_predictions = decode_each(samples.future)
-        log_pixel_eval(
-            accelerator=self.accelerator,
-            step=self.cur_step,
-            current=decoded_current,
-            targets=decoded_targets,
-            predictions=decoded_predictions,
-            horizons=horizons,
-            num_inference_steps=self.num_inference_steps,
-        )
+            self.logger.info("Load FP32 FLUX.2 VAE on rank 0 for pixel eval")
+            vae = AutoencoderKLFlux2.from_pretrained(
+                self.vae_checkpoint_dir,
+                subfolder="vae",
+                torch_dtype=self.vae_dtype,
+                local_files_only=True,
+            ).eval()
+            vae.requires_grad_(False)
+            vae.to(self.device)
+            try:
+                def decode_each(tokens: Tensor) -> Tensor:
+                    return torch.cat(
+                        [
+                            decode_flux2_tokens(
+                                vae,
+                                tokens[index : index + 1],
+                                grid_height=self.grid_height,
+                                grid_width=self.grid_width,
+                            ).cpu()
+                            for index in range(tokens.shape[0])
+                        ],
+                        dim=0,
+                    )
+
+                with torch.inference_mode():
+                    decoded_current = decode_each(gathered_current)
+                    rank_count, horizon_count = gathered_targets.shape[:2]
+                    decoded_targets_flat = decode_each(gathered_targets.flatten(0, 1))
+                    decoded_predictions_flat = decode_each(gathered_predictions.flatten(0, 1))
+                    decoded_targets = decoded_targets_flat.reshape(
+                        rank_count, horizon_count, *decoded_targets_flat.shape[1:]
+                    )
+                    decoded_predictions = decoded_predictions_flat.reshape(
+                        rank_count, horizon_count, *decoded_predictions_flat.shape[1:]
+                    )
+                log_pixel_eval(
+                    accelerator=self.accelerator,
+                    step=self.cur_step,
+                    current=decoded_current,
+                    targets=decoded_targets,
+                    predictions=decoded_predictions,
+                    horizons=gathered_horizons,
+                    num_inference_steps=self.num_inference_steps,
+                )
+            finally:
+                vae.to("cpu")
+                del vae
+                gc.collect()
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
+                self.logger.info("Removed FLUX.2 VAE from rank 0 GPU after pixel eval")
+        finally:
+            self.accelerator.wait_for_everyone()
 
     def forward_step(self, batch_dict: dict[str, Any]):
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
@@ -374,7 +461,7 @@ class RoboNanaTrainer(Trainer):
         )
 
         if should_log_pixel_eval(self.cur_step, self.pixel_eval_interval):
-            self._run_fixed_horizon_eval(
+            self._stage_fixed_horizon_eval(
                 batch_dict=batch_dict,
                 context=context,
                 context_mask=context_mask,

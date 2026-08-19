@@ -28,6 +28,11 @@ PIXEL_EVAL_INTERVAL = int(os.environ.get("ROBONANA_PIXEL_EVAL_INTERVAL", "200"))
 LOG_INTERVAL = int(os.environ.get("ROBONANA_LOG_INTERVAL", "10"))
 MEMORY_LIMIT_GIB = float(os.environ.get("ROBONANA_MEMORY_LIMIT_GIB", "0"))
 NUM_INFERENCE_STEPS = int(os.environ.get("ROBONANA_NUM_INFERENCE_STEPS", "20"))
+EARLY_CHECKPOINT_STEPS = tuple(
+    int(value)
+    for value in os.environ.get("ROBONANA_EARLY_CHECKPOINT_STEPS", "100").split(",")
+    if value.strip()
+)
 DISABLE_CHECKPOINTING = os.environ.get("ROBONANA_DISABLE_CHECKPOINTING", "0").lower() in {
     "1",
     "true",
@@ -102,6 +107,7 @@ config = dict(
         mixed_precision="bf16",
         activation_checkpointing=False,
         checkpoint_interval=1000,
+        early_checkpoint_steps=EARLY_CHECKPOINT_STEPS,
         checkpoint_total_limit=1,
         checkpoint_save_optimizer=False,
         disable_checkpointing=DISABLE_CHECKPOINTING,

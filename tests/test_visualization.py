@@ -83,3 +83,41 @@ def test_pixel_eval_stages_images_for_same_step_commit(monkeypatch):
     assert calls[0][0]["eval/fixed_horizons"] == "12,24,48"
     assert calls[0][0]["eval/sampling"] == "two_stage_flow_euler_from_pure_noise"
     assert calls[0][0]["eval/num_inference_steps"] == 20
+
+
+def test_pixel_eval_combines_one_sample_from_every_rank(monkeypatch):
+    calls = []
+
+    class FakeImage:
+        def __init__(self, tensor, caption):
+            self.tensor = tensor
+            self.caption = caption
+
+    class FakeTracker:
+        def log(self, payload, **kwargs):
+            calls.append((payload, kwargs))
+
+    class FakeAccelerator:
+        is_main_process = True
+
+        @staticmethod
+        def get_tracker(name, unwrap):
+            return FakeTracker()
+
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(Image=FakeImage))
+    current = torch.zeros(2, 3, 4, 5)
+    futures = torch.zeros(2, 3, 3, 4, 5)
+    horizons = torch.tensor([[12, 24, 48], [12, 24, 48]])
+    log_pixel_eval(
+        accelerator=FakeAccelerator(),
+        step=200,
+        current=current,
+        targets=futures,
+        predictions=futures,
+        horizons=horizons,
+        num_inference_steps=20,
+    )
+    payload = calls[0][0]
+    assert payload["eval/fixed_horizon_grid"].tensor.shape == (3, 8, 35)
+    assert payload["eval/num_ranks"] == 2
+    assert "one different current frame per rank" in payload["eval/fixed_horizon_grid"].caption

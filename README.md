@@ -84,20 +84,26 @@ batch size defaults to one per GPU, and multi-GPU execution reuses FACT's
 DeepSpeed ZeRO-2 config.
 
 ```bash
-ROBONANA_GPU_IDS=0,2,5,7 \
-PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
-  .venv/bin/python scripts/train_robotwin.py
+ROBONANA_GPU_IDS=0,1,2,3,4,5,6,7 \
+ROBONANA_BATCH_SIZE=16 \
+  bash scripts/run_robotwin_train.sh
 ```
 
 Every 200 optimizer steps, the trainer evaluates the same current frame at
-fixed horizons `idx_h = 12, 24, 48`. Rank 0 decodes the current frame plus all
-ground-truth and predicted FLUX tokens through the frozen FLUX.2 AE, then
-uploads one 2x4 grid to W&B: current/GT on the top row and current/prediction
-on the bottom row. Evaluation mirrors inference: it first samples action from
-pure noise, feeds the resulting clean action into the teacher-forcing track,
-then jointly samples future image/state/value from pure noise with 20-step
-Flow-Euler. Set `ROBONANA_NUM_INFERENCE_STEPS` to use a different shared
-eval/inference step count.
+fixed horizons `idx_h = 12, 24, 48` after backward and optimizer completion.
+Every rank evaluates a different local current frame, then the small latent
+results are gathered to rank 0. Rank 0 lazily loads the frozen FLUX.2 AE,
+decodes and uploads one eight-row W&B panel, and immediately moves and deletes
+the AE from GPU. Evaluation mirrors inference: it first samples action
+from pure noise, feeds the resulting clean action into the teacher-forcing
+track, then jointly samples future image/state/value from pure noise with
+20-step Flow-Euler. Set `ROBONANA_NUM_INFERENCE_STEPS` to use a different
+shared eval/inference step count.
+
+The launcher tees combined stdout/stderr to a timestamped file under
+`$ROBONANA_PROJECT_DIR/logs`. In addition to the normal 1000-step checkpoint
+interval, step 100 is saved by default; override it with a comma-separated
+`ROBONANA_EARLY_CHECKPOINT_STEPS` value.
 
 See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact reuse boundary.
 
