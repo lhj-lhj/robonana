@@ -58,7 +58,7 @@ ROBONANA_BATCH_SIZE=16 \
   bash scripts/run_robotwin_train.sh
 ```
 
-Every 200 optimizer steps, the trainer evaluates each selected current frame at
+Every 100 optimizer steps, the trainer evaluates each selected current frame at
 fixed horizons `idx_h = 12, 24, 48` after backward and optimizer completion.
 Every rank evaluates a different local current frame, lazily loads the frozen
 FP32 FLUX.2 AE, and locally decodes its current/GT/predicted images. Each AE is
