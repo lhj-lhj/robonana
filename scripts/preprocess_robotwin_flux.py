@@ -22,8 +22,6 @@ import h5py
 import numpy as np
 import torch
 from PIL import Image
-from torch import nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,13 +34,14 @@ for upstream in (
     if str(upstream) not in sys.path:
         sys.path.insert(0, str(upstream))
 
-from flux2.text_encoder import MAX_LENGTH, OUTPUT_LAYERS_QWEN3, Qwen3Embedder
+from flux2.text_encoder import MAX_LENGTH, OUTPUT_LAYERS_QWEN3
 from robonana.data.flux_cache import (
     CACHE_SCHEMA_VERSION,
     canonical_instruction,
     episode_cache_path,
     language_context_path,
 )
+from robonana.encoding import LocalQwen3Embedder, encode_flux2_image_tokens
 from world_action_model.image_layouts import ROBOTWIN_VIEW_KEYS, build_robotwin_three_view_tensor
 
 
@@ -51,23 +50,6 @@ CANVAS_SIZE = (384, 192)
 EXPECTED_IMAGE_TOKENS = 12 * 24
 EXPECTED_LATENT_CHANNELS = 128
 HDF5_CAMERAS = ("head_camera", "left_camera", "right_camera")
-
-
-class LocalQwen3Embedder(Qwen3Embedder):
-    """Official Qwen3Embedder forward with local component directories."""
-
-    def __init__(self, checkpoint: Path, device: torch.device) -> None:
-        nn.Module.__init__(self)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            checkpoint / "text_encoder",
-            dtype=torch.bfloat16,
-            local_files_only=True,
-            low_cpu_mem_usage=True,
-        ).eval()
-        self.model.requires_grad_(False)
-        self.model.to(device)
-        self.tokenizer = AutoTokenizer.from_pretrained(checkpoint / "tokenizer", local_files_only=True)
-        self.max_length = MAX_LENGTH
 
 
 def atomic_torch_save(value, path: Path) -> None:
@@ -179,19 +161,6 @@ def build_composite_batch(handle: h5py.File, start: int, stop: int) -> torch.Ten
     return composite.mul(2.0).sub(1.0)
 
 
-def patchify_and_normalize(vae, latents: torch.Tensor) -> torch.Tensor:
-    batch, channels, height, width = latents.shape
-    if height % 2 or width % 2:
-        raise ValueError(f"FLUX.2 VAE latent spatial shape must be even, got {(height, width)}")
-    latents = latents.view(batch, channels, height // 2, 2, width // 2, 2)
-    latents = latents.permute(0, 1, 3, 5, 2, 4).reshape(batch, channels * 4, height // 2, width // 2)
-    mean = vae.bn.running_mean.view(1, -1, 1, 1).to(device=latents.device, dtype=latents.dtype)
-    std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1) + vae.config.batch_norm_eps).to(
-        device=latents.device, dtype=latents.dtype
-    )
-    return (latents - mean) / std
-
-
 @torch.inference_mode()
 def encode_episode(vae, source: Path, output: Path, device: torch.device, batch_size: int) -> tuple[int, tuple[int, ...]]:
     token_batches = []
@@ -203,9 +172,7 @@ def encode_episode(vae, source: Path, output: Path, device: torch.device, batch_
         for start in range(0, episode_length, batch_size):
             stop = min(start + batch_size, episode_length)
             images = build_composite_batch(handle, start, stop).to(device=device, dtype=next(vae.parameters()).dtype)
-            raw_latents = vae.encode(images).latent_dist.mode()
-            packed = patchify_and_normalize(vae, raw_latents)
-            tokens = packed.flatten(2).transpose(1, 2)
+            tokens = encode_flux2_image_tokens(vae, images)
             token_batches.append(tokens.to(device="cpu", dtype=torch.bfloat16).contiguous())
     frame_latents = torch.cat(token_batches, dim=0)
     expected = (episode_length, EXPECTED_IMAGE_TOKENS, EXPECTED_LATENT_CHANNELS)

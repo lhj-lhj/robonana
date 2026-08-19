@@ -14,6 +14,7 @@ from flux2.model import Klein4BParams
 # Imports register the raw HDF5 dataset and sampler with FACT.
 from robonana.data import robotwin_hdf5 as _robotwin_hdf5  # noqa: F401
 from robonana.models.pretrained import configure_trainable_parameters, load_flux2_fact_checkpoint
+from robonana.models.position_ids import image_position_ids, text_position_ids
 from robonana.sampling import flow_euler_schedule, sample_two_stage_flow
 from robonana.training.losses import joint_flow_loss
 from robonana.training.visualization import (
@@ -33,29 +34,6 @@ def flow_noise(clean: Tensor, timestep: Tensor) -> tuple[Tensor, Tensor]:
     noise = torch.randn_like(clean)
     sigma = _expand_timestep(timestep, clean)
     return clean * (1.0 - sigma) + noise * sigma, noise - clean
-
-
-def text_position_ids(batch_size: int, length: int, device: torch.device) -> Tensor:
-    ids = torch.zeros(batch_size, length, 4, device=device, dtype=torch.long)
-    ids[:, :, 3] = torch.arange(length, device=device)
-    return ids
-
-
-def image_position_ids(
-    batch_size: int,
-    *,
-    grid_height: int,
-    grid_width: int,
-    time_coord: Tensor,
-    device: torch.device,
-) -> Tensor:
-    height = torch.arange(grid_height, device=device)
-    width = torch.arange(grid_width, device=device)
-    spatial = torch.cartesian_prod(height, width)
-    ids = torch.zeros(batch_size, grid_height * grid_width, 4, device=device, dtype=torch.long)
-    ids[:, :, 0] = time_coord.to(device=device, dtype=torch.long).reshape(batch_size, 1)
-    ids[:, :, 1:3] = spatial[None]
-    return ids
 
 
 def resolve_cuda_device_index(device: torch.device) -> int | None:

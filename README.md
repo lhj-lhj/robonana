@@ -116,3 +116,46 @@ physical GPUs `0,2,5,7`:
 setsid -f bash scripts/run_robotwin_flux_cache.sh
 tail -f logs/preprocess_robotwin_flux_full.log
 ```
+
+## RoboTwin simulation evaluation
+
+RoboNana keeps FACT's TCP client and RoboTwin `eval_policy.py`; only the online
+FLUX/Qwen encoder and checkpoint adapter are new.  RoboTwin commit `2eeec32`
+expects CuRobo's pre-refactor API, so pin the checkout created by RoboTwin's
+installer to the newest compatible tag once:
+
+```bash
+git -C /workspace/hongjia/RoboTwin/envs/curobo switch --detach v0.7.8
+/workspace/.conda/envs/robotwin2/bin/python -m pip install --no-build-isolation \
+  -e /workspace/hongjia/RoboTwin/envs/curobo
+```
+
+Start the step-100 policy server with the DiT on physical GPU 6 and FLUX AE on
+physical GPU 7:
+
+```bash
+CUDA_VISIBLE_DEVICES=6,7 \
+PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src:$PWD/third_party/flux2_official/src" \
+.venv/bin/python scripts/inference_server_robotwin.py \
+  --checkpoint experiments/robotwin_flux2_h24mix_bs12_10k_20260819/models/checkpoint_epoch_1_step_100/transformer/diffusion_pytorch_model.bin \
+  --flux-checkpoint-dir checkpoints/FLUX.2-klein-base-4B \
+  --stats-path /workspace/datasets/RoboTwin/hf_dataset/robonana_norm_stats.json \
+  --model-device cuda:0 --vae-device cuda:1 --port 8094
+```
+
+In a second shell, run one RoboTwin episode on physical GPU 7.  Do not force
+`VK_ICD_FILENAMES`; SAPIEN's automatic ICD selection is required on west1-58.
+
+```bash
+CUDA_VISIBLE_DEVICES=7 \
+XDG_RUNTIME_DIR=/tmp/robonana_robotwin_eval_8094 \
+PYTHONPATH="$PWD/src" \
+FACT_CONDA_ENV="$PWD/.venv" \
+ROBOTWIN_PATH=/workspace/hongjia/RoboTwin \
+ROBOTWIN_CONDA_ENV=/workspace/.conda/envs/robotwin2 \
+POLICY_NAME=robonana_robotwin.adapter \
+PORT=8094 TEST_NUM=1 EXECUTE_ACTIONS_PER_PLAN=48 \
+SERVER_TIMEOUT_MS=600000 SERVER_WAIT_SECONDS=600 EVAL_VIDEO_LOG=0 \
+bash third_party/FACT/evaluation/robotwin/launch_client.sh \
+  beat_block_hammer demo_clean step100 0
+```

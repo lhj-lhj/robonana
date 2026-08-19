@@ -1,6 +1,11 @@
 import torch
 
-from robonana.sampling import flow_euler_schedule, flow_euler_step, sample_two_stage_flow
+from robonana.sampling import (
+    flow_euler_schedule,
+    flow_euler_step,
+    sample_action_flow,
+    sample_two_stage_flow,
+)
 
 
 def test_flow_euler_schedule_runs_from_pure_noise_to_clean():
@@ -17,6 +22,17 @@ def test_exact_constant_velocity_recovers_clean_sample():
     for sigma, sigma_next in zip(schedule[:-1], schedule[1:]):
         sample = flow_euler_step(sample, velocity, sigma, sigma_next)
     torch.testing.assert_close(sample, clean)
+
+
+def test_action_only_sampler_uses_the_shared_schedule():
+    clean = torch.tensor([[1.0, 2.0]])
+    noise = torch.tensor([[5.0, 8.0]])
+    result = sample_action_flow(
+        action_noise=noise,
+        schedule=flow_euler_schedule(5, flow_shift=1.0, device="cpu"),
+        predict_action=lambda sample, sigma: noise - clean,
+    )
+    torch.testing.assert_close(result, clean)
 
 
 def test_two_stage_sampler_feeds_clean_action_into_world_stage():

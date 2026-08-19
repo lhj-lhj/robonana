@@ -4,6 +4,7 @@ from .pretrained import (
     PretrainedLoadReport,
     configure_trainable_parameters,
     load_flux2_fact_checkpoint,
+    load_flux2_fact_trained_checkpoint,
     robot_parameter_names,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "build_attention_bias",
     "configure_trainable_parameters",
     "load_flux2_fact_checkpoint",
+    "load_flux2_fact_trained_checkpoint",
     "robot_parameter_names",
 ]

@@ -82,3 +82,32 @@ def test_gradient_checkpointed_shared_blocks_run_backward():
     (output.image.square().mean() + output.action.square().mean()).backward()
     assert model.double_blocks[0].img_attn.qkv.weight.grad is not None
     assert model.single_blocks[0].linear1.weight.grad is not None
+
+
+def test_action_only_forward_accepts_empty_world_suffix():
+    torch.manual_seed(0)
+    model = _tiny_model().eval()
+    batch, context_len, ref_len, action_len = 1, 2, 2, 4
+    ids = lambda length: torch.zeros(batch, length, 4)
+    with torch.inference_mode():
+        output = model(
+            context=torch.randn(batch, context_len, 16),
+            context_ids=ids(context_len),
+            current_latents=torch.randn(batch, ref_len, 8),
+            current_ids=ids(ref_len),
+            noisy_future_latents=torch.empty(batch, 0, 8),
+            future_ids=ids(0),
+            state=torch.randn(batch, 1, 6),
+            noisy_pred_action=torch.randn(batch, action_len, 6),
+            gt_action_cond=torch.zeros(batch, action_len, 6),
+            horizon_idx=torch.tensor([1]),
+            noisy_future_state=torch.empty(batch, 0, 6),
+            noisy_value=torch.empty(batch, 0, 1),
+            action_timestep=torch.rand(batch),
+            wm_timestep=torch.zeros(batch),
+            context_mask=torch.ones(batch, context_len, dtype=torch.bool),
+        )
+    assert output.action.shape == (batch, action_len, 6)
+    assert output.image.shape == (batch, 0, 8)
+    assert output.future_state.shape == (batch, 0, 6)
+    assert output.value.shape == (batch, 0, 1)

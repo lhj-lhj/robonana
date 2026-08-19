@@ -17,6 +17,29 @@ class TwoStageFlowSample:
     value: Tensor
 
 
+def sample_action_flow(
+    *,
+    action_noise: Tensor,
+    schedule: Tensor,
+    predict_action: Callable[[Tensor, Tensor], Tensor],
+) -> Tensor:
+    """Denoise an action chunk from pure noise with the shared Flow-Euler path."""
+
+    if schedule.ndim != 1 or schedule.numel() < 2:
+        raise ValueError("schedule must contain at least a start and end sigma")
+    if not bool(torch.isclose(schedule[0], schedule.new_tensor(1.0))):
+        raise ValueError("schedule must start at sigma=1 pure noise")
+    if not bool(torch.isclose(schedule[-1], schedule.new_tensor(0.0))):
+        raise ValueError("schedule must end at sigma=0 clean data")
+    if bool(torch.any(schedule[1:] > schedule[:-1])):
+        raise ValueError("schedule must be monotonically decreasing")
+    sampled_action = action_noise
+    for sigma, sigma_next in zip(schedule[:-1], schedule[1:]):
+        action_velocity = predict_action(sampled_action, sigma)
+        sampled_action = flow_euler_step(sampled_action, action_velocity, sigma, sigma_next)
+    return sampled_action
+
+
 def flow_euler_schedule(
     num_inference_steps: int,
     *,
@@ -62,10 +85,11 @@ def sample_two_stage_flow(
         raise ValueError("schedule must end at sigma=0 clean data")
     if bool(torch.any(schedule[1:] > schedule[:-1])):
         raise ValueError("schedule must be monotonically decreasing")
-    sampled_action = action_noise
-    for sigma, sigma_next in zip(schedule[:-1], schedule[1:]):
-        action_velocity = predict_action(sampled_action, sigma)
-        sampled_action = flow_euler_step(sampled_action, action_velocity, sigma, sigma_next)
+    sampled_action = sample_action_flow(
+        action_noise=action_noise,
+        schedule=schedule,
+        predict_action=predict_action,
+    )
 
     sampled_future = future_noise
     sampled_future_state = future_state_noise

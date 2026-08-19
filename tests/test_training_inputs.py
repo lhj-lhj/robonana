@@ -1,6 +1,8 @@
 import torch
 
+from robonana.inference.robotwin_policy import postprocess_action
 from robonana.training.robotwin_trainer import flow_noise, image_position_ids, text_position_ids
+from world_action_model.pipeline.utils import NormalizationTensors
 
 
 def test_flow_noise_target_reconstructs_clean_sample():
@@ -26,3 +28,30 @@ def test_flux_position_ids_encode_language_space_and_horizon_time():
     assert image_ids[0, :, 0].unique().item() == 1
     assert image_ids[1, :, 0].unique().item() == 4
     assert image_ids[0, :, 1:3].tolist() == [[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2]]
+
+
+def test_online_action_postprocess_matches_training_delta_convention():
+    zeros = torch.zeros(2)
+    ones = torch.ones(2)
+    normalization = NormalizationTensors(
+        state_mean=zeros,
+        state_std=ones,
+        state_min=torch.full((2,), -2.0),
+        state_max=torch.full((2,), 2.0),
+        action_mean=zeros,
+        action_std=ones,
+        action_min=torch.full((2,), -1.0),
+        action_max=torch.full((2,), 1.0),
+        value_min=torch.tensor([-1.0]),
+        value_max=torch.tensor([2.0]),
+    )
+    result = postprocess_action(
+        torch.full((3, 2), 0.25),
+        torch.tensor([0.5, 0.5]),
+        normalization,
+        delta_mask=torch.tensor([True, False]),
+    )
+    torch.testing.assert_close(
+        result,
+        torch.tensor([[0.75, 0.25], [0.75, 0.25], [0.75, 0.25]]),
+    )

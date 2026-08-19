@@ -3,9 +3,11 @@ from safetensors.torch import save_file
 
 from flux2.model import Flux2, Flux2Params
 
+from robonana.models.flux2_fact import Flux2FACTModel
 from robonana.models.pretrained import (
     configure_trainable_parameters,
     load_flux2_fact_checkpoint,
+    load_flux2_fact_trained_checkpoint,
     robot_parameter_names,
 )
 
@@ -48,3 +50,30 @@ def test_official_flux_checkpoint_loads_and_only_robot_modules_are_new(tmp_path)
     assert not model.double_blocks[0].img_attn.qkv.weight.requires_grad
     configure_trainable_parameters(model, "full")
     assert all(parameter.requires_grad for parameter in model.parameters())
+
+
+def test_full_trained_checkpoint_loads_exactly_from_fact_export(tmp_path):
+    torch.manual_seed(11)
+    expected = Flux2FACTModel(
+        _tiny_params(),
+        action_dim=6,
+        state_dim=6,
+        max_horizon=8,
+    )
+    checkpoint = tmp_path / "diffusion_pytorch_model.bin"
+    torch.save(expected.state_dict(), checkpoint)
+
+    actual, report = load_flux2_fact_trained_checkpoint(
+        checkpoint,
+        action_dim=6,
+        state_dim=6,
+        max_horizon=8,
+        device="cpu",
+        dtype=torch.float32,
+        params=_tiny_params(),
+    )
+
+    assert report.initialized_robot_parameters == ()
+    assert report.checkpoint_parameters == sum(p.numel() for p in expected.parameters())
+    for name, expected_tensor in expected.state_dict().items():
+        torch.testing.assert_close(actual.state_dict()[name], expected_tensor)

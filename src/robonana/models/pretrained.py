@@ -102,3 +102,50 @@ def load_flux2_fact_checkpoint(
         initialized_robot_parameters=tuple(sorted(expected_missing)),
     )
     return model, report
+
+
+def load_flux2_fact_trained_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    action_dim: int,
+    state_dim: int,
+    value_dim: int = 1,
+    max_horizon: int = 64,
+    device: str | torch.device = "cuda",
+    dtype: torch.dtype = torch.bfloat16,
+    params: Flux2Params | None = None,
+) -> tuple[Flux2FACTModel, PretrainedLoadReport]:
+    """Load a full FACT-exported RoboNana transformer without duplicating weights."""
+
+    path = Path(checkpoint_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"RoboNana checkpoint not found: {path}")
+    device = torch.device(device)
+    params = Klein4BParams() if params is None else params
+
+    with torch.device("meta"):
+        model = Flux2FACTModel(
+            params,
+            action_dim=action_dim,
+            state_dim=state_dim,
+            value_dim=value_dim,
+            max_horizon=max_horizon,
+        ).to(dtype=dtype)
+
+    state_dict = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+    checkpoint_parameters = sum(tensor.numel() for tensor in state_dict.values())
+    incompatible = model.load_state_dict(state_dict, strict=True, assign=True)
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        raise RuntimeError(
+            "trained checkpoint does not exactly match RoboNana: "
+            f"missing={incompatible.missing_keys}, unexpected={incompatible.unexpected_keys}"
+        )
+    model.to(device=device, dtype=dtype)
+    meta_parameters = [name for name, parameter in model.named_parameters() if parameter.is_meta]
+    if meta_parameters:
+        raise RuntimeError(f"parameters remained on the meta device: {meta_parameters}")
+    return model, PretrainedLoadReport(
+        checkpoint=str(path),
+        checkpoint_parameters=checkpoint_parameters,
+        initialized_robot_parameters=(),
+    )
