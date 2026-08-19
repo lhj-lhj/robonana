@@ -335,53 +335,68 @@ class RoboNanaTrainer(Trainer):
             if model_was_training:
                 self.model.train()
 
-        gathered_current = self.accelerator.gather(payload["current"])
-        gathered_targets = self.accelerator.gather(eval_future.unsqueeze(0))
-        gathered_predictions = self.accelerator.gather(samples.future.unsqueeze(0))
+        if self.vae_checkpoint_dir is None:
+            raise RuntimeError("VAE checkpoint directory was not configured")
+        from diffusers.models import AutoencoderKLFlux2
+
+        if self.is_main_process:
+            self.logger.info("Load FP32 FLUX.2 VAE on every rank for local pixel eval decode")
+        vae = AutoencoderKLFlux2.from_pretrained(
+            self.vae_checkpoint_dir,
+            subfolder="vae",
+            torch_dtype=self.vae_dtype,
+            local_files_only=True,
+        ).eval()
+        vae.requires_grad_(False)
+        vae.to(self.device)
+        try:
+            with torch.inference_mode():
+                local_current = decode_flux2_tokens(
+                    vae,
+                    payload["current"],
+                    grid_height=self.grid_height,
+                    grid_width=self.grid_width,
+                )
+                local_targets = decode_flux2_tokens(
+                    vae,
+                    eval_future,
+                    grid_height=self.grid_height,
+                    grid_width=self.grid_width,
+                )
+                local_predictions = decode_flux2_tokens(
+                    vae,
+                    samples.future,
+                    grid_height=self.grid_height,
+                    grid_width=self.grid_width,
+                )
+
+                def to_uint8(images: Tensor) -> Tensor:
+                    return images.mul(255).round().to(torch.uint8)
+
+                local_current = to_uint8(local_current)
+                local_targets = to_uint8(local_targets)
+                local_predictions = to_uint8(local_predictions)
+        finally:
+            vae.to("cpu")
+            del vae
+            gc.collect()
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        gathered_current = self.accelerator.gather(local_current)
+        gathered_targets = self.accelerator.gather(local_targets).reshape(
+            self.accelerator.num_processes, count, *local_targets.shape[1:]
+        )
+        gathered_predictions = self.accelerator.gather(local_predictions).reshape(
+            self.accelerator.num_processes, count, *local_predictions.shape[1:]
+        )
         gathered_horizons = self.accelerator.gather(horizons.unsqueeze(0))
 
         try:
-            if not self.is_main_process:
-                return
-            if self.vae_checkpoint_dir is None:
-                raise RuntimeError("VAE checkpoint directory was not configured")
-            from diffusers.models import AutoencoderKLFlux2
-
-            self.logger.info("Load FP32 FLUX.2 VAE on rank 0 for pixel eval")
-            vae = AutoencoderKLFlux2.from_pretrained(
-                self.vae_checkpoint_dir,
-                subfolder="vae",
-                torch_dtype=self.vae_dtype,
-                local_files_only=True,
-            ).eval()
-            vae.requires_grad_(False)
-            vae.to(self.device)
-            try:
-                def decode_each(tokens: Tensor) -> Tensor:
-                    return torch.cat(
-                        [
-                            decode_flux2_tokens(
-                                vae,
-                                tokens[index : index + 1],
-                                grid_height=self.grid_height,
-                                grid_width=self.grid_width,
-                            ).cpu()
-                            for index in range(tokens.shape[0])
-                        ],
-                        dim=0,
-                    )
-
-                with torch.inference_mode():
-                    decoded_current = decode_each(gathered_current)
-                    rank_count, horizon_count = gathered_targets.shape[:2]
-                    decoded_targets_flat = decode_each(gathered_targets.flatten(0, 1))
-                    decoded_predictions_flat = decode_each(gathered_predictions.flatten(0, 1))
-                    decoded_targets = decoded_targets_flat.reshape(
-                        rank_count, horizon_count, *decoded_targets_flat.shape[1:]
-                    )
-                    decoded_predictions = decoded_predictions_flat.reshape(
-                        rank_count, horizon_count, *decoded_predictions_flat.shape[1:]
-                    )
+            if self.is_main_process:
+                decoded_current = gathered_current.float().div(255).cpu()
+                decoded_targets = gathered_targets.float().div(255).cpu()
+                decoded_predictions = gathered_predictions.float().div(255).cpu()
                 log_pixel_eval(
                     accelerator=self.accelerator,
                     step=self.cur_step,
@@ -391,15 +406,14 @@ class RoboNanaTrainer(Trainer):
                     horizons=gathered_horizons,
                     num_inference_steps=self.num_inference_steps,
                 )
-            finally:
-                vae.to("cpu")
-                del vae
-                gc.collect()
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
-                self.logger.info("Removed FLUX.2 VAE from rank 0 GPU after pixel eval")
+                self.logger.info(
+                    "Gathered %d locally decoded pixel rows on rank 0 for W&B",
+                    self.accelerator.num_processes,
+                )
         finally:
             self.accelerator.wait_for_everyone()
+        if self.is_main_process:
+            self.logger.info("Removed FLUX.2 VAE from every rank GPU after pixel eval")
 
     def forward_step(self, batch_dict: dict[str, Any]):
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)

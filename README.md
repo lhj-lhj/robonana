@@ -89,12 +89,13 @@ ROBONANA_BATCH_SIZE=16 \
   bash scripts/run_robotwin_train.sh
 ```
 
-Every 200 optimizer steps, the trainer evaluates the same current frame at
+Every 200 optimizer steps, the trainer evaluates each selected current frame at
 fixed horizons `idx_h = 12, 24, 48` after backward and optimizer completion.
-Every rank evaluates a different local current frame, then the small latent
-results are gathered to rank 0. Rank 0 lazily loads the frozen FLUX.2 AE,
-decodes and uploads one eight-row W&B panel, and immediately moves and deletes
-the AE from GPU. Evaluation mirrors inference: it first samples action
+Every rank evaluates a different local current frame, lazily loads the frozen
+FP32 FLUX.2 AE, and locally decodes its current/GT/predicted images. Each AE is
+immediately removed from GPU; compact uint8 pixels are gathered to rank 0 for
+CPU composition and upload as one eight-row W&B panel. Evaluation mirrors
+inference: it first samples action
 from pure noise, feeds the resulting clean action into the teacher-forcing
 track, then jointly samples future image/state/value from pure noise with
 20-step Flow-Euler. Set `ROBONANA_NUM_INFERENCE_STEPS` to use a different
