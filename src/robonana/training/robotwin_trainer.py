@@ -9,13 +9,17 @@ import torch
 from torch import Tensor
 
 from fact_train import Trainer
-from flux2.model import Klein4BParams
+from flux2.model import Flux2Params, Klein4BParams
 
 # Imports register the raw HDF5 dataset and sampler with FACT.
 from robonana.data import robotwin_hdf5 as _robotwin_hdf5  # noqa: F401
-from robonana.models.pretrained import configure_trainable_parameters, load_flux2_fact_checkpoint
+from robonana.models.pretrained import (
+    configure_trainable_parameters,
+    initialize_flux2_fact_model,
+    load_flux2_fact_checkpoint,
+)
 from robonana.models.position_ids import image_position_ids, text_position_ids
-from robonana.sampling import flow_euler_schedule, sample_two_stage_flow
+from robonana.sampling import flow_euler_schedule, sample_two_stage_flow, sample_world_flow
 from robonana.training.losses import joint_flow_loss
 from robonana.training.visualization import (
     decode_flux2_tokens,
@@ -72,23 +76,41 @@ class RoboNanaTrainer(Trainer):
         self.vae_dtype = torch.float32
 
     def get_models(self, model_config):
-        checkpoint = str(model_config.checkpoint)
         action_dim = int(model_config.get("action_dim", 14))
         state_dim = int(model_config.get("state_dim", 14))
         max_horizon = int(model_config.get("max_horizon", 48))
-        model, report = load_flux2_fact_checkpoint(
-            checkpoint,
-            action_dim=action_dim,
-            state_dim=state_dim,
-            max_horizon=max_horizon,
-            device=self.device,
-            dtype=self.dtype,
-            params=Klein4BParams(),
-        )
+        params_config = model_config.get("params", None)
+        params = Klein4BParams() if params_config is None else Flux2Params(**dict(params_config))
+        initialization = str(model_config.get("initialization", "pretrained"))
+        if initialization == "pretrained":
+            model, report = load_flux2_fact_checkpoint(
+                str(model_config.checkpoint),
+                action_dim=action_dim,
+                state_dim=state_dim,
+                max_horizon=max_horizon,
+                device=self.device,
+                dtype=self.dtype,
+                params=params,
+            )
+            initialization_label = f"pretrained checkpoint parameters={report.checkpoint_parameters}"
+        elif initialization == "scratch":
+            model = initialize_flux2_fact_model(
+                action_dim=action_dim,
+                state_dim=state_dim,
+                max_horizon=max_horizon,
+                device=self.device,
+                dtype=self.dtype,
+                params=params,
+            )
+            initialization_label = "scratch"
+        else:
+            raise ValueError(f"initialization must be 'pretrained' or 'scratch', got {initialization!r}")
         train_mode = str(model_config.get("train_mode", "full"))
         trainable_names = configure_trainable_parameters(model, train_mode)
         if bool(model_config.get("gradient_checkpointing", True)):
             model.enable_gradient_checkpointing()
+        else:
+            model.disable_gradient_checkpointing()
         model.train()
         self.model_name = "transformer"
 
@@ -100,10 +122,16 @@ class RoboNanaTrainer(Trainer):
             raise ValueError(f"unsupported VAE dtype: {vae_dtype_name}") from error
 
         if self.is_main_process:
+            parameter_count = sum(parameter.numel() for parameter in model.parameters())
+            trainable_count = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
             self.logger.info(
-                "Loaded FLUX.2 backbone parameters=%d; trainable tensors=%d; pixel eval interval=%d",
-                report.checkpoint_parameters,
+                "Initialized FLUX.2 backbone=%s; parameters=%d; trainable_parameters=%d; "
+                "trainable_tensors=%d; gradient_checkpointing=%s; pixel_eval_interval=%d",
+                initialization_label,
+                parameter_count,
+                trainable_count,
                 len(trainable_names),
+                model.gradient_checkpointing,
                 self.pixel_eval_interval,
             )
         return model
@@ -315,6 +343,14 @@ class RoboNanaTrainer(Trainer):
                     predict_action=predict_action,
                     predict_world=predict_world,
                 )
+                gt_action_samples = sample_world_flow(
+                    clean_action=action[:1].expand(count, -1, -1),
+                    future_noise=future_noise,
+                    future_state_noise=future_state_noise,
+                    value_noise=value_noise,
+                    schedule=schedule,
+                    predict_world=predict_world,
+                )
         finally:
             if model_was_training:
                 self.model.train()
@@ -362,6 +398,12 @@ class RoboNanaTrainer(Trainer):
                     grid_height=self.grid_height,
                     grid_width=self.grid_width,
                 )
+                local_gt_action_predictions = decode_flux2_tokens(
+                    vae,
+                    gt_action_samples.future,
+                    grid_height=self.grid_height,
+                    grid_width=self.grid_width,
+                )
 
                 def to_uint8(images: Tensor) -> Tensor:
                     return images.mul(255).round().to(torch.uint8)
@@ -369,6 +411,7 @@ class RoboNanaTrainer(Trainer):
                 local_current = to_uint8(local_current)
                 local_targets = to_uint8(local_targets)
                 local_predictions = to_uint8(local_predictions)
+                local_gt_action_predictions = to_uint8(local_gt_action_predictions)
         finally:
             vae.to("cpu")
             del vae
@@ -383,6 +426,13 @@ class RoboNanaTrainer(Trainer):
         gathered_predictions = self.accelerator.gather(local_predictions).reshape(
             self.accelerator.num_processes, count, *local_predictions.shape[1:]
         )
+        gathered_gt_action_predictions = self.accelerator.gather(
+            local_gt_action_predictions
+        ).reshape(
+            self.accelerator.num_processes,
+            count,
+            *local_gt_action_predictions.shape[1:],
+        )
         gathered_horizons = self.accelerator.gather(horizons.unsqueeze(0))
 
         try:
@@ -390,12 +440,16 @@ class RoboNanaTrainer(Trainer):
                 decoded_current = gathered_current.float().div(255).cpu()
                 decoded_targets = gathered_targets.float().div(255).cpu()
                 decoded_predictions = gathered_predictions.float().div(255).cpu()
+                decoded_gt_action_predictions = (
+                    gathered_gt_action_predictions.float().div(255).cpu()
+                )
                 log_pixel_eval(
                     accelerator=self.accelerator,
                     step=self.cur_step,
                     current=decoded_current,
                     targets=decoded_targets,
                     predictions=decoded_predictions,
+                    gt_action_predictions=decoded_gt_action_predictions,
                     horizons=gathered_horizons,
                     num_inference_steps=self.num_inference_steps,
                 )

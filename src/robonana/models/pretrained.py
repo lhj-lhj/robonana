@@ -48,6 +48,28 @@ def configure_trainable_parameters(model: Flux2FACTModel, mode: str) -> tuple[st
     return tuple(name for name, parameter in model.named_parameters() if parameter.requires_grad)
 
 
+def initialize_flux2_fact_model(
+    *,
+    action_dim: int,
+    state_dim: int,
+    value_dim: int = 1,
+    max_horizon: int = 64,
+    device: str | torch.device = "cuda",
+    dtype: torch.dtype = torch.bfloat16,
+    params: Flux2Params,
+) -> Flux2FACTModel:
+    """Initialize a scratch RoboNana model from the official FLUX.2 modules."""
+
+    model = Flux2FACTModel(
+        params,
+        action_dim=action_dim,
+        state_dim=state_dim,
+        value_dim=value_dim,
+        max_horizon=max_horizon,
+    )
+    return model.to(device=torch.device(device), dtype=dtype)
+
+
 def load_flux2_fact_checkpoint(
     checkpoint_path: str | Path,
     *,

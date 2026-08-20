@@ -17,6 +17,13 @@ class TwoStageFlowSample:
     value: Tensor
 
 
+@dataclass(frozen=True)
+class WorldFlowSample:
+    future: Tensor
+    future_state: Tensor
+    value: Tensor
+
+
 def sample_action_flow(
     *,
     action_noise: Tensor,
@@ -65,6 +72,50 @@ def flow_euler_step(sample: Tensor, velocity: Tensor, sigma: Tensor, sigma_next:
     return sample + delta * velocity.to(device=sample.device, dtype=sample.dtype)
 
 
+def sample_world_flow(
+    *,
+    clean_action: Tensor,
+    future_noise: Tensor,
+    future_state_noise: Tensor,
+    value_noise: Tensor,
+    schedule: Tensor,
+    predict_world: Callable[[Tensor, Tensor, Tensor, Tensor, Tensor], tuple[Tensor, Tensor, Tensor]],
+) -> WorldFlowSample:
+    """Denoise world targets from pure noise under a fixed clean action chunk."""
+
+    if schedule.ndim != 1 or schedule.numel() < 2:
+        raise ValueError("schedule must contain at least a start and end sigma")
+    if not bool(torch.isclose(schedule[0], schedule.new_tensor(1.0))):
+        raise ValueError("schedule must start at sigma=1 pure noise")
+    if not bool(torch.isclose(schedule[-1], schedule.new_tensor(0.0))):
+        raise ValueError("schedule must end at sigma=0 clean data")
+    if bool(torch.any(schedule[1:] > schedule[:-1])):
+        raise ValueError("schedule must be monotonically decreasing")
+
+    sampled_future = future_noise
+    sampled_future_state = future_state_noise
+    sampled_value = value_noise
+    for sigma, sigma_next in zip(schedule[:-1], schedule[1:]):
+        image_velocity, state_velocity, value_velocity = predict_world(
+            sampled_future,
+            sampled_future_state,
+            sampled_value,
+            clean_action,
+            sigma,
+        )
+        sampled_future = flow_euler_step(sampled_future, image_velocity, sigma, sigma_next)
+        sampled_future_state = flow_euler_step(
+            sampled_future_state, state_velocity, sigma, sigma_next
+        )
+        sampled_value = flow_euler_step(sampled_value, value_velocity, sigma, sigma_next)
+
+    return WorldFlowSample(
+        future=sampled_future,
+        future_state=sampled_future_state,
+        value=sampled_value,
+    )
+
+
 def sample_two_stage_flow(
     *,
     action_noise: Tensor,
@@ -91,26 +142,18 @@ def sample_two_stage_flow(
         predict_action=predict_action,
     )
 
-    sampled_future = future_noise
-    sampled_future_state = future_state_noise
-    sampled_value = value_noise
-    for sigma, sigma_next in zip(schedule[:-1], schedule[1:]):
-        image_velocity, state_velocity, value_velocity = predict_world(
-            sampled_future,
-            sampled_future_state,
-            sampled_value,
-            sampled_action,
-            sigma,
-        )
-        sampled_future = flow_euler_step(sampled_future, image_velocity, sigma, sigma_next)
-        sampled_future_state = flow_euler_step(
-            sampled_future_state, state_velocity, sigma, sigma_next
-        )
-        sampled_value = flow_euler_step(sampled_value, value_velocity, sigma, sigma_next)
+    world = sample_world_flow(
+        clean_action=sampled_action,
+        future_noise=future_noise,
+        future_state_noise=future_state_noise,
+        value_noise=value_noise,
+        schedule=schedule,
+        predict_world=predict_world,
+    )
 
     return TwoStageFlowSample(
         action=sampled_action,
-        future=sampled_future,
-        future_state=sampled_future_state,
-        value=sampled_value,
+        future=world.future,
+        future_state=world.future_state,
+        value=world.value,
     )

@@ -67,8 +67,11 @@ CPU composition and upload as one eight-row W&B panel. Evaluation mirrors
 inference: it first samples action
 from pure noise, feeds the resulting clean action into the teacher-forcing
 track, then jointly samples future image/state/value from pure noise with
-20-step Flow-Euler. Set `ROBONANA_NUM_INFERENCE_STEPS` to use a different
-shared eval/inference step count.
+20-step Flow-Euler. A second panel reuses the same future noise but conditions
+the world stage on the dataset GT action, isolating world-model alignment from
+action-generation error. W&B keys are `eval/fixed_horizon_grid` and
+`eval/fixed_horizon_gt_action_grid`. Set `ROBONANA_NUM_INFERENCE_STEPS` to use
+a different shared eval/inference step count.
 
 Ordinary training batches do not carry fixed-horizon eval targets. They retain
 only a scalar sample index; after periodic pure-noise sampling completes, the
@@ -86,6 +89,27 @@ interval, step 100 is saved by default; override it with a comma-separated
 `ROBONANA_EARLY_CHECKPOINT_STEPS` value.
 
 See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact reuse boundary.
+
+### Scratch 200M BF16 DDP experiment
+
+`robonana.configs.robotwin_flux2_small200m.config` keeps the full original
+50-task/2500-episode dataset and its language, token order, inputs, outputs,
+episode-uniform, action-chunk, tail-clip, and horizon sampling behavior. It
+initializes an approximately 200M-parameter FLUX.2-shaped DiT from scratch,
+disables both model-native gradient checkpointing and FACT activation
+checkpointing, and launches ordinary BF16 `MULTI_GPU` DDP without DeepSpeed.
+
+```bash
+ROBONANA_GPU_IDS=0,1,2,3,4,5,6,7 \
+ROBONANA_BATCH_SIZE=32 \
+ROBONANA_MAX_STEPS=10000 \
+ROBONANA_PROJECT_DIR="$PWD/experiments/robotwin_flux2_small200m" \
+  bash scripts/run_robotwin_train.sh \
+  --config robonana.configs.robotwin_flux2_small200m.config
+```
+
+The small config defaults to learning rate `1e-4` with 500 warmup steps. Use
+`ROBONANA_LR` and `ROBONANA_WARMUP_STEPS` to override them.
 
 ## RoboTwin FLUX caches
 
