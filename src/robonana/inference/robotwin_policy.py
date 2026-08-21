@@ -8,7 +8,7 @@ from typing import Any
 
 import torch
 from diffusers.models import AutoencoderKLFlux2
-from flux2.model import Klein4BParams
+from flux2.model import Flux2Params, Klein4BParams
 from torch import Tensor
 
 from robonana.data.robotwin_hdf5 import ALOHA_DELTA_MASK
@@ -32,6 +32,27 @@ from world_action_model.pipeline.utils import (
 
 def _clamp_like(value: Tensor, lower: Tensor, upper: Tensor) -> Tensor:
     return torch.maximum(torch.minimum(value, upper), lower)
+
+
+def robotwin_model_params(variant: str) -> Flux2Params:
+    """Return the exact training architecture for a RoboNana checkpoint."""
+
+    if variant == "klein4b":
+        return Klein4BParams()
+    if variant == "small200m":
+        return Flux2Params(
+            in_channels=128,
+            context_in_dim=7680,
+            hidden_size=1024,
+            num_heads=8,
+            depth=2,
+            depth_single_blocks=8,
+            axes_dim=[32, 32, 32, 32],
+            theta=2000,
+            mlp_ratio=3.0,
+            use_guidance_embed=False,
+        )
+    raise ValueError(f"unknown RoboNana model variant: {variant!r}")
 
 
 def postprocess_action(
@@ -81,6 +102,7 @@ class RoboNanaRobotWinPolicy:
         grid_width: int = 24,
         main_view_width: int = 256,
         main_view_height: int = 192,
+        model_params: Flux2Params | None = None,
     ) -> None:
         self.flux_checkpoint_dir = Path(flux_checkpoint_dir).expanduser().resolve()
         self.model_device = torch.device(model_device)
@@ -109,7 +131,7 @@ class RoboNanaRobotWinPolicy:
             max_horizon=self.max_horizon,
             device=self.model_device,
             dtype=self.dtype,
-            params=Klein4BParams(),
+            params=Klein4BParams() if model_params is None else model_params,
         )
         self.model.eval().requires_grad_(False)
         self.vae = AutoencoderKLFlux2.from_pretrained(

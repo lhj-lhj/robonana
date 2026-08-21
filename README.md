@@ -184,6 +184,10 @@ bash third_party/FACT/evaluation/robotwin/launch_client.sh \
   beat_block_hammer demo_clean step100 0
 ```
 
+For a checkpoint trained with `robotwin_flux2_small200m.py`, pass
+`--model-variant small200m` to `inference_server_robotwin.py`. The default
+remains the FLUX.2 Klein 4B architecture.
+
 ## Separate rollout collection and retraining
 
 Policy-generated data is never written into the initial RoboTwin root.  Each

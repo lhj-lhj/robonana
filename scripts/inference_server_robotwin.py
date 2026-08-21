@@ -22,7 +22,7 @@ for upstream in reversed(
 
 import torch
 
-from robonana.inference import RoboNanaRobotWinPolicy
+from robonana.inference import RoboNanaRobotWinPolicy, robotwin_model_params
 from world_action_model import apply_runtime_compat
 from world_action_model.sockets import RobotInferenceServer
 
@@ -42,6 +42,12 @@ def main() -> int:
     parser.add_argument("--action-chunk", type=int, default=48)
     parser.add_argument("--horizon", type=int, default=24)
     parser.add_argument("--num-inference-steps", type=int, default=20)
+    parser.add_argument(
+        "--model-variant",
+        choices=("klein4b", "small200m"),
+        default="klein4b",
+        help="Architecture used to create the trained checkpoint.",
+    )
     args = parser.parse_args()
     dtype = {
         "bf16": torch.bfloat16,
@@ -59,6 +65,7 @@ def main() -> int:
         action_chunk=args.action_chunk,
         horizon=args.horizon,
         num_inference_steps=args.num_inference_steps,
+        model_params=robotwin_model_params(args.model_variant),
     )
     print(
         f"Loaded RoboNana checkpoint with {policy.load_report.checkpoint_parameters:,} parameters",
