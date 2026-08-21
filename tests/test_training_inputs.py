@@ -1,6 +1,6 @@
 import torch
 
-from robonana.inference.robotwin_policy import postprocess_action
+from robonana.inference.robotwin_policy import postprocess_action, seeded_randn_like
 from robonana.training.robotwin_trainer import flow_noise, image_position_ids, text_position_ids
 from world_action_model.pipeline.utils import NormalizationTensors
 
@@ -55,3 +55,16 @@ def test_online_action_postprocess_matches_training_delta_convention():
         result,
         torch.tensor([[0.75, 0.25], [0.75, 0.25], [0.75, 0.25]]),
     )
+
+
+def test_seeded_action_noise_is_reproducible_without_mutating_global_rng():
+    reference = torch.empty(3, 4)
+    torch.manual_seed(9)
+    before = torch.random.get_rng_state()
+    first = seeded_randn_like(reference, 123)
+    after = torch.random.get_rng_state()
+    second = seeded_randn_like(reference, 123)
+
+    assert torch.equal(before, after)
+    torch.testing.assert_close(first, second)
+    assert not torch.equal(first, seeded_randn_like(reference, 124))

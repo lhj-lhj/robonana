@@ -34,6 +34,21 @@ def _clamp_like(value: Tensor, lower: Tensor, upper: Tensor) -> Tensor:
     return torch.maximum(torch.minimum(value, upper), lower)
 
 
+def seeded_randn_like(reference: Tensor, seed: int | None) -> Tensor:
+    """Sample without coupling evaluation noise to the server's global RNG."""
+
+    if seed is None:
+        return torch.randn_like(reference)
+    generator = torch.Generator(device=reference.device)
+    generator.manual_seed(int(seed))
+    return torch.randn(
+        reference.shape,
+        device=reference.device,
+        dtype=reference.dtype,
+        generator=generator,
+    )
+
+
 def robotwin_model_params(variant: str) -> Flux2Params:
     """Return the exact training architecture for a RoboNana checkpoint."""
 
@@ -205,7 +220,14 @@ class RoboNanaRobotWinPolicy:
         return tokens.to(device=self.model_device, dtype=self.dtype)
 
     @torch.inference_mode()
-    def _sample_action(self, *, context: Tensor, current: Tensor, state: Tensor) -> Tensor:
+    def _sample_action(
+        self,
+        *,
+        context: Tensor,
+        current: Tensor,
+        state: Tensor,
+        sampling_seed: int | None = None,
+    ) -> Tensor:
         batch_size = 1
         horizon = torch.tensor([self.horizon], device=self.model_device, dtype=torch.long)
         context_ids = text_position_ids(batch_size, context.shape[1], self.model_device)
@@ -234,7 +256,7 @@ class RoboNanaRobotWinPolicy:
             device=self.model_device,
             dtype=torch.bool,
         )
-        action_noise = torch.randn_like(clean_gt_action)
+        action_noise = seeded_randn_like(clean_gt_action, sampling_seed)
 
         def predict_action(sampled_action: Tensor, sigma: Tensor) -> Tensor:
             output = self.model(
@@ -296,6 +318,11 @@ class RoboNanaRobotWinPolicy:
             context=context,
             current=current,
             state=normalized_state,
+            sampling_seed=(
+                None
+                if observation.get("sampling_seed") is None
+                else int(observation["sampling_seed"])
+            ),
         )[0]
         self._sync(self.model_device)
         timing["action_sample_ms"] = (time.perf_counter() - start) * 1000.0
@@ -310,4 +337,5 @@ class RoboNanaRobotWinPolicy:
         return {
             "action": action.cpu(),
             "_policy_timing_ms": timing,
+            "_sampling_seed": observation.get("sampling_seed"),
         }
