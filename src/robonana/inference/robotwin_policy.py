@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -47,6 +49,25 @@ def seeded_randn_like(reference: Tensor, seed: int | None) -> Tensor:
         dtype=reference.dtype,
         generator=generator,
     )
+
+
+def observation_digest(observation: dict[str, Any]) -> str:
+    """Return a compact digest for reproducibility diagnostics."""
+
+    digest = hashlib.sha256()
+    for key in ("observation.state", *ROBOTWIN_VIEW_KEYS):
+        value = torch.as_tensor(observation[key]).detach().cpu().contiguous()
+        digest.update(key.encode("utf-8"))
+        digest.update(str(tuple(value.shape)).encode("ascii"))
+        digest.update(value.numpy().tobytes())
+    instruction = observation.get("instruction", observation.get("prompt", ""))
+    digest.update(str(instruction).encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
+def tensor_digest(value: Tensor) -> str:
+    digest = hashlib.sha256(value.detach().cpu().contiguous().numpy().tobytes())
+    return digest.hexdigest()[:16]
 
 
 def robotwin_model_params(variant: str) -> Flux2Params:
@@ -288,6 +309,13 @@ class RoboNanaRobotWinPolicy:
     def inference(self, observation: dict[str, Any]) -> dict[str, Any]:
         timing: dict[str, float] = {}
         total_start = time.perf_counter()
+        log_digest = os.environ.get("ROBONANA_LOG_INFERENCE_DIGEST", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        input_digest = observation_digest(observation) if log_digest else None
 
         raw_state = torch.as_tensor(
             observation["observation.state"],
@@ -334,6 +362,13 @@ class RoboNanaRobotWinPolicy:
             delta_mask=self.delta_mask,
         )
         timing["total_policy_ms"] = (time.perf_counter() - total_start) * 1000.0
+        if log_digest:
+            print(
+                "[RoboNana inference] "
+                f"sampling_seed={observation.get('sampling_seed')} "
+                f"input_digest={input_digest} action_digest={tensor_digest(action)}",
+                flush=True,
+            )
         return {
             "action": action.cpu(),
             "_policy_timing_ms": timing,

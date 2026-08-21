@@ -1,6 +1,10 @@
 import torch
 
-from robonana.inference.robotwin_policy import postprocess_action, seeded_randn_like
+from robonana.inference.robotwin_policy import (
+    observation_digest,
+    postprocess_action,
+    seeded_randn_like,
+)
 from robonana.training.robotwin_trainer import flow_noise, image_position_ids, text_position_ids
 from world_action_model.pipeline.utils import NormalizationTensors
 
@@ -68,3 +72,19 @@ def test_seeded_action_noise_is_reproducible_without_mutating_global_rng():
     assert torch.equal(before, after)
     torch.testing.assert_close(first, second)
     assert not torch.equal(first, seeded_randn_like(reference, 124))
+
+
+def test_observation_digest_tracks_inputs_not_dictionary_identity():
+    observation = {
+        "observation.state": torch.zeros(14),
+        "observation.images.cam_high": torch.zeros(3, 4, 5),
+        "observation.images.cam_left_wrist": torch.zeros(3, 4, 5),
+        "observation.images.cam_right_wrist": torch.zeros(3, 4, 5),
+        "instruction": "beat the block with the hammer",
+    }
+    copied = {key: value.clone() if isinstance(value, torch.Tensor) else value for key, value in observation.items()}
+    changed = dict(copied)
+    changed["observation.state"] = torch.ones(14)
+
+    assert observation_digest(observation) == observation_digest(copied)
+    assert observation_digest(observation) != observation_digest(changed)
