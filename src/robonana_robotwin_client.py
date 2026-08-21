@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import random
 from types import MethodType
 
 import numpy as np
@@ -33,6 +34,32 @@ from evaluation.robotwin.model2robotwin_interface import (  # noqa: E402
     reset_model as _fact_reset_model,
 )
 from robonana.data.rollout_writer import CAMERAS, RoboTwinRolloutWriter  # noqa: E402
+
+
+def _seed_python_random(seed: int) -> None:
+    """Seed the RNG RoboTwin uses for instruction shuffle/selection."""
+
+    random.seed(int(seed))
+
+
+def _patch_robotwin_python_random_seed() -> None:
+    """Make a RoboTwin episode seed cover Python-random instruction generation."""
+
+    try:
+        from envs._base_task import Base_Task
+    except ImportError:
+        return
+    if getattr(Base_Task, "_robonana_python_random_seed_patch", False):
+        return
+    original_init_task_env = Base_Task._init_task_env_
+
+    def _init_task_env_with_python_seed(self, *args, **kwargs):
+        if "seed" in kwargs:
+            _seed_python_random(int(kwargs["seed"]))
+        return original_init_task_env(self, *args, **kwargs)
+
+    Base_Task._init_task_env_ = _init_task_env_with_python_seed
+    Base_Task._robonana_python_random_seed_patch = True
 
 
 def sampling_seed_for_step(episode_seed: int, step: int, execute_actions_per_plan: int) -> int:
@@ -91,6 +118,7 @@ def _finish_pending_rollout(model) -> None:
 
 
 def get_model(usr_args):
+    _patch_robotwin_python_random_seed()
     writer = _rollout_writer(usr_args)
     fact_args = dict(usr_args)
     if writer is not None:
