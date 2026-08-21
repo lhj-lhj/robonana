@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import os
+from types import MethodType
 
 import numpy as np
 
@@ -32,6 +33,32 @@ from evaluation.robotwin.model2robotwin_interface import (  # noqa: E402
     reset_model as _fact_reset_model,
 )
 from robonana.data.rollout_writer import CAMERAS, RoboTwinRolloutWriter  # noqa: E402
+
+
+def sampling_seed_for_step(episode_seed: int, step: int, execute_actions_per_plan: int) -> int:
+    """Return a stable diffusion seed for one episode/replanning point."""
+
+    interval = max(1, int(execute_actions_per_plan))
+    plan_index = int(step) // interval
+    return int(episode_seed) * 1_000_003 + plan_index
+
+
+def _install_sampling_seed_hook(model) -> None:
+    """Forward the tracked RoboTwin episode seed through FACT's request builder."""
+
+    if getattr(model, "_robonana_sampling_seed_hook", False):
+        return
+    original_build_request = model._build_request
+
+    def _build_request_with_seed(self, example):
+        request = original_build_request(example)
+        sampling_seed = getattr(self, "_robonana_sampling_seed", None)
+        if sampling_seed is not None:
+            request["sampling_seed"] = int(sampling_seed)
+        return request
+
+    model._build_request = MethodType(_build_request_with_seed, model)
+    model._robonana_sampling_seed_hook = True
 
 
 def _rollout_writer(usr_args) -> RoboTwinRolloutWriter | None:
@@ -71,6 +98,7 @@ def get_model(usr_args):
         fact_args["low_frequency_rgb"] = False
         fact_args["skip_action_render_sync"] = False
     model = _fact_get_model(fact_args)
+    _install_sampling_seed_hook(model)
     model._robonana_rollout_writer = writer
     if writer is not None:
         atexit.register(_finish_pending_rollout, model)
@@ -91,6 +119,14 @@ def _episode_seed(task_env) -> int | None:
 
 
 def eval(TASK_ENV, model, observation):  # noqa: A001,N803
+    step = int(getattr(TASK_ENV, "take_action_cnt", 0))
+    episode_seed = _episode_seed(TASK_ENV)
+    if episode_seed is not None and model.needs_new_plan(step):
+        model._robonana_sampling_seed = sampling_seed_for_step(
+            episode_seed,
+            step,
+            model.execute_actions_per_plan,
+        )
     writer = getattr(model, "_robonana_rollout_writer", None)
     if writer is None:
         return _fact_eval(TASK_ENV, model, observation)
@@ -101,7 +137,6 @@ def eval(TASK_ENV, model, observation):  # noqa: A001,N803
         camera: np.asarray(observation["observation"][camera]["rgb"]).copy()
         for camera in CAMERAS
     }
-    step = int(getattr(TASK_ENV, "take_action_cnt", 0))
     needed_new_plan = model.needs_new_plan(step)
     result = _fact_eval(TASK_ENV, model, observation)
     plan_offset = 0 if needed_new_plan else step % model.execute_actions_per_plan
