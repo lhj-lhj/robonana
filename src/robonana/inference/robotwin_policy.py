@@ -70,6 +70,18 @@ def tensor_digest(value: Tensor) -> str:
     return digest.hexdigest()[:16]
 
 
+def observation_component_digests(observation: dict[str, Any]) -> dict[str, str]:
+    instruction = observation.get("instruction", observation.get("prompt", ""))
+    components = {
+        "state": tensor_digest(torch.as_tensor(observation["observation.state"])),
+        "high": tensor_digest(torch.as_tensor(observation["observation.images.cam_high"])),
+        "left": tensor_digest(torch.as_tensor(observation["observation.images.cam_left_wrist"])),
+        "right": tensor_digest(torch.as_tensor(observation["observation.images.cam_right_wrist"])),
+        "instruction": hashlib.sha256(str(instruction).encode("utf-8")).hexdigest()[:16],
+    }
+    return components
+
+
 def robotwin_model_params(variant: str) -> Flux2Params:
     """Return the exact training architecture for a RoboNana checkpoint."""
 
@@ -363,10 +375,12 @@ class RoboNanaRobotWinPolicy:
         )
         timing["total_policy_ms"] = (time.perf_counter() - total_start) * 1000.0
         if log_digest:
+            components = observation_component_digests(observation)
             print(
                 "[RoboNana inference] "
                 f"sampling_seed={observation.get('sampling_seed')} "
-                f"input_digest={input_digest} action_digest={tensor_digest(action)}",
+                f"input_digest={input_digest} action_digest={tensor_digest(action)} "
+                + " ".join(f"{key}_digest={value}" for key, value in components.items()),
                 flush=True,
             )
         return {
