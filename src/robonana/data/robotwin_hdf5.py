@@ -163,7 +163,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self._stats: dict[str, Any] | None = None
         self._latent_cache: OrderedDict[Path, torch.Tensor] = OrderedDict()
         self._language_cache: OrderedDict[Path, torch.Tensor] = OrderedDict()
-        self._hdf5_cache: OrderedDict[Path, h5py.File] = OrderedDict()
+        self._hdf5_cache: OrderedDict[Path, Any] = OrderedDict()
 
     @classmethod
     def load(cls, data_or_config):
@@ -188,7 +188,9 @@ class RoboTwinHDF5Dataset(BaseDataset):
 
     def close(self) -> None:
         for handle in self._hdf5_cache.values():
-            handle.close()
+            close = getattr(handle, "close", None)
+            if close is not None:
+                close()
         self._hdf5_cache.clear()
         self._latent_cache.clear()
         self._language_cache.clear()
@@ -213,6 +215,19 @@ class RoboTwinHDF5Dataset(BaseDataset):
 
     def _handle(self, path: Path) -> h5py.File:
         return self._lru_get(self._hdf5_cache, path, lambda p: h5py.File(p, "r"), self.hdf5_cache_size)
+
+    def _episode_state_action(self, record: EpisodeRecord) -> tuple[np.ndarray, np.ndarray]:
+        """Load one episode's state and policy-action arrays.
+
+        The LeRobot adapter overrides this method while reusing the exact same
+        horizon, action-chunk, normalization, cache, and loss inputs below.
+        """
+
+        handle = self._handle(record.source)
+        state = np.asarray(handle["joint_action/vector"][:, : self.action_dim], dtype=np.float32)
+        action_key = "policy_action/vector" if "policy_action/vector" in handle else "joint_action/vector"
+        action = np.asarray(handle[action_key][:, : self.action_dim], dtype=np.float32)
+        return state, action
 
     def _latents(self, record: EpisodeRecord) -> torch.Tensor:
         path = episode_cache_path(record.task_dir, record.episode_index)
@@ -280,12 +295,14 @@ class RoboTwinHDF5Dataset(BaseDataset):
             record.length - 1,
         )
 
-        # Episodes are short (~140 steps). Reading the small action array once also
-        # avoids h5py's strict-increasing-index restriction at tail-clipped repeats.
-        handle = self._handle(record.source)
-        vector = np.asarray(handle["joint_action/vector"][:, : self.action_dim], dtype=np.float32)
-        action_key = "policy_action/vector" if "policy_action/vector" in handle else "joint_action/vector"
-        policy_action = np.asarray(handle[action_key][:, : self.action_dim], dtype=np.float32)
+        # Episodes are short (~140 steps). Reading the small arrays once also
+        # avoids backend-specific indexed-read restrictions at clipped tails.
+        vector, policy_action = self._episode_state_action(record)
+        if vector.shape[0] != record.length:
+            raise RuntimeError(
+                f"State length {vector.shape[0]} disagrees with episode length "
+                f"{record.length}: {record.source}"
+            )
         if policy_action.shape[0] != record.length:
             raise RuntimeError(
                 f"Policy action length {policy_action.shape[0]} disagrees with episode length "

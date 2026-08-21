@@ -111,6 +111,32 @@ ROBONANA_PROJECT_DIR="$PWD/experiments/robotwin_flux2_small200m" \
 The small config defaults to learning rate `1e-4` with 500 warmup steps. Use
 `ROBONANA_LR` and `ROBONANA_WARMUP_STEPS` to override them.
 
+### Full RoboTwin-v2 scratch 800M experiment
+
+`robonana.configs.robotwin_flux2_800m.config` reads FACT's released LeRobot-v2
+layout directly: 50 Clean tasks with 50 episodes each plus 50 Randomized tasks
+with 500 episodes each. It reuses the same RoboNana token order, action chunk,
+tail clipping, language conditioning, horizon mixture, heads, and losses. The
+FLUX-shaped DiT has 791,333,376 parameters (`hidden_size=1536`, 12 heads, 4
+double-stream blocks, 16 single-stream blocks), is initialized from scratch,
+and runs ordinary BF16 DDP without gradient checkpointing.
+
+The resumable background pipeline computes full-dataset norm stats/index,
+per-episode Qwen3 contexts, per-frame FLUX AE tokens, validates all 27,500
+episodes, waits until all eight GPUs are free, then starts 120k steps at global
+batch size 256 (32 samples per GPU):
+
+```bash
+setsid -f bash scripts/run_full800m_pipeline.sh
+cat /data3/hongjia/robonana-jobs/full800m_bs256_120k/status.txt
+tail -f /data3/hongjia/robonana-jobs/full800m_bs256_120k/pipeline.log
+```
+
+The source archive is not duplicated when its size and Hugging Face LFS SHA256
+already match. Preprocessing uses GPUs 1-7 by default so a pre-existing GPU 0
+job is left untouched; training waits for all eight GPUs rather than evicting
+another process.
+
 ## RoboTwin FLUX caches
 
 Raw RoboTwin HDF5 tasks are converted without changing FACT's three-view
