@@ -1,6 +1,7 @@
 import torch
 
 from robonana.inference.robotwin_policy import (
+    observation_component_digests,
     observation_digest,
     postprocess_action,
     seeded_randn_like,
@@ -88,3 +89,8 @@ def test_observation_digest_tracks_inputs_not_dictionary_identity():
 
     assert observation_digest(observation) == observation_digest(copied)
     assert observation_digest(observation) != observation_digest(changed)
+    assert observation_component_digests(observation) == observation_component_digests(copied)
+    assert (
+        observation_component_digests(observation)["state"]
+        != observation_component_digests(changed)["state"]
+    )
