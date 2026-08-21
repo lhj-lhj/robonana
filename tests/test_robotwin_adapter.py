@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from robonana_robotwin_client import _install_sampling_seed_hook, sampling_seed_for_step
+import random
+
+from robonana_robotwin_client import (
+    _install_sampling_seed_hook,
+    _seed_python_random,
+    sampling_seed_for_step,
+)
 
 
 def test_dotted_robotwin_policy_adapter_exports_fact_hooks() -> None:
@@ -39,3 +45,16 @@ def test_fact_request_hook_forwards_sampling_seed() -> None:
     model._robonana_sampling_seed = 1234
 
     assert model._build_request({"value": 7}) == {"value": 7, "sampling_seed": 1234}
+
+
+def test_episode_seed_controls_python_random_instruction_selection() -> None:
+    previous_state = random.getstate()
+    try:
+        _seed_python_random(100000)
+        first = [random.random() for _ in range(4)]
+        _seed_python_random(100000)
+        second = [random.random() for _ in range(4)]
+    finally:
+        random.setstate(previous_state)
+
+    assert first == second
