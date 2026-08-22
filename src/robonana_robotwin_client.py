@@ -62,6 +62,15 @@ def _patch_robotwin_python_random_seed() -> None:
     Base_Task._robonana_python_random_seed_patch = True
 
 
+def _align_eval_instruction_with_training(task_env) -> str:
+    """Optionally replace RoboTwin's sampled paraphrase with the training prompt."""
+
+    instruction = os.environ.get("ROBONANA_EVAL_INSTRUCTION", "").strip()
+    if instruction:
+        task_env.set_instruction(instruction=instruction)
+    return str(task_env.get_instruction())
+
+
 def sampling_seed_for_step(episode_seed: int, step: int, execute_actions_per_plan: int) -> int:
     """Return a stable diffusion seed for one episode/replanning point."""
 
@@ -147,6 +156,7 @@ def _episode_seed(task_env) -> int | None:
 
 
 def eval(TASK_ENV, model, observation):  # noqa: A001,N803
+    _align_eval_instruction_with_training(TASK_ENV)
     step = int(getattr(TASK_ENV, "take_action_cnt", 0))
     episode_seed = _episode_seed(TASK_ENV)
     if episode_seed is not None and model.needs_new_plan(step):

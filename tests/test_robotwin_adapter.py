@@ -3,10 +3,33 @@ from __future__ import annotations
 import random
 
 from robonana_robotwin_client import (
+    _align_eval_instruction_with_training,
     _install_sampling_seed_hook,
     _seed_python_random,
     sampling_seed_for_step,
 )
+
+
+def test_eval_instruction_can_match_the_training_cache(monkeypatch) -> None:
+    class FakeTask:
+        instruction = "random paraphrase"
+
+        def set_instruction(self, instruction):
+            self.instruction = instruction
+
+        def get_instruction(self):
+            return self.instruction
+
+    task = FakeTask()
+    monkeypatch.setenv(
+        "ROBONANA_EVAL_INSTRUCTION",
+        "Use the medium-sized metal hammer to hammer the block.",
+    )
+
+    assert _align_eval_instruction_with_training(task) == (
+        "Use the medium-sized metal hammer to hammer the block."
+    )
+    assert task.get_instruction() == "Use the medium-sized metal hammer to hammer the block."
 
 
 def test_dotted_robotwin_policy_adapter_exports_fact_hooks() -> None:
