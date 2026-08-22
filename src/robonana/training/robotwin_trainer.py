@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -46,6 +47,17 @@ def resolve_cuda_device_index(device: torch.device) -> int | None:
     return device.index if device.index is not None else torch.cuda.current_device()
 
 
+def _config_value(config: Any, name: str, default: Any = None) -> Any:
+    """Read both FACT Config attributes and ordinary mapping keys reliably."""
+    try:
+        return getattr(config, name)
+    except AttributeError:
+        if isinstance(config, Mapping):
+            return config.get(name, default)
+        getter = getattr(config, "get", None)
+        return getter(name, default) if getter is not None else default
+
+
 class RoboNanaTrainer(Trainer):
     """Reuse FACT's DataLoader, Accelerate, optimizer, checkpoint, and logging loop."""
 
@@ -76,15 +88,24 @@ class RoboNanaTrainer(Trainer):
         self.vae_dtype = torch.float32
 
     def get_models(self, model_config):
-        action_dim = int(model_config.get("action_dim", 14))
-        state_dim = int(model_config.get("state_dim", 14))
-        max_horizon = int(model_config.get("max_horizon", 48))
-        params_config = model_config.get("params", None)
+        action_dim = int(_config_value(model_config, "action_dim", 14))
+        state_dim = int(_config_value(model_config, "state_dim", 14))
+        max_horizon = int(_config_value(model_config, "max_horizon", 48))
+        params_config = _config_value(model_config, "params", None)
         params = Klein4BParams() if params_config is None else Flux2Params(**dict(params_config))
-        initialization = str(model_config.get("initialization", "pretrained"))
+        checkpoint = _config_value(model_config, "checkpoint", None)
+        initialization = str(
+            _config_value(
+                model_config,
+                "initialization",
+                "pretrained" if checkpoint is not None else "scratch",
+            )
+        )
         if initialization == "pretrained":
+            if checkpoint is None:
+                raise ValueError("pretrained initialization requires models.checkpoint")
             model, report = load_flux2_fact_checkpoint(
-                str(model_config.checkpoint),
+                str(checkpoint),
                 action_dim=action_dim,
                 state_dim=state_dim,
                 max_horizon=max_horizon,
@@ -105,17 +126,17 @@ class RoboNanaTrainer(Trainer):
             initialization_label = "scratch"
         else:
             raise ValueError(f"initialization must be 'pretrained' or 'scratch', got {initialization!r}")
-        train_mode = str(model_config.get("train_mode", "full"))
+        train_mode = str(_config_value(model_config, "train_mode", "full"))
         trainable_names = configure_trainable_parameters(model, train_mode)
-        if bool(model_config.get("gradient_checkpointing", True)):
+        if bool(_config_value(model_config, "gradient_checkpointing", True)):
             model.enable_gradient_checkpointing()
         else:
             model.disable_gradient_checkpointing()
         model.train()
         self.model_name = "transformer"
 
-        self.vae_checkpoint_dir = str(model_config.checkpoint_dir)
-        vae_dtype_name = str(model_config.get("vae_dtype", "float32"))
+        self.vae_checkpoint_dir = str(_config_value(model_config, "checkpoint_dir"))
+        vae_dtype_name = str(_config_value(model_config, "vae_dtype", "float32"))
         try:
             self.vae_dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[vae_dtype_name]
         except KeyError as error:
