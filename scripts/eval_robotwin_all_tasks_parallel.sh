@@ -11,6 +11,7 @@ flux_checkpoint=${ROBONANA_FLUX_CHECKPOINT_DIR:-${repo_root}/checkpoints/FLUX.2-
 stats_path=${ROBONANA_STATS_PATH:-${dataset_root}/robonana_norm_stats.json}
 model_python=${ROBONANA_MODEL_PYTHON:-/data3/hongjia/conda/envs/robonana/bin/python}
 robotwin_env=${ROBOTWIN_CONDA_ENV:-/data3/hongjia/conda/envs/robotwin2}
+fact_conda_env=${FACT_CONDA_ENV:-$(dirname "$(dirname "${model_python}")")}
 gpu_csv=${ROBONANA_EVAL_GPUS:-0,1,2,3,4,5,6,7}
 port_base=${ROBONANA_PORT_BASE:-18000}
 run_dir=${ROBONANA_EVAL_RUN_DIR:-${repo_root}/outputs/robotwin_full_eval_$(date +%Y%m%d_%H%M%S)}
@@ -107,6 +108,8 @@ run_worker() {
     PYTHONPATH="${repo_root}/src" \
     ROBOTWIN_PATH="${robotwin_path}" \
     ROBOTWIN_CONDA_ENV="${robotwin_env}" \
+    CLIENT_PYTHON="${robotwin_env}/bin/python" \
+    FACT_CONDA_ENV="${fact_conda_env}" \
     DEPLOY_POLICY_PATH="${deploy_policy}" \
     POLICY_NAME=robonana_robotwin.adapter \
     PORT="${port}" \
@@ -125,7 +128,10 @@ run_worker() {
     TASK_LIST="${shard[*]}" \
     SWEEP_OUT="${worker_dir}/sweep" \
     bash "${repo_root}/third_party/FACT/evaluation/robotwin/eval_all_tasks.sh" \
-      "${task_config}" "${test_num}"
+      "${task_config}" "${test_num}" || client_status=$?
+  cleanup_worker
+  trap - EXIT INT TERM
+  return "${client_status:-0}"
 }
 
 declare -a worker_pids=()
