@@ -36,6 +36,13 @@ from evaluation.robotwin.model2robotwin_interface import (  # noqa: E402
 from robonana.data.rollout_writer import CAMERAS, RoboTwinRolloutWriter  # noqa: E402
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _seed_python_random(seed: int) -> None:
     """Seed the RNG RoboTwin uses for instruction shuffle/selection."""
 
@@ -97,6 +104,122 @@ def _install_sampling_seed_hook(model) -> None:
     model._robonana_sampling_seed_hook = True
 
 
+def _response_scalar(value) -> float:
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().reshape(-1)[0].item()
+    return float(np.asarray(value).reshape(-1)[0])
+
+
+def _install_chunk_value_hook(model) -> None:
+    """Retain server value metadata for the full environment action chunk."""
+
+    if getattr(model, "_robonana_chunk_value_hook", False):
+        return
+    original_inference = model.client.inference
+
+    def inference_with_chunk_value(request):
+        response = original_inference(request)
+        if isinstance(response, dict) and response.get("chunk_value") is not None:
+            model._robonana_chunk_value = _response_scalar(response["chunk_value"])
+            model._robonana_value_horizon = int(response.get("value_horizon", 0))
+            model._robonana_chunk_index = int(
+                getattr(model, "_robonana_chunk_index", -1)
+            ) + 1
+        return response
+
+    model.client.inference = inference_with_chunk_value
+    model._robonana_chunk_value = None
+    model._robonana_value_horizon = 0
+    model._robonana_chunk_index = -1
+    model._robonana_chunk_value_hook = True
+
+
+def _overlay_value(frame: np.ndarray, label: str) -> np.ndarray:
+    import cv2
+
+    output = np.ascontiguousarray(frame).copy()
+    height, width = output.shape[:2]
+    scale = max(0.45, width / 900.0)
+    thickness = max(1, int(round(width / 640.0)))
+    (text_width, text_height), baseline = cv2.getTextSize(
+        label,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        thickness,
+    )
+    x, y = 12, 12 + text_height
+    cv2.rectangle(
+        output,
+        (x - 6, y - text_height - 6),
+        (min(width - 1, x + text_width + 6), min(height - 1, y + baseline + 6)),
+        (0, 0, 0),
+        thickness=-1,
+    )
+    cv2.putText(
+        output,
+        label,
+        (x, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        (255, 255, 255),
+        thickness,
+        lineType=cv2.LINE_AA,
+    )
+    return output
+
+
+class _ChunkValueOverlayStream:
+    """Annotate each raw RoboTwin RGB frame before it reaches ffmpeg."""
+
+    def __init__(self, stream, task_env, model) -> None:
+        self._stream = stream
+        self._task_env = task_env
+        self._model = model
+
+    def write(self, data):
+        value = getattr(self._model, "_robonana_chunk_value", None)
+        if value is None:
+            return self._stream.write(data)
+        try:
+            reference = np.asarray(
+                self._task_env.now_obs["observation"]["head_camera"]["rgb"]
+            )
+            if reference.ndim != 3 or reference.shape[-1] != 3:
+                return self._stream.write(data)
+            frame_bytes = int(reference.size)
+            raw = bytes(data)
+            if not raw or len(raw) % frame_bytes:
+                return self._stream.write(data)
+            horizon = int(getattr(self._model, "_robonana_value_horizon", 0))
+            chunk_index = int(getattr(self._model, "_robonana_chunk_index", 0))
+            label = f"chunk={chunk_index:03d}  h={horizon}  value={float(value):.4f}"
+            annotated = []
+            for offset in range(0, len(raw), frame_bytes):
+                frame = np.frombuffer(
+                    raw[offset : offset + frame_bytes],
+                    dtype=np.uint8,
+                ).reshape(reference.shape)
+                annotated.append(_overlay_value(frame, label).tobytes())
+            return self._stream.write(b"".join(annotated))
+        except Exception as error:
+            if not getattr(self, "_warned", False):
+                print(f"[RoboNana video] value overlay disabled for frame: {error}", flush=True)
+                self._warned = True
+            return self._stream.write(data)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _install_video_value_overlay(task_env, model) -> None:
+    if not _env_bool("ROBONANA_OVERLAY_CHUNK_VALUE", False):
+        return
+    ffmpeg = getattr(task_env, "eval_video_ffmpeg", None)
+    if ffmpeg is None or isinstance(ffmpeg.stdin, _ChunkValueOverlayStream):
+        return
+    ffmpeg.stdin = _ChunkValueOverlayStream(ffmpeg.stdin, task_env, model)
+
+
 def _rollout_writer(usr_args) -> RoboTwinRolloutWriter | None:
     dataset_root = os.environ.get("ROBONANA_ROLLOUT_DATASET_ROOT", "").strip()
     if not dataset_root:
@@ -136,6 +259,7 @@ def get_model(usr_args):
         fact_args["skip_action_render_sync"] = False
     model = _fact_get_model(fact_args)
     _install_sampling_seed_hook(model)
+    _install_chunk_value_hook(model)
     model._robonana_rollout_writer = writer
     if writer is not None:
         atexit.register(_finish_pending_rollout, model)
@@ -146,6 +270,9 @@ def get_model(usr_args):
 def reset_model(model) -> None:
     _finish_pending_rollout(model)
     _fact_reset_model(model)
+    model._robonana_chunk_value = None
+    model._robonana_value_horizon = 0
+    model._robonana_chunk_index = -1
 
 
 def _episode_seed(task_env) -> int | None:
@@ -157,6 +284,7 @@ def _episode_seed(task_env) -> int | None:
 
 def eval(TASK_ENV, model, observation):  # noqa: A001,N803
     _align_eval_instruction_with_training(TASK_ENV)
+    _install_video_value_overlay(TASK_ENV, model)
     step = int(getattr(TASK_ENV, "take_action_cnt", 0))
     episode_seed = _episode_seed(TASK_ENV)
     if episode_seed is not None and model.needs_new_plan(step):

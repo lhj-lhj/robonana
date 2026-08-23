@@ -216,6 +216,25 @@ discovers the FACT `config.json` above the checkpoint, or accepts an explicit
 `models.params`, action/state/value dimensions, and `max_horizon`; missing or
 partial metadata is a hard error and is never inferred from checkpoint tensors.
 
+For the canonical 50-task evaluation, use the eight-way launcher. It starts one
+800M inference server and one RoboTwin client per GPU, assigns the 50 tasks
+round-robin, enables native MP4 recording, and saves one value trace per episode:
+
+```bash
+export ROBONANA_TRAINED_CHECKPOINT="$PWD/experiments/<run>/models/<checkpoint>/transformer/diffusion_pytorch_model.bin"
+export ROBONANA_EVAL_GPUS=0,1,2,3,4,5,6,7
+bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
+```
+
+The launcher first audits all 27,500 training episodes. Their metadata prompt
+must match RoboTwin's `seen` template family and exactly match the prompt stored
+beside the Qwen3 cache. Evaluation therefore uses `instruction_type: seen`, not
+RoboTwin's default `unseen`. Each plan runs Stage-2 world sampling at `h=24`,
+denormalizes its scalar value, stores it in `values_per_plan` inside the episode
+NPZ trace, and overlays the same `chunk/h/value` label on every native video
+frame executed from that 48-action chunk. The run fails if it does not produce
+all 50 task results, `50 * test_num` MP4s, and the same number of value traces.
+
 ## Separate rollout collection and retraining
 
 Policy-generated data is never written into the initial RoboTwin root.  Each

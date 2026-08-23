@@ -1,4 +1,7 @@
+from types import SimpleNamespace
+
 import torch
+from flux2.model import Flux2Params
 
 from robonana.inference.robotwin_policy import (
     observation_component_digests,
@@ -6,6 +9,8 @@ from robonana.inference.robotwin_policy import (
     postprocess_action,
     seeded_randn_like,
 )
+from robonana.models.flux2_fact import Flux2FACTModel
+from robonana.sampling import flow_euler_schedule
 from robonana.training.robotwin_trainer import flow_noise, image_position_ids, text_position_ids
 from world_action_model.pipeline.utils import NormalizationTensors
 
@@ -94,3 +99,106 @@ def test_observation_digest_tracks_inputs_not_dictionary_identity():
         observation_component_digests(observation)["state"]
         != observation_component_digests(changed)["state"]
     )
+
+
+def test_online_policy_returns_denormalized_chunk_value_contract(monkeypatch):
+    from robonana.inference.robotwin_policy import RoboNanaRobotWinPolicy
+
+    zeros = torch.zeros(2)
+    ones = torch.ones(2)
+    policy = object.__new__(RoboNanaRobotWinPolicy)
+    policy.model_device = torch.device("cpu")
+    policy.vae_device = torch.device("cpu")
+    policy.dtype = torch.float32
+    policy.state_dim = 2
+    policy.horizon = 24
+    policy.return_chunk_value = True
+    policy.delta_mask = torch.tensor([False, False])
+    policy.model = SimpleNamespace(value_dim=1)
+    policy.normalization = NormalizationTensors(
+        state_mean=zeros,
+        state_std=ones,
+        state_min=torch.full((2,), -2.0),
+        state_max=torch.full((2,), 2.0),
+        action_mean=zeros,
+        action_std=ones,
+        action_min=torch.full((2,), -1.0),
+        action_max=torch.full((2,), 1.0),
+        value_min=torch.tensor([-1.0]),
+        value_max=torch.tensor([2.0]),
+    )
+    monkeypatch.setattr(policy, "_sync", lambda device: None)
+    monkeypatch.setattr(
+        policy,
+        "_current_image_tokens",
+        lambda observation: torch.zeros(1, 6, 8),
+    )
+    monkeypatch.setattr(policy, "_context", lambda instruction: torch.zeros(1, 2, 4))
+    monkeypatch.setattr(
+        policy,
+        "_sample_action",
+        lambda **kwargs: torch.zeros(1, 3, 2),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_sample_value",
+        lambda **kwargs: torch.zeros(1, 1, 1),
+    )
+
+    response = policy.inference(
+        {
+            "observation.state": torch.zeros(2),
+            "instruction": "move the object",
+        }
+    )
+
+    assert response["action"].shape == (3, 2)
+    assert response["chunk_value"] == 0.5
+    assert response["value_horizon"] == 24
+    torch.testing.assert_close(response["values_per_sample"], torch.tensor([0.5]))
+    assert response["selected_index"] == 0
+
+
+def test_online_value_sampler_runs_full_world_path_reproducibly():
+    from robonana.inference.robotwin_policy import RoboNanaRobotWinPolicy
+
+    params = Flux2Params(
+        in_channels=8,
+        context_in_dim=16,
+        hidden_size=32,
+        num_heads=4,
+        depth=1,
+        depth_single_blocks=1,
+        axes_dim=[2, 2, 2, 2],
+        mlp_ratio=2.0,
+        use_guidance_embed=False,
+    )
+    policy = object.__new__(RoboNanaRobotWinPolicy)
+    policy.model_device = torch.device("cpu")
+    policy.dtype = torch.float32
+    policy.horizon = 2
+    policy.grid_height = 1
+    policy.grid_width = 2
+    policy.state_dim = 3
+    policy.model = Flux2FACTModel(
+        params,
+        action_dim=4,
+        state_dim=3,
+        value_dim=1,
+        max_horizon=4,
+    ).eval()
+    policy.schedule = flow_euler_schedule(1, flow_shift=1.0, device="cpu")
+    kwargs = {
+        "context": torch.randn(1, 2, 16),
+        "current": torch.randn(1, 2, 8),
+        "state": torch.randn(1, 1, 3),
+        "clean_action": torch.randn(1, 3, 4),
+        "sampling_seed": 123,
+    }
+
+    first = policy._sample_value(**kwargs)
+    second = policy._sample_value(**kwargs)
+
+    assert first.shape == (1, 1, 1)
+    assert torch.isfinite(first).all()
+    torch.testing.assert_close(first, second)

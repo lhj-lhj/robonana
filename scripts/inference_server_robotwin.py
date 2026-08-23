@@ -50,6 +50,11 @@ def main() -> int:
     parser.add_argument("--action-chunk", type=int, default=48)
     parser.add_argument("--horizon", type=int, default=24)
     parser.add_argument("--num-inference-steps", type=int, default=20)
+    parser.add_argument(
+        "--return-chunk-value",
+        action="store_true",
+        help="Run the Stage-2 world sampler and return one denormalized value per action chunk.",
+    )
     args = parser.parse_args()
     dtype = {
         "bf16": torch.bfloat16,
@@ -68,6 +73,7 @@ def main() -> int:
         action_chunk=args.action_chunk,
         horizon=args.horizon,
         num_inference_steps=args.num_inference_steps,
+        return_chunk_value=args.return_chunk_value,
     )
     resolved = policy.load_report.model_config
     print(

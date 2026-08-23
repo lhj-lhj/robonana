@@ -1,0 +1,17 @@
+policy_name: robonana_robotwin.adapter
+ckpt_setting: fact
+instruction_type: seen
+host: "127.0.0.1"
+port: 8093
+action_dim: 14
+execute_actions_per_plan: 48
+server_timeout_ms: 600000
+server_wait_seconds: 600.0
+trace_root: ""
+print_action_stats: false
+enable_sample: false
+best_of_n: 1
+enable_value_vis: true
+trace_value_only: true
+low_frequency_rgb: false
+skip_action_render_sync: false

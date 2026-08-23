@@ -17,7 +17,7 @@ from robonana.data.robotwin_hdf5 import ALOHA_DELTA_MASK
 from robonana.encoding import LocalQwen3Embedder, encode_flux2_image_tokens
 from robonana.models.position_ids import image_position_ids, text_position_ids
 from robonana.models.pretrained import load_flux2_fact_trained_checkpoint
-from robonana.sampling import flow_euler_schedule, sample_action_flow
+from robonana.sampling import flow_euler_schedule, sample_action_flow, sample_world_flow
 from world_action_model.image_layouts import (
     ROBOTWIN_VIEW_KEYS,
     build_robotwin_ref_tensor,
@@ -26,6 +26,7 @@ from world_action_model.pipeline.utils import (
     NormalizationTensors,
     add_state_to_action,
     denormalize_action,
+    denormalize_value,
     extract_normalization_tensors,
     load_stats,
     normalize_state,
@@ -131,6 +132,7 @@ class RoboNanaRobotWinPolicy:
         main_view_width: int = 256,
         main_view_height: int = 192,
         model_params: Flux2Params | None = None,
+        return_chunk_value: bool = False,
     ) -> None:
         self.flux_checkpoint_dir = Path(flux_checkpoint_dir).expanduser().resolve()
         self.model_device = torch.device(model_device)
@@ -144,6 +146,7 @@ class RoboNanaRobotWinPolicy:
         self.grid_height = int(grid_height)
         self.grid_width = int(grid_width)
         self.main_view_size = (int(main_view_width), int(main_view_height))
+        self.return_chunk_value = bool(return_chunk_value)
         if self.action_chunk <= 0 or self.num_inference_steps <= 0:
             raise ValueError("action_chunk and num_inference_steps must be positive")
 
@@ -299,6 +302,104 @@ class RoboNanaRobotWinPolicy:
         )
 
     @torch.inference_mode()
+    def _sample_value(
+        self,
+        *,
+        context: Tensor,
+        current: Tensor,
+        state: Tensor,
+        clean_action: Tensor,
+        sampling_seed: int | None = None,
+    ) -> Tensor:
+        """Sample the horizon value using the same Stage-2 world path as training eval."""
+
+        batch_size = 1
+        horizon = torch.tensor([self.horizon], device=self.model_device, dtype=torch.long)
+        context_ids = text_position_ids(batch_size, context.shape[1], self.model_device)
+        current_ids = image_position_ids(
+            batch_size,
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
+            time_coord=torch.zeros_like(horizon),
+            device=self.model_device,
+        )
+        future_ids = image_position_ids(
+            batch_size,
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
+            time_coord=horizon,
+            device=self.model_device,
+        )
+        context_mask = torch.ones(
+            batch_size,
+            context.shape[1],
+            device=self.model_device,
+            dtype=torch.bool,
+        )
+        future_template = torch.zeros_like(current)
+        future_state_template = torch.zeros(
+            batch_size,
+            1,
+            self.state_dim,
+            device=self.model_device,
+            dtype=self.dtype,
+        )
+        value_template = torch.zeros(
+            batch_size,
+            1,
+            self.model.value_dim,
+            device=self.model_device,
+            dtype=self.dtype,
+        )
+
+        def stream_seed(offset: int) -> int | None:
+            return None if sampling_seed is None else int(sampling_seed) + int(offset)
+
+        future_noise = seeded_randn_like(future_template, stream_seed(1))
+        future_state_noise = seeded_randn_like(future_state_template, stream_seed(2))
+        value_noise = seeded_randn_like(value_template, stream_seed(3))
+        clean_action_time = torch.zeros(
+            batch_size,
+            device=self.model_device,
+            dtype=torch.float32,
+        )
+
+        def predict_world(
+            sampled_future: Tensor,
+            sampled_future_state: Tensor,
+            sampled_value: Tensor,
+            sampled_action: Tensor,
+            sigma: Tensor,
+        ) -> tuple[Tensor, Tensor, Tensor]:
+            output = self.model(
+                context=context,
+                context_ids=context_ids,
+                current_latents=current,
+                current_ids=current_ids,
+                noisy_future_latents=sampled_future,
+                future_ids=future_ids,
+                state=state,
+                noisy_pred_action=torch.zeros_like(sampled_action),
+                gt_action_cond=sampled_action,
+                horizon_idx=horizon,
+                noisy_future_state=sampled_future_state,
+                noisy_value=sampled_value,
+                action_timestep=clean_action_time,
+                wm_timestep=sigma.expand(batch_size),
+                context_mask=context_mask,
+            )
+            return output.image, output.future_state, output.value
+
+        return sample_world_flow(
+            clean_action=clean_action,
+            future_noise=future_noise,
+            future_state_noise=future_state_noise,
+            value_noise=value_noise,
+            schedule=self.schedule,
+            predict_world=predict_world,
+        ).value
+
+    @torch.inference_mode()
     def inference(self, observation: dict[str, Any]) -> dict[str, Any]:
         timing: dict[str, float] = {}
         total_start = time.perf_counter()
@@ -335,21 +436,40 @@ class RoboNanaRobotWinPolicy:
         ).to(dtype=self.dtype).unsqueeze(1)
         self._sync(self.model_device)
         start = time.perf_counter()
-        normalized_action = self._sample_action(
+        sampling_seed = (
+            None
+            if observation.get("sampling_seed") is None
+            else int(observation["sampling_seed"])
+        )
+        sampled_action = self._sample_action(
             context=context,
             current=current,
             state=normalized_state,
-            sampling_seed=(
-                None
-                if observation.get("sampling_seed") is None
-                else int(observation["sampling_seed"])
-            ),
-        )[0]
+            sampling_seed=sampling_seed,
+        )
         self._sync(self.model_device)
         timing["action_sample_ms"] = (time.perf_counter() - start) * 1000.0
 
+        chunk_value: float | None = None
+        if self.return_chunk_value:
+            start = time.perf_counter()
+            normalized_value = self._sample_value(
+                context=context,
+                current=current,
+                state=normalized_state,
+                clean_action=sampled_action,
+                sampling_seed=sampling_seed,
+            )
+            self._sync(self.model_device)
+            timing["value_sample_ms"] = (time.perf_counter() - start) * 1000.0
+            chunk_value = float(
+                denormalize_value(normalized_value[0, 0].float(), self.normalization)
+                .reshape(-1)[0]
+                .item()
+            )
+
         action = postprocess_action(
-            normalized_action,
+            sampled_action[0],
             raw_state[0],
             self.normalization,
             delta_mask=self.delta_mask,
@@ -364,8 +484,16 @@ class RoboNanaRobotWinPolicy:
                 + " ".join(f"{key}_digest={value}" for key, value in components.items()),
                 flush=True,
             )
-        return {
+        response = {
             "action": action.cpu(),
             "_policy_timing_ms": timing,
             "_sampling_seed": observation.get("sampling_seed"),
         }
+        if chunk_value is not None:
+            response.update(
+                chunk_value=chunk_value,
+                value_horizon=self.horizon,
+                values_per_sample=torch.tensor([chunk_value], dtype=torch.float32),
+                selected_index=0,
+            )
+        return response
