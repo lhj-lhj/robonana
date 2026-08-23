@@ -17,7 +17,13 @@ from robonana.data.robotwin_hdf5 import ALOHA_DELTA_MASK
 from robonana.encoding import LocalQwen3Embedder, encode_flux2_image_tokens
 from robonana.models.position_ids import image_position_ids, text_position_ids
 from robonana.models.pretrained import load_flux2_fact_trained_checkpoint
-from robonana.sampling import flow_euler_schedule, sample_action_flow, sample_world_flow
+from robonana.sampling import (
+    WorldFlowSample,
+    flow_euler_schedule,
+    sample_action_flow,
+    sample_world_flow,
+)
+from robonana.training.visualization import decode_flux2_tokens
 from world_action_model.image_layouts import (
     ROBOTWIN_VIEW_KEYS,
     build_robotwin_ref_tensor,
@@ -133,6 +139,7 @@ class RoboNanaRobotWinPolicy:
         main_view_height: int = 192,
         model_params: Flux2Params | None = None,
         return_chunk_value: bool = False,
+        return_stage2_image: bool = False,
     ) -> None:
         self.flux_checkpoint_dir = Path(flux_checkpoint_dir).expanduser().resolve()
         self.model_device = torch.device(model_device)
@@ -147,6 +154,9 @@ class RoboNanaRobotWinPolicy:
         self.grid_width = int(grid_width)
         self.main_view_size = (int(main_view_width), int(main_view_height))
         self.return_chunk_value = bool(return_chunk_value)
+        self.return_stage2_image = bool(return_stage2_image)
+        if self.return_stage2_image and not self.return_chunk_value:
+            raise ValueError("return_stage2_image requires return_chunk_value Stage-2 sampling")
         if self.action_chunk <= 0 or self.num_inference_steps <= 0:
             raise ValueError("action_chunk and num_inference_steps must be positive")
 
@@ -302,7 +312,7 @@ class RoboNanaRobotWinPolicy:
         )
 
     @torch.inference_mode()
-    def _sample_value(
+    def _sample_world(
         self,
         *,
         context: Tensor,
@@ -310,8 +320,8 @@ class RoboNanaRobotWinPolicy:
         state: Tensor,
         clean_action: Tensor,
         sampling_seed: int | None = None,
-    ) -> Tensor:
-        """Sample the horizon value using the same Stage-2 world path as training eval."""
+    ) -> WorldFlowSample:
+        """Sample image, state, and value through the complete Stage-2 world path."""
 
         batch_size = 1
         horizon = torch.tensor([self.horizon], device=self.model_device, dtype=torch.long)
@@ -397,7 +407,20 @@ class RoboNanaRobotWinPolicy:
             value_noise=value_noise,
             schedule=self.schedule,
             predict_world=predict_world,
-        ).value
+        )
+
+    @torch.inference_mode()
+    def _decode_stage2_image(self, future_tokens: Tensor) -> Tensor:
+        """Decode one final Stage-2 FLUX prediction to FACT's [B,C,T,H,W] contract."""
+
+        decoded = decode_flux2_tokens(
+            self.vae,
+            future_tokens.to(device=self.vae_device),
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
+        )
+        # FACT's RoboTwin client expects decoded video frames in [-1, 1].
+        return decoded.mul(2.0).sub(1.0).unsqueeze(2).cpu()
 
     @torch.inference_mode()
     def inference(self, observation: dict[str, Any]) -> dict[str, Any]:
@@ -451,9 +474,10 @@ class RoboNanaRobotWinPolicy:
         timing["action_sample_ms"] = (time.perf_counter() - start) * 1000.0
 
         chunk_value: float | None = None
+        stage2_image: Tensor | None = None
         if self.return_chunk_value:
             start = time.perf_counter()
-            normalized_value = self._sample_value(
+            world_sample = self._sample_world(
                 context=context,
                 current=current,
                 state=normalized_state,
@@ -463,10 +487,15 @@ class RoboNanaRobotWinPolicy:
             self._sync(self.model_device)
             timing["value_sample_ms"] = (time.perf_counter() - start) * 1000.0
             chunk_value = float(
-                denormalize_value(normalized_value[0, 0].float(), self.normalization)
+                denormalize_value(world_sample.value[0, 0].float(), self.normalization)
                 .reshape(-1)[0]
                 .item()
             )
+            if self.return_stage2_image:
+                start = time.perf_counter()
+                stage2_image = self._decode_stage2_image(world_sample.future)
+                self._sync(self.vae_device)
+                timing["stage2_image_decode_ms"] = (time.perf_counter() - start) * 1000.0
 
         action = postprocess_action(
             sampled_action[0],
@@ -496,4 +525,6 @@ class RoboNanaRobotWinPolicy:
                 values_per_sample=torch.tensor([chunk_value], dtype=torch.float32),
                 selected_index=0,
             )
+        if stage2_image is not None:
+            response["images"] = stage2_image
         return response

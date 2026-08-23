@@ -12,6 +12,7 @@ from robonana_robotwin_client import (
     _align_eval_instruction_with_training,
     _install_chunk_value_hook,
     _install_sampling_seed_hook,
+    _save_pending_stage2_image,
     _seed_python_random,
     sampling_seed_for_step,
 )
@@ -73,6 +74,7 @@ def test_fact_response_hook_retains_one_value_for_the_action_chunk() -> None:
                 "action": np.zeros((3, 2), dtype=np.float32),
                 "chunk_value": 0.625,
                 "value_horizon": 24,
+                "images": np.zeros((1, 3, 1, 4, 8), dtype=np.float32),
             }
 
     model = SimpleNamespace(client=FakeClient())
@@ -82,6 +84,23 @@ def test_fact_response_hook_retains_one_value_for_the_action_chunk() -> None:
     assert model._robonana_chunk_value == 0.625
     assert model._robonana_value_horizon == 24
     assert model._robonana_chunk_index == 0
+    assert model._robonana_pending_stage2_image.shape == (1, 3, 1, 4, 8)
+
+
+def test_stage2_image_is_saved_once_per_new_chunk(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ROBONANA_STAGE2_IMAGE_ROOT", str(tmp_path))
+    task = SimpleNamespace(task_name="beat_block_hammer", test_num=7)
+    model = SimpleNamespace(
+        _robonana_pending_stage2_image=np.zeros((1, 3, 1, 4, 8), dtype=np.float32),
+        _robonana_chunk_index=2,
+        _robonana_value_horizon=24,
+    )
+
+    output = _save_pending_stage2_image(task, model)
+
+    assert output == tmp_path / "beat_block_hammer" / "episode_000007" / "chunk_002_h_024.png"
+    assert output.is_file()
+    assert _save_pending_stage2_image(task, model) is None
 
 
 def test_video_overlay_reuses_chunk_value_for_every_raw_frame(monkeypatch) -> None:

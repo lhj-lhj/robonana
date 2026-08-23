@@ -113,6 +113,7 @@ def test_online_policy_returns_denormalized_chunk_value_contract(monkeypatch):
     policy.state_dim = 2
     policy.horizon = 24
     policy.return_chunk_value = True
+    policy.return_stage2_image = True
     policy.delta_mask = torch.tensor([False, False])
     policy.model = SimpleNamespace(value_dim=1)
     policy.normalization = NormalizationTensors(
@@ -141,8 +142,17 @@ def test_online_policy_returns_denormalized_chunk_value_contract(monkeypatch):
     )
     monkeypatch.setattr(
         policy,
-        "_sample_value",
-        lambda **kwargs: torch.zeros(1, 1, 1),
+        "_sample_world",
+        lambda **kwargs: SimpleNamespace(
+            future=torch.zeros(1, 6, 8),
+            future_state=torch.zeros(1, 1, 2),
+            value=torch.zeros(1, 1, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        policy,
+        "_decode_stage2_image",
+        lambda future: torch.zeros(1, 3, 1, 4, 8),
     )
 
     response = policy.inference(
@@ -157,6 +167,7 @@ def test_online_policy_returns_denormalized_chunk_value_contract(monkeypatch):
     assert response["value_horizon"] == 24
     torch.testing.assert_close(response["values_per_sample"], torch.tensor([0.5]))
     assert response["selected_index"] == 0
+    assert response["images"].shape == (1, 3, 1, 4, 8)
 
 
 def test_online_value_sampler_runs_full_world_path_reproducibly():
@@ -196,9 +207,12 @@ def test_online_value_sampler_runs_full_world_path_reproducibly():
         "sampling_seed": 123,
     }
 
-    first = policy._sample_value(**kwargs)
-    second = policy._sample_value(**kwargs)
+    first = policy._sample_world(**kwargs)
+    second = policy._sample_world(**kwargs)
 
-    assert first.shape == (1, 1, 1)
-    assert torch.isfinite(first).all()
-    torch.testing.assert_close(first, second)
+    assert first.future.shape == (1, 2, 8)
+    assert first.value.shape == (1, 1, 1)
+    assert torch.isfinite(first.future).all()
+    assert torch.isfinite(first.value).all()
+    torch.testing.assert_close(first.future, second.future)
+    torch.testing.assert_close(first.value, second.value)

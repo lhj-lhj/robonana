@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import os
 import random
+from pathlib import Path
 from types import MethodType
 
 import numpy as np
@@ -111,7 +112,7 @@ def _response_scalar(value) -> float:
 
 
 def _install_chunk_value_hook(model) -> None:
-    """Retain server value metadata for the full environment action chunk."""
+    """Retain server Stage-2 outputs for the full environment action chunk."""
 
     if getattr(model, "_robonana_chunk_value_hook", False):
         return
@@ -125,13 +126,49 @@ def _install_chunk_value_hook(model) -> None:
             model._robonana_chunk_index = int(
                 getattr(model, "_robonana_chunk_index", -1)
             ) + 1
+            image = response.get("images")
+            if image is not None:
+                model._robonana_pending_stage2_image = image
         return response
 
     model.client.inference = inference_with_chunk_value
     model._robonana_chunk_value = None
     model._robonana_value_horizon = 0
     model._robonana_chunk_index = -1
+    model._robonana_pending_stage2_image = None
     model._robonana_chunk_value_hook = True
+
+
+def _save_pending_stage2_image(task_env, model) -> Path | None:
+    """Save one decoded Stage-2 future composite for each newly sampled action chunk."""
+
+    image = getattr(model, "_robonana_pending_stage2_image", None)
+    if image is None:
+        return None
+    model._robonana_pending_stage2_image = None
+    output_root = os.environ.get("ROBONANA_STAGE2_IMAGE_ROOT", "").strip()
+    if not output_root:
+        return None
+
+    if hasattr(image, "detach"):
+        image = image.detach().cpu()
+    array = np.asarray(image)
+    if array.ndim != 5 or array.shape[0] != 1 or array.shape[1] != 3 or array.shape[2] != 1:
+        raise ValueError(f"Stage-2 image must have shape [1,3,1,H,W], got {array.shape}")
+    frame = np.transpose(array[0, :, 0], (1, 2, 0)).astype(np.float32, copy=False)
+    frame = np.clip((frame + 1.0) * 127.5, 0.0, 255.0).astype(np.uint8)
+
+    task_name = str(getattr(task_env, "task_name", "unknown_task"))
+    episode_index = int(getattr(task_env, "test_num", 0))
+    chunk_index = int(getattr(model, "_robonana_chunk_index", 0))
+    horizon = int(getattr(model, "_robonana_value_horizon", 0))
+    task_dir = Path(output_root).expanduser().resolve() / task_name / f"episode_{episode_index:06d}"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    output = task_dir / f"chunk_{chunk_index:03d}_h_{horizon:03d}.png"
+    from PIL import Image
+
+    Image.fromarray(frame, mode="RGB").save(output)
+    return output
 
 
 def _overlay_value(frame: np.ndarray, label: str) -> np.ndarray:
@@ -273,6 +310,7 @@ def reset_model(model) -> None:
     model._robonana_chunk_value = None
     model._robonana_value_horizon = 0
     model._robonana_chunk_index = -1
+    model._robonana_pending_stage2_image = None
 
 
 def _episode_seed(task_env) -> int | None:
@@ -295,7 +333,9 @@ def eval(TASK_ENV, model, observation):  # noqa: A001,N803
         )
     writer = getattr(model, "_robonana_rollout_writer", None)
     if writer is None:
-        return _fact_eval(TASK_ENV, model, observation)
+        result = _fact_eval(TASK_ENV, model, observation)
+        _save_pending_stage2_image(TASK_ENV, model)
+        return result
     if observation.get("_fact_light_obs", False):
         observation = TASK_ENV._fact_force_full_obs()
     state = np.asarray(observation["joint_action"]["vector"], dtype=np.float32).copy()
@@ -305,6 +345,7 @@ def eval(TASK_ENV, model, observation):  # noqa: A001,N803
     }
     needed_new_plan = model.needs_new_plan(step)
     result = _fact_eval(TASK_ENV, model, observation)
+    _save_pending_stage2_image(TASK_ENV, model)
     plan_offset = 0 if needed_new_plan else step % model.execute_actions_per_plan
     action = np.asarray(model.planned_actions[plan_offset], dtype=np.float32).copy()
     success = bool(getattr(TASK_ENV, "eval_success", False))

@@ -55,6 +55,11 @@ def main() -> int:
         action="store_true",
         help="Run the Stage-2 world sampler and return one denormalized value per action chunk.",
     )
+    parser.add_argument(
+        "--return-stage2-image",
+        action="store_true",
+        help="Decode and return the final Stage-2 future image (requires --return-chunk-value).",
+    )
     args = parser.parse_args()
     dtype = {
         "bf16": torch.bfloat16,
@@ -74,6 +79,7 @@ def main() -> int:
         horizon=args.horizon,
         num_inference_steps=args.num_inference_steps,
         return_chunk_value=args.return_chunk_value,
+        return_stage2_image=args.return_stage2_image,
     )
     resolved = policy.load_report.model_config
     print(

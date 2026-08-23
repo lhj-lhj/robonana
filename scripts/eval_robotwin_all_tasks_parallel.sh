@@ -39,7 +39,7 @@ if [[ ${#tasks[@]} -ne 50 ]]; then
   exit 2
 fi
 
-mkdir -p "${run_dir}/workers" "${run_dir}/value_traces"
+mkdir -p "${run_dir}/workers" "${run_dir}/value_traces" "${run_dir}/stage2_images"
 touch "${run_dir}/.started"
 "${model_python}" "${repo_root}/scripts/audit_robotwin_instructions.py" \
   --dataset-root "${dataset_root}" \
@@ -76,6 +76,7 @@ run_worker() {
     --horizon 24
     --num-inference-steps 20
     --return-chunk-value
+    --return-stage2-image
     --port "${port}"
   )
   if [[ -n "${ROBONANA_MODEL_CONFIG:-}" ]]; then
@@ -120,6 +121,7 @@ run_worker() {
     LOW_FREQUENCY_RGB=0 \
     SKIP_ACTION_RENDER_SYNC=0 \
     ROBONANA_OVERLAY_CHUNK_VALUE=1 \
+    ROBONANA_STAGE2_IMAGE_ROOT="${run_dir}/stage2_images" \
     TASK_LIST="${shard[*]}" \
     SWEEP_OUT="${worker_dir}/sweep" \
     bash "${repo_root}/third_party/FACT/evaluation/robotwin/eval_all_tasks.sh" \
@@ -181,22 +183,27 @@ find "${robotwin_path}/eval_result" -type f -name '*.mp4' -newer "${run_dir}/.st
   | sort > "${run_dir}/mp4_manifest.txt"
 find "${run_dir}/value_traces" -type f -name '*.npz' -print \
   | sort > "${run_dir}/value_trace_manifest.txt"
+find "${run_dir}/stage2_images" -type f -name '*.png' -print \
+  | sort > "${run_dir}/stage2_image_manifest.txt"
 
 result_tasks=$(awk 'END {print NR-1}' "${results_csv}")
 mp4_count=$(wc -l < "${run_dir}/mp4_manifest.txt")
 value_trace_count=$(wc -l < "${run_dir}/value_trace_manifest.txt")
+stage2_image_count=$(wc -l < "${run_dir}/stage2_image_manifest.txt")
 expected_episodes=$((50 * test_num))
 {
   echo "result_tasks=${result_tasks}/50"
   echo "annotated_mp4=${mp4_count}/${expected_episodes}"
   echo "value_traces=${value_trace_count}/${expected_episodes}"
+  echo "stage2_images=${stage2_image_count} (at least ${expected_episodes})"
 } | tee -a "${run_dir}/summary.txt"
 
 if [[ ${worker_status} -ne 0 ]] \
   || grep -q ',ERROR$' "${results_csv}" \
   || [[ ${result_tasks} -ne 50 ]] \
   || [[ ${mp4_count} -ne ${expected_episodes} ]] \
-  || [[ ${value_trace_count} -ne ${expected_episodes} ]]; then
+  || [[ ${value_trace_count} -ne ${expected_episodes} ]] \
+  || [[ ${stage2_image_count} -lt ${expected_episodes} ]]; then
   echo "One or more eval workers/tasks failed; inspect ${run_dir}/workers" >&2
   exit 1
 fi
