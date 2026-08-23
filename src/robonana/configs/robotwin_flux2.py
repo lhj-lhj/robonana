@@ -51,6 +51,18 @@ DISABLE_CHECKPOINTING = os.environ.get("ROBONANA_DISABLE_CHECKPOINTING", "0").lo
 DEEPSPEED_CONFIG = (
     REPO_ROOT / "third_party" / "FACT" / "fact_train" / "distributed" / "accelerate_configs" / "zero2.json"
 )
+KLEIN4B_MODEL_PARAMS = dict(
+    in_channels=128,
+    context_in_dim=7680,
+    hidden_size=3072,
+    num_heads=24,
+    depth=5,
+    depth_single_blocks=20,
+    axes_dim=[32, 32, 32, 32],
+    theta=2000,
+    mlp_ratio=3.0,
+    use_guidance_embed=False,
+)
 
 
 def _dataset_config(root: Path, task_glob: str, *, stats_path: Path | None = None) -> dict:
@@ -111,8 +123,10 @@ config = dict(
     models=dict(
         checkpoint=str(BACKBONE_CHECKPOINT),
         checkpoint_dir=str(CHECKPOINT_DIR),
+        params=KLEIN4B_MODEL_PARAMS,
         action_dim=14,
         state_dim=14,
+        value_dim=1,
         max_horizon=48,
         train_mode=TRAIN_MODE,
         gradient_checkpointing=True,

@@ -10,7 +10,7 @@ from typing import Any
 
 import torch
 from diffusers.models import AutoencoderKLFlux2
-from flux2.model import Flux2Params, Klein4BParams
+from flux2.model import Flux2Params
 from torch import Tensor
 
 from robonana.data.robotwin_hdf5 import ALOHA_DELTA_MASK
@@ -82,27 +82,6 @@ def observation_component_digests(observation: dict[str, Any]) -> dict[str, str]
     return components
 
 
-def robotwin_model_params(variant: str) -> Flux2Params:
-    """Return the exact training architecture for a RoboNana checkpoint."""
-
-    if variant == "klein4b":
-        return Klein4BParams()
-    if variant == "small200m":
-        return Flux2Params(
-            in_channels=128,
-            context_in_dim=7680,
-            hidden_size=1024,
-            num_heads=8,
-            depth=2,
-            depth_single_blocks=8,
-            axes_dim=[32, 32, 32, 32],
-            theta=2000,
-            mlp_ratio=3.0,
-            use_guidance_embed=False,
-        )
-    raise ValueError(f"unknown RoboNana model variant: {variant!r}")
-
-
 def postprocess_action(
     normalized_action: Tensor,
     raw_state: Tensor,
@@ -133,6 +112,7 @@ class RoboNanaRobotWinPolicy:
         self,
         *,
         checkpoint: str | Path,
+        model_config: str | Path | None = None,
         flux_checkpoint_dir: str | Path,
         stats_path: str | Path,
         model_device: str | torch.device = "cuda:0",
@@ -140,10 +120,10 @@ class RoboNanaRobotWinPolicy:
         text_encoder_device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.bfloat16,
         action_chunk: int = 48,
-        action_dim: int = 14,
-        state_dim: int = 14,
+        action_dim: int | None = None,
+        state_dim: int | None = None,
         horizon: int = 24,
-        max_horizon: int = 48,
+        max_horizon: int | None = None,
         num_inference_steps: int = 20,
         flow_shift: float = 1.0,
         grid_height: int = 12,
@@ -158,29 +138,30 @@ class RoboNanaRobotWinPolicy:
         self.text_encoder_device = torch.device(text_encoder_device)
         self.dtype = dtype
         self.action_chunk = int(action_chunk)
-        self.action_dim = int(action_dim)
-        self.state_dim = int(state_dim)
         self.horizon = int(horizon)
-        self.max_horizon = int(max_horizon)
         self.num_inference_steps = int(num_inference_steps)
         self.flow_shift = float(flow_shift)
         self.grid_height = int(grid_height)
         self.grid_width = int(grid_width)
         self.main_view_size = (int(main_view_width), int(main_view_height))
-        if not 1 <= self.horizon <= self.max_horizon:
-            raise ValueError("horizon must lie in [1, max_horizon]")
         if self.action_chunk <= 0 or self.num_inference_steps <= 0:
             raise ValueError("action_chunk and num_inference_steps must be positive")
 
         self.model, self.load_report = load_flux2_fact_trained_checkpoint(
             checkpoint,
-            action_dim=self.action_dim,
-            state_dim=self.state_dim,
-            max_horizon=self.max_horizon,
+            action_dim=action_dim,
+            state_dim=state_dim,
+            max_horizon=max_horizon,
             device=self.model_device,
             dtype=self.dtype,
-            params=Klein4BParams() if model_params is None else model_params,
+            params=model_params,
+            config_path=model_config,
         )
+        self.action_dim = int(self.model.action_dim)
+        self.state_dim = int(self.model.state_dim)
+        self.max_horizon = int(self.model.max_horizon)
+        if not 1 <= self.horizon <= self.max_horizon:
+            raise ValueError("horizon must lie in [1, max_horizon]")
         self.model.eval().requires_grad_(False)
         self.vae = AutoencoderKLFlux2.from_pretrained(
             self.flux_checkpoint_dir,

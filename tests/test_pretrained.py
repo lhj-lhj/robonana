@@ -1,3 +1,7 @@
+import json
+from dataclasses import asdict
+
+import pytest
 import torch
 from safetensors.torch import save_file
 
@@ -58,6 +62,7 @@ def test_full_trained_checkpoint_loads_exactly_from_fact_export(tmp_path):
         _tiny_params(),
         action_dim=6,
         state_dim=6,
+        value_dim=1,
         max_horizon=8,
     )
     checkpoint = tmp_path / "diffusion_pytorch_model.bin"
@@ -67,6 +72,7 @@ def test_full_trained_checkpoint_loads_exactly_from_fact_export(tmp_path):
         checkpoint,
         action_dim=6,
         state_dim=6,
+        value_dim=1,
         max_horizon=8,
         device="cpu",
         dtype=torch.float32,
@@ -77,3 +83,88 @@ def test_full_trained_checkpoint_loads_exactly_from_fact_export(tmp_path):
     assert report.checkpoint_parameters == sum(p.numel() for p in expected.parameters())
     for name, expected_tensor in expected.state_dict().items():
         torch.testing.assert_close(actual.state_dict()[name], expected_tensor)
+
+
+def test_standalone_trained_checkpoint_requires_exact_model_config(tmp_path):
+    expected = Flux2FACTModel(
+        _tiny_params(),
+        action_dim=6,
+        state_dim=5,
+        value_dim=2,
+        max_horizon=8,
+    )
+    checkpoint = tmp_path / "standalone.bin"
+    torch.save(expected.state_dict(), checkpoint)
+
+    with pytest.raises(FileNotFoundError, match="pass --model-config explicitly"):
+        load_flux2_fact_trained_checkpoint(
+            checkpoint,
+            device="cpu",
+            dtype=torch.float32,
+        )
+
+
+def test_trained_checkpoint_discovers_fact_project_config(tmp_path):
+    project = tmp_path / "experiment"
+    transformer = project / "models" / "checkpoint_epoch_1_step_10" / "transformer"
+    transformer.mkdir(parents=True)
+    checkpoint = transformer / "diffusion_pytorch_model.bin"
+    expected = Flux2FACTModel(
+        _tiny_params(),
+        action_dim=6,
+        state_dim=5,
+        value_dim=2,
+        max_horizon=8,
+    )
+    torch.save(expected.state_dict(), checkpoint)
+    config_path = project / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "models": {
+                    "params": asdict(_tiny_params()),
+                    "action_dim": 6,
+                    "state_dim": 5,
+                    "value_dim": 2,
+                    "max_horizon": 8,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    actual, report = load_flux2_fact_trained_checkpoint(
+        checkpoint,
+        device="cpu",
+        dtype=torch.float32,
+    )
+
+    assert actual.hidden_size == _tiny_params().hidden_size
+    assert report.model_config.source == str(config_path.resolve())
+
+
+def test_incomplete_project_config_fails_before_loading_checkpoint(tmp_path):
+    checkpoint = tmp_path / "models" / "step_1" / "transformer" / "model.bin"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"not loaded")
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "models": {
+                    "params": asdict(_tiny_params()),
+                    "action_dim": 6,
+                    "state_dim": 5,
+                    "max_horizon": 8,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="value_dim"):
+        load_flux2_fact_trained_checkpoint(
+            checkpoint,
+            device="cpu",
+            dtype=torch.float32,
+        )

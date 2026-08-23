@@ -10,6 +10,7 @@ from safetensors.torch import load_file
 
 from flux2.model import Flux2Params, Klein4BParams
 
+from .checkpoint_config import RoboNanaCheckpointConfig, resolve_checkpoint_config
 from .flux2_fact import Flux2FACTModel
 
 
@@ -30,6 +31,7 @@ class PretrainedLoadReport:
     checkpoint: str
     checkpoint_parameters: int
     initialized_robot_parameters: tuple[str, ...]
+    model_config: RoboNanaCheckpointConfig | None = None
 
 
 def robot_parameter_names(model: Flux2FACTModel) -> tuple[str, ...]:
@@ -129,13 +131,14 @@ def load_flux2_fact_checkpoint(
 def load_flux2_fact_trained_checkpoint(
     checkpoint_path: str | Path,
     *,
-    action_dim: int,
-    state_dim: int,
-    value_dim: int = 1,
-    max_horizon: int = 64,
+    action_dim: int | None = None,
+    state_dim: int | None = None,
+    value_dim: int | None = None,
+    max_horizon: int | None = None,
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params | None = None,
+    config_path: str | Path | None = None,
 ) -> tuple[Flux2FACTModel, PretrainedLoadReport]:
     """Load a full FACT-exported RoboNana transformer without duplicating weights."""
 
@@ -143,18 +146,26 @@ def load_flux2_fact_trained_checkpoint(
     if not path.is_file():
         raise FileNotFoundError(f"RoboNana checkpoint not found: {path}")
     device = torch.device(device)
-    params = Klein4BParams() if params is None else params
+    model_config = resolve_checkpoint_config(
+        path,
+        config_path=config_path,
+        params=params,
+        action_dim=action_dim,
+        state_dim=state_dim,
+        value_dim=value_dim,
+        max_horizon=max_horizon,
+    )
+    state_dict = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
 
     with torch.device("meta"):
         model = Flux2FACTModel(
-            params,
-            action_dim=action_dim,
-            state_dim=state_dim,
-            value_dim=value_dim,
-            max_horizon=max_horizon,
+            model_config.params,
+            action_dim=model_config.action_dim,
+            state_dim=model_config.state_dim,
+            value_dim=model_config.value_dim,
+            max_horizon=model_config.max_horizon,
         ).to(dtype=dtype)
 
-    state_dict = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
     checkpoint_parameters = sum(tensor.numel() for tensor in state_dict.values())
     incompatible = model.load_state_dict(state_dict, strict=True, assign=True)
     if incompatible.missing_keys or incompatible.unexpected_keys:
@@ -170,4 +181,5 @@ def load_flux2_fact_trained_checkpoint(
         checkpoint=str(path),
         checkpoint_parameters=checkpoint_parameters,
         initialized_robot_parameters=(),
+        model_config=model_config,
     )

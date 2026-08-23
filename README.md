@@ -210,9 +210,11 @@ bash third_party/FACT/evaluation/robotwin/launch_client.sh \
   beat_block_hammer demo_clean step100 0
 ```
 
-For a checkpoint trained with `robotwin_flux2_small200m.py`, pass
-`--model-variant small200m` to `inference_server_robotwin.py`. The default
-remains the FLUX.2 Klein 4B architecture.
+The inference server resolves model size from the exact training metadata. It
+discovers the FACT `config.json` above the checkpoint, or accepts an explicit
+`--model-config /path/to/config.json`. The config must contain complete
+`models.params`, action/state/value dimensions, and `max_horizon`; missing or
+partial metadata is a hard error and is never inferred from checkpoint tensors.
 
 ## Separate rollout collection and retraining
 

@@ -10,7 +10,7 @@ import torch
 from torch import Tensor
 
 from fact_train import Trainer
-from flux2.model import Flux2Params, Klein4BParams
+from flux2.model import Flux2Params
 
 # Imports register the raw HDF5 dataset and sampler with FACT.
 from robonana.data import robotwin_hdf5 as _robotwin_hdf5  # noqa: F401
@@ -90,9 +90,12 @@ class RoboNanaTrainer(Trainer):
     def get_models(self, model_config):
         action_dim = int(_config_value(model_config, "action_dim", 14))
         state_dim = int(_config_value(model_config, "state_dim", 14))
+        value_dim = int(_config_value(model_config, "value_dim", 1))
         max_horizon = int(_config_value(model_config, "max_horizon", 48))
         params_config = _config_value(model_config, "params", None)
-        params = Klein4BParams() if params_config is None else Flux2Params(**dict(params_config))
+        if params_config is None:
+            raise ValueError("models.params must record the complete FLUX.2 architecture")
+        params = Flux2Params(**dict(params_config))
         checkpoint = _config_value(model_config, "checkpoint", None)
         initialization = str(
             _config_value(
@@ -108,6 +111,7 @@ class RoboNanaTrainer(Trainer):
                 str(checkpoint),
                 action_dim=action_dim,
                 state_dim=state_dim,
+                value_dim=value_dim,
                 max_horizon=max_horizon,
                 device=self.device,
                 dtype=self.dtype,
@@ -118,6 +122,7 @@ class RoboNanaTrainer(Trainer):
             model = initialize_flux2_fact_model(
                 action_dim=action_dim,
                 state_dim=state_dim,
+                value_dim=value_dim,
                 max_horizon=max_horizon,
                 device=self.device,
                 dtype=self.dtype,

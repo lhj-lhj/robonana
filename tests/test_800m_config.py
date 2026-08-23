@@ -16,6 +16,7 @@ def test_800m_full_dataset_config():
     assert config["train"]["pixel_eval_interval"] == 1000
     assert config["launch"]["distributed_type"] == "MULTI_GPU"
     assert config["models"]["gradient_checkpointing"] is False
+    assert config["models"]["value_dim"] == 1
 
 
 def test_800m_parameter_count():

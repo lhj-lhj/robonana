@@ -24,5 +24,7 @@ def test_training_config_logically_mixes_separate_rollout_root(monkeypatch, tmp_
             "infinite": True,
             "dataset_weights": [1.0, 2.5],
         }
+        assert module.config["models"]["params"]["hidden_size"] == 3072
+        assert module.config["models"]["value_dim"] == 1
     finally:
         sys.modules.pop(module_name, None)
