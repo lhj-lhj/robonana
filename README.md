@@ -235,6 +235,16 @@ export ROBONANA_SAPIEN_DENOISER=oidn
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
 
+Blackwell GPUs require OIDN 2.3.3 or newer. SAPIEN 3.0.0b1 and 3.0.3 bundle
+OIDN 2.0.1, which reports `unsupported device type: CUDA` / `invalid handle` on
+Blackwell. Upgrade an isolated RoboTwin environment with the pinned installer:
+
+```bash
+bash scripts/install_sapien_oidn_blackwell.sh \
+  /path/to/robotwin2-oidn233
+export ROBOTWIN_CONDA_ENV=/path/to/robotwin2-oidn233
+```
+
 The launcher first audits all 27,500 training episodes. Their metadata prompt
 must match RoboTwin's `seen` template family and exactly match the prompt stored
 beside the Qwen3 cache. Evaluation therefore uses `instruction_type: seen`, not
