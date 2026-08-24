@@ -1,6 +1,8 @@
+from types import SimpleNamespace
+
 import torch
 
-from robonana.training.losses import masked_mse
+from robonana.training.losses import joint_flow_loss, masked_mse
 
 
 def test_failure_mask_removes_action_sample():
@@ -12,3 +14,22 @@ def test_failure_mask_removes_action_sample():
     assert prediction.grad[0].abs().sum() > 0
     assert prediction.grad[1].abs().sum() == 0
 
+
+def test_joint_loss_adds_dino_only_when_target_is_present():
+    zeros = torch.zeros(2, 1, 1)
+    output = SimpleNamespace(
+        image=zeros,
+        action=zeros,
+        future_state=zeros,
+        value=zeros,
+        dino=torch.ones(2, 3, 4),
+    )
+    losses = joint_flow_loss(
+        output,
+        image_target=zeros,
+        action_target=zeros,
+        future_state_target=zeros,
+        value_target=zeros,
+        dino_target=torch.zeros(2, 3, 4),
+    )
+    assert losses["dino_loss"].item() == 1.0

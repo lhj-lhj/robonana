@@ -33,3 +33,27 @@ def image_position_ids(
     ids[:, :, 0] = time_coord.to(device=device, dtype=torch.long).reshape(batch_size, 1)
     ids[:, :, 1:3] = spatial[None]
     return ids
+
+
+def dino_position_ids(
+    batch_size: int,
+    *,
+    num_cameras: int,
+    grid_height: int,
+    grid_width: int,
+    time_coord: Tensor,
+    device: torch.device,
+) -> Tensor:
+    """Position three-view DINO tokens as ``[time, camera, y, x]``."""
+
+    if min(num_cameras, grid_height, grid_width) <= 0:
+        raise ValueError("DINO camera count and grid dimensions must be positive")
+    camera = torch.arange(num_cameras, device=device)
+    height = torch.arange(grid_height, device=device)
+    width = torch.arange(grid_width, device=device)
+    spatial = torch.cartesian_prod(camera, height, width)
+    length = num_cameras * grid_height * grid_width
+    ids = torch.zeros(batch_size, length, 4, device=device, dtype=torch.long)
+    ids[:, :, 0] = time_coord.to(device=device, dtype=torch.long).reshape(batch_size, 1)
+    ids[:, :, 1:] = spatial[None]
+    return ids

@@ -22,6 +22,7 @@ class Flux2FACTOutput:
     action: Tensor
     future_state: Tensor
     value: Tensor
+    dino: Tensor | None
     segments: SegmentMap
 
 
@@ -60,12 +61,16 @@ class Flux2FACTModel(Flux2):
         state_dim: int,
         value_dim: int = 1,
         max_horizon: int = 64,
+        dino_dim: int | None = None,
     ) -> None:
         super().__init__(params)
         self.action_dim = action_dim
         self.state_dim = state_dim
         self.value_dim = value_dim
         self.max_horizon = max_horizon
+        self.dino_dim = None if dino_dim is None else int(dino_dim)
+        if self.dino_dim is not None and self.dino_dim <= 0:
+            raise ValueError("dino_dim must be positive when the DINO branch is enabled")
 
         self.action_in = nn.Linear(action_dim, self.hidden_size, bias=False)
         self.state_in = nn.Linear(state_dim, self.hidden_size, bias=False)
@@ -76,6 +81,11 @@ class Flux2FACTModel(Flux2):
         self.action_out = nn.Linear(self.hidden_size, action_dim, bias=False)
         self.state_out = nn.Linear(self.hidden_size, state_dim, bias=False)
         self.value_out = nn.Linear(self.hidden_size, value_dim, bias=False)
+        if self.dino_dim is not None:
+            self.dino_in = nn.Linear(self.dino_dim, self.hidden_size)
+            self.dino_out = nn.Linear(self.hidden_size, self.dino_dim)
+            # Keep the original eight-row segment embedding checkpoint-compatible.
+            self.dino_segment_embed = nn.Embedding(1, self.hidden_size)
         self.gradient_checkpointing = False
 
     def enable_gradient_checkpointing(self) -> None:
@@ -143,6 +153,8 @@ class Flux2FACTModel(Flux2):
         noisy_value: Tensor,
         action_timestep: Tensor,
         wm_timestep: Tensor,
+        noisy_future_dino: Tensor | None = None,
+        dino_ids: Tensor | None = None,
         context_mask: Tensor | None = None,
         guidance: Tensor | None = None,
     ) -> Flux2FACTOutput:
@@ -153,6 +165,19 @@ class Flux2FACTModel(Flux2):
             raise ValueError(f"horizon_idx must be in [1, {self.max_horizon}]")
         if current_ids.shape[-1] != 4 or future_ids.shape[-1] != 4 or context_ids.shape[-1] != 4:
             raise ValueError("FLUX.2 position IDs must have four axes")
+        if (noisy_future_dino is None) != (dino_ids is None):
+            raise ValueError("noisy_future_dino and dino_ids must be provided together")
+        if noisy_future_dino is not None:
+            if self.dino_dim is None:
+                raise ValueError("DINO tokens were provided to a model with dino_dim=None")
+            if noisy_future_dino.ndim != 3 or noisy_future_dino.shape[0] != batch_size:
+                raise ValueError("noisy_future_dino must have shape [B, tokens, dino_dim]")
+            if noisy_future_dino.shape[-1] != self.dino_dim:
+                raise ValueError(
+                    f"DINO feature dimension must be {self.dino_dim}, got {noisy_future_dino.shape[-1]}"
+                )
+            if dino_ids.shape != (*noisy_future_dino.shape[:2], 4):
+                raise ValueError("dino_ids must have shape [B, DINO tokens, 4]")
 
         dtype = self.img_in.weight.dtype
         device = context.device
@@ -164,6 +189,8 @@ class Flux2FACTModel(Flux2):
         gt_action_cond = gt_action_cond.to(dtype=dtype)
         noisy_future_state = noisy_future_state.to(dtype=dtype)
         noisy_value = noisy_value.to(dtype=dtype)
+        if noisy_future_dino is not None:
+            noisy_future_dino = noisy_future_dino.to(dtype=dtype)
 
         lengths = {
             "language": context.shape[1],
@@ -175,6 +202,7 @@ class Flux2FACTModel(Flux2):
             "future_state": noisy_future_state.shape[1],
             "value": noisy_value.shape[1],
             "future_image": noisy_future_latents.shape[1],
+            "future_dino": 0 if noisy_future_dino is None else noisy_future_dino.shape[1],
         }
         segments = SegmentMap.from_lengths(**lengths)
 
@@ -194,6 +222,9 @@ class Flux2FACTModel(Flux2):
             dim=1,
         )
         img = torch.cat(parts, dim=1) + self.segment_embed(segment_ids)
+        if noisy_future_dino is not None:
+            dino_part = self.dino_in(noisy_future_dino) + self.dino_segment_embed.weight[0]
+            img = torch.cat([img, dino_part], dim=1)
 
         id_dtype = current_ids.dtype
         action_time = torch.arange(1, noisy_pred_action.shape[1] + 1, device=device, dtype=id_dtype)[None]
@@ -210,6 +241,7 @@ class Flux2FACTModel(Flux2):
                 self._robot_ids(batch_size=batch_size, length=noisy_future_state.shape[1], segment_id=6, device=device, dtype=id_dtype),
                 self._robot_ids(batch_size=batch_size, length=noisy_value.shape[1], segment_id=7, device=device, dtype=id_dtype),
                 future_ids.to(device=device),
+                *([] if dino_ids is None else [dino_ids.to(device=device)]),
             ],
             dim=1,
         )
@@ -242,6 +274,7 @@ class Flux2FACTModel(Flux2):
                 (lengths["future_state"], double_wm),
                 (lengths["value"], double_wm),
                 (lengths["future_image"], double_wm),
+                (lengths["future_dino"], double_wm),
             ]
         )
         double_txt = self.double_stream_modulation_txt(vec_clean)
@@ -277,6 +310,7 @@ class Flux2FACTModel(Flux2):
                 (lengths["future_state"], single_wm),
                 (lengths["value"], single_wm),
                 (lengths["future_image"], single_wm),
+                (lengths["future_dino"], single_wm),
             ]
         )
         for block in self.single_blocks:
@@ -295,10 +329,12 @@ class Flux2FACTModel(Flux2):
         action_hidden = hidden[:, segments.pred_action]
         state_hidden = hidden[:, segments.future_state]
         value_hidden = hidden[:, segments.value]
+        dino_hidden = hidden[:, segments.future_dino]
         return Flux2FACTOutput(
             image=self.final_layer(image_hidden, vec_wm),
             action=self.action_out(action_hidden),
             future_state=self.state_out(state_hidden),
             value=self.value_out(value_hidden),
+            dino=self.dino_out(dino_hidden) if self.dino_dim is not None and dino_hidden.shape[1] else None,
             segments=segments,
         )

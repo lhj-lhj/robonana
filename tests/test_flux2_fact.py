@@ -111,3 +111,53 @@ def test_action_only_forward_accepts_empty_world_suffix():
     assert output.image.shape == (batch, 0, 8)
     assert output.future_state.shape == (batch, 0, 6)
     assert output.value.shape == (batch, 0, 1)
+    assert output.dino is None
+
+
+def test_dino_head_is_optional_and_cannot_change_earlier_outputs():
+    torch.manual_seed(3)
+    params = Flux2Params(
+        in_channels=8,
+        context_in_dim=16,
+        hidden_size=32,
+        num_heads=4,
+        depth=1,
+        depth_single_blocks=1,
+        axes_dim=[2, 2, 2, 2],
+        mlp_ratio=2.0,
+        use_guidance_embed=False,
+    )
+    model = Flux2FACTModel(
+        params,
+        action_dim=6,
+        state_dim=6,
+        max_horizon=8,
+        dino_dim=12,
+    ).eval()
+    batch = 1
+    ids = lambda length: torch.zeros(batch, length, 4)
+    kwargs = dict(
+        context=torch.randn(batch, 2, 16),
+        context_ids=ids(2),
+        current_latents=torch.randn(batch, 2, 8),
+        current_ids=ids(2),
+        noisy_future_latents=torch.randn(batch, 3, 8),
+        future_ids=ids(3),
+        state=torch.randn(batch, 1, 6),
+        noisy_pred_action=torch.randn(batch, 2, 6),
+        gt_action_cond=torch.randn(batch, 2, 6),
+        horizon_idx=torch.tensor([2]),
+        noisy_future_state=torch.randn(batch, 1, 6),
+        noisy_value=torch.randn(batch, 1, 1),
+        action_timestep=torch.rand(batch),
+        wm_timestep=torch.rand(batch),
+        dino_ids=ids(4),
+    )
+    with torch.inference_mode():
+        first = model(noisy_future_dino=torch.zeros(batch, 4, 12), **kwargs)
+        second = model(noisy_future_dino=torch.ones(batch, 4, 12), **kwargs)
+
+    assert first.dino.shape == (batch, 4, 12)
+    assert not torch.equal(first.dino, second.dino)
+    for name in ("image", "action", "future_state", "value"):
+        torch.testing.assert_close(getattr(first, name), getattr(second, name))

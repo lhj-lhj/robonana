@@ -11,6 +11,7 @@ from robonana.inference.robotwin_policy import (
 )
 from robonana.models.flux2_fact import Flux2FACTModel
 from robonana.sampling import flow_euler_schedule
+from robonana.models.position_ids import dino_position_ids
 from robonana.training.robotwin_trainer import flow_noise, image_position_ids, text_position_ids
 from world_action_model.pipeline.utils import NormalizationTensors
 
@@ -38,6 +39,21 @@ def test_flux_position_ids_encode_language_space_and_horizon_time():
     assert image_ids[0, :, 0].unique().item() == 1
     assert image_ids[1, :, 0].unique().item() == 4
     assert image_ids[0, :, 1:3].tolist() == [[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2]]
+    dino_ids = dino_position_ids(
+        2,
+        num_cameras=3,
+        grid_height=2,
+        grid_width=2,
+        time_coord=torch.tensor([3, 5]),
+        device=torch.device("cpu"),
+    )
+    assert dino_ids.shape == (2, 12, 4)
+    assert dino_ids[0, :, 0].unique().item() == 3
+    assert dino_ids[0, :, 1:].tolist() == [
+        [0, 0, 0], [0, 0, 1], [0, 1, 0], [0, 1, 1],
+        [1, 0, 0], [1, 0, 1], [1, 1, 0], [1, 1, 1],
+        [2, 0, 0], [2, 0, 1], [2, 1, 0], [2, 1, 1],
+    ]
 
 
 def test_online_action_postprocess_matches_training_delta_convention():

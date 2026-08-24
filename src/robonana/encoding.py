@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from flux2.text_encoder import MAX_LENGTH, Qwen3Embedder
@@ -63,3 +65,95 @@ def encode_flux2_image_tokens(vae, images: Tensor) -> Tensor:
     raw_latents = vae.encode(images).latent_dist.mode()
     packed = patchify_and_normalize(vae, raw_latents)
     return packed.flatten(2).transpose(1, 2).contiguous()
+
+
+def pixel_unshuffle_dino_patches(
+    features: Tensor,
+    *,
+    grid_height: int = 14,
+    grid_width: int = 14,
+    factor: int = 2,
+) -> Tensor:
+    """Losslessly fold spatial DINO patches into channels."""
+
+    batch, tokens, channels = features.shape
+    if tokens != grid_height * grid_width:
+        raise ValueError(
+            f"DINO features must contain {grid_height * grid_width} patches, got {tokens}"
+        )
+    if grid_height % factor or grid_width % factor:
+        raise ValueError("pixel-unshuffle factor must divide both DINO grid dimensions")
+    grid = features.reshape(batch, grid_height, grid_width, channels).permute(0, 3, 1, 2)
+    folded = F.pixel_unshuffle(grid, factor)
+    return folded.permute(0, 2, 3, 1).reshape(
+        batch,
+        (grid_height // factor) * (grid_width // factor),
+        channels * factor * factor,
+    )
+
+
+class DinoV3FeatureEncoder(nn.Module):
+    """Thin frozen timm DINOv3 ViT-B/16 adapter used only by cache jobs."""
+
+    def __init__(
+        self,
+        model_name: str = "vit_base_patch16_dinov3.lvd1689m",
+        *,
+        device: torch.device | str,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        super().__init__()
+        try:
+            import timm
+        except ImportError as error:
+            raise ImportError("DINO preprocessing requires timm; install robonana[preprocess]") from error
+        self.model_name = str(model_name)
+        self.model = timm.create_model(self.model_name, pretrained=True, num_classes=0)
+        self.model.eval().requires_grad_(False).to(device=torch.device(device), dtype=dtype)
+        self.num_prefix_tokens = int(getattr(self.model, "num_prefix_tokens", 1))
+        self.embed_dim = int(getattr(self.model, "embed_dim", 0))
+        if self.embed_dim != 768:
+            raise RuntimeError(f"DINOv3 ViT-B/16 must have embed_dim=768, got {self.embed_dim}")
+        self.register_buffer(
+            "image_mean",
+            torch.tensor((0.485, 0.456, 0.406), dtype=dtype).reshape(1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "image_std",
+            torch.tensor((0.229, 0.224, 0.225), dtype=dtype).reshape(1, 3, 1, 1),
+            persistent=False,
+        )
+
+    @torch.inference_mode()
+    def forward(self, images: Tensor) -> Tensor:
+        """Encode RGB ``[N,3,H,W]`` images in ``[0,1]`` to ``[N,49,3072]``."""
+
+        if images.ndim != 4 or images.shape[1] != 3:
+            raise ValueError(f"DINO images must be [N,3,H,W], got {tuple(images.shape)}")
+        if not torch.is_floating_point(images):
+            raise TypeError("DINO images must be floating point in [0, 1]")
+        if images.numel() and (images.amin().item() < 0.0 or images.amax().item() > 1.0):
+            raise ValueError("DINO images must be normalized to [0, 1]")
+        model_parameter = next(self.model.parameters())
+        images = images.to(device=model_parameter.device, dtype=model_parameter.dtype)
+        images = F.interpolate(
+            images,
+            size=(224, 224),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        )
+        output = self.model.forward_features((images - self.image_mean) / self.image_std)
+        if isinstance(output, Mapping):
+            try:
+                patches = output["x_norm_patchtokens"]
+            except KeyError as error:
+                raise RuntimeError(
+                    f"Unsupported DINO forward_features keys: {sorted(output)}"
+                ) from error
+        else:
+            patches = output[:, self.num_prefix_tokens :]
+        if tuple(patches.shape[1:]) != (196, 768):
+            raise RuntimeError(f"Expected native DINO patches [N,196,768], got {tuple(patches.shape)}")
+        return pixel_unshuffle_dino_patches(patches, factor=2)

@@ -19,7 +19,7 @@ from robonana.models.pretrained import (
     initialize_flux2_fact_model,
     load_flux2_fact_checkpoint,
 )
-from robonana.models.position_ids import image_position_ids, text_position_ids
+from robonana.models.position_ids import dino_position_ids, image_position_ids, text_position_ids
 from robonana.sampling import flow_euler_schedule, sample_two_stage_flow, sample_world_flow
 from robonana.training.losses import joint_flow_loss
 from robonana.training.visualization import (
@@ -86,12 +86,16 @@ class RoboNanaTrainer(Trainer):
         self._optimizer_step_succeeded = False
         self.vae_checkpoint_dir: str | None = None
         self.vae_dtype = torch.float32
+        self.dino_dim: int | None = None
 
     def get_models(self, model_config):
         action_dim = int(_config_value(model_config, "action_dim", 14))
         state_dim = int(_config_value(model_config, "state_dim", 14))
         value_dim = int(_config_value(model_config, "value_dim", 1))
         max_horizon = int(_config_value(model_config, "max_horizon", 48))
+        raw_dino_dim = _config_value(model_config, "dino_dim", None)
+        dino_dim = None if raw_dino_dim is None else int(raw_dino_dim)
+        self.dino_dim = dino_dim
         params_config = _config_value(model_config, "params", None)
         if params_config is None:
             raise ValueError("models.params must record the complete FLUX.2 architecture")
@@ -113,6 +117,7 @@ class RoboNanaTrainer(Trainer):
                 state_dim=state_dim,
                 value_dim=value_dim,
                 max_horizon=max_horizon,
+                dino_dim=dino_dim,
                 device=self.device,
                 dtype=self.dtype,
                 params=params,
@@ -124,6 +129,7 @@ class RoboNanaTrainer(Trainer):
                 state_dim=state_dim,
                 value_dim=value_dim,
                 max_horizon=max_horizon,
+                dino_dim=dino_dim,
                 device=self.device,
                 dtype=self.dtype,
                 params=params,
@@ -492,6 +498,11 @@ class RoboNanaTrainer(Trainer):
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
         current = batch_dict["current_latents"].to(device=self.device, dtype=self.dtype)
         future = batch_dict["future_latents"].to(device=self.device, dtype=self.dtype)
+        future_dino = None
+        if self.dino_dim is not None:
+            if "future_dino" not in batch_dict:
+                raise KeyError("DINO-enabled training requires a future_dino cache tensor in every sample")
+            future_dino = batch_dict["future_dino"].to(device=self.device, dtype=self.dtype)
         state = batch_dict["state"].to(device=self.device, dtype=self.dtype).unsqueeze(1)
         action = batch_dict["action"].to(device=self.device, dtype=self.dtype)
         future_state = batch_dict["future_state"].to(device=self.device, dtype=self.dtype).unsqueeze(1)
@@ -512,6 +523,10 @@ class RoboNanaTrainer(Trainer):
         noisy_future, image_target = flow_noise(future, wm_timestep)
         noisy_future_state, future_state_target = flow_noise(future_state, wm_timestep)
         noisy_value, value_target = flow_noise(value, wm_timestep)
+        noisy_future_dino = None
+        dino_target = None
+        if future_dino is not None:
+            noisy_future_dino, dino_target = flow_noise(future_dino, wm_timestep)
 
         context_ids = text_position_ids(batch_size, context.shape[1], self.device)
         current_ids = image_position_ids(
@@ -528,6 +543,21 @@ class RoboNanaTrainer(Trainer):
             time_coord=horizon,
             device=self.device,
         )
+        dino_ids = None
+        if future_dino is not None:
+            if tuple(future_dino.shape[1:]) != (147, self.dino_dim):
+                raise ValueError(
+                    f"cached DINO target must be [B, 147, {self.dino_dim}], "
+                    f"got {tuple(future_dino.shape)}"
+                )
+            dino_ids = dino_position_ids(
+                batch_size,
+                num_cameras=3,
+                grid_height=7,
+                grid_width=7,
+                time_coord=horizon,
+                device=self.device,
+            )
 
         output = self.model(
             context=context,
@@ -544,6 +574,8 @@ class RoboNanaTrainer(Trainer):
             noisy_value=noisy_value,
             action_timestep=action_timestep,
             wm_timestep=wm_timestep,
+            noisy_future_dino=noisy_future_dino,
+            dino_ids=dino_ids,
             context_mask=context_mask,
         )
 
@@ -563,6 +595,7 @@ class RoboNanaTrainer(Trainer):
             action_target=action_target,
             future_state_target=future_state_target,
             value_target=value_target,
+            dino_target=dino_target,
             action_loss_mask=action_loss_mask,
         )
 

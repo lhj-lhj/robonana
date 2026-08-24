@@ -168,3 +168,42 @@ def test_incomplete_project_config_fails_before_loading_checkpoint(tmp_path):
             device="cpu",
             dtype=torch.float32,
         )
+
+
+def test_dino_checkpoint_architecture_is_recorded_not_shape_inferred(tmp_path):
+    project = tmp_path / "experiment"
+    transformer = project / "models" / "step_1" / "transformer"
+    transformer.mkdir(parents=True)
+    checkpoint = transformer / "diffusion_pytorch_model.bin"
+    expected = Flux2FACTModel(
+        _tiny_params(),
+        action_dim=6,
+        state_dim=5,
+        value_dim=1,
+        max_horizon=8,
+        dino_dim=12,
+    )
+    torch.save(expected.state_dict(), checkpoint)
+    (project / "model_config.json").write_text(
+        json.dumps(
+            {
+                "models": {
+                    "params": asdict(_tiny_params()),
+                    "action_dim": 6,
+                    "state_dim": 5,
+                    "value_dim": 1,
+                    "max_horizon": 8,
+                    "dino_dim": 12,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    actual, report = load_flux2_fact_trained_checkpoint(
+        checkpoint,
+        device="cpu",
+        dtype=torch.float32,
+    )
+    assert report.model_config.dino_dim == 12
+    assert actual.dino_dim == 12

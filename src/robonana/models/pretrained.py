@@ -24,6 +24,17 @@ ROBOT_MODULE_NAMES = (
     "state_out",
     "value_out",
 )
+OPTIONAL_DINO_MODULE_NAMES = (
+    "dino_in",
+    "dino_out",
+    "dino_segment_embed",
+)
+
+
+def robot_module_names(model: Flux2FACTModel) -> tuple[str, ...]:
+    return ROBOT_MODULE_NAMES + tuple(
+        name for name in OPTIONAL_DINO_MODULE_NAMES if hasattr(model, name)
+    )
 
 
 @dataclass(frozen=True)
@@ -35,7 +46,7 @@ class PretrainedLoadReport:
 
 
 def robot_parameter_names(model: Flux2FACTModel) -> tuple[str, ...]:
-    prefixes = tuple(f"{name}." for name in ROBOT_MODULE_NAMES)
+    prefixes = tuple(f"{name}." for name in robot_module_names(model))
     return tuple(name for name, _ in model.named_parameters() if name.startswith(prefixes))
 
 
@@ -56,6 +67,7 @@ def initialize_flux2_fact_model(
     state_dim: int,
     value_dim: int = 1,
     max_horizon: int = 64,
+    dino_dim: int | None = None,
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params,
@@ -68,6 +80,7 @@ def initialize_flux2_fact_model(
         state_dim=state_dim,
         value_dim=value_dim,
         max_horizon=max_horizon,
+        dino_dim=dino_dim,
     )
     return model.to(device=torch.device(device), dtype=dtype)
 
@@ -79,6 +92,7 @@ def load_flux2_fact_checkpoint(
     state_dim: int,
     value_dim: int = 1,
     max_horizon: int = 64,
+    dino_dim: int | None = None,
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params | None = None,
@@ -98,6 +112,7 @@ def load_flux2_fact_checkpoint(
             state_dim=state_dim,
             value_dim=value_dim,
             max_horizon=max_horizon,
+            dino_dim=dino_dim,
         ).to(dtype=dtype)
 
     state_dict = load_file(str(path), device=str(device))
@@ -111,7 +126,7 @@ def load_flux2_fact_checkpoint(
             f"missing={sorted(actual_missing)}, unexpected={sorted(incompatible.unexpected_keys)}"
         )
 
-    for module_name in ROBOT_MODULE_NAMES:
+    for module_name in robot_module_names(model):
         module = getattr(model, module_name)
         module.to_empty(device=device)
         module.reset_parameters()
@@ -135,6 +150,7 @@ def load_flux2_fact_trained_checkpoint(
     state_dim: int | None = None,
     value_dim: int | None = None,
     max_horizon: int | None = None,
+    dino_dim: int | None = None,
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params | None = None,
@@ -154,6 +170,7 @@ def load_flux2_fact_trained_checkpoint(
         state_dim=state_dim,
         value_dim=value_dim,
         max_horizon=max_horizon,
+        dino_dim=dino_dim,
     )
     state_dict = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
 
@@ -164,6 +181,7 @@ def load_flux2_fact_trained_checkpoint(
             state_dim=model_config.state_dim,
             value_dim=model_config.value_dim,
             max_horizon=model_config.max_horizon,
+            dino_dim=model_config.dino_dim,
         ).to(dtype=dtype)
 
     checkpoint_parameters = sum(tensor.numel() for tensor in state_dict.values())

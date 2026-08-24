@@ -9,7 +9,7 @@ import torch
 
 @dataclass(frozen=True)
 class SegmentMap:
-    """Slices for ``[language | state | ref | A | G | H | S | V | I]``."""
+    """Slices for ``[language | state | ref | A | G | H | S | V | I | D]``."""
 
     language: slice
     state: slice
@@ -20,6 +20,7 @@ class SegmentMap:
     future_state: slice
     value: slice
     future_image: slice
+    future_dino: slice
     total_length: int
 
     @property
@@ -39,6 +40,7 @@ class SegmentMap:
         future_state: int,
         value: int,
         future_image: int,
+        future_dino: int = 0,
     ) -> "SegmentMap":
         lengths = (
             language,
@@ -50,6 +52,7 @@ class SegmentMap:
             future_state,
             value,
             future_image,
+            future_dino,
         )
         if any(length < 0 for length in lengths):
             raise ValueError(f"segment lengths must be non-negative, got {lengths}")
@@ -93,6 +96,7 @@ def build_attention_bias(
     s = segments.future_state
     v = segments.value
     i = segments.future_image
+    d = segments.future_dino
 
     _allow(allowed, c, c)
     _allow(allowed, a, c, a)
@@ -101,6 +105,9 @@ def build_attention_bias(
     _allow(allowed, s, c, g, h, s)
     _allow(allowed, v, c, g, h, s, v)
     _allow(allowed, i, c, g, h, s, v, i)
+    # DINO is a trailing training-only auxiliary sink. It can use the complete
+    # world-model path, while no earlier token can depend on DINO features.
+    _allow(allowed, d, c, g, h, s, v, i, d)
 
     if context_mask is not None:
         expected = (batch_size, segments.language.stop - segments.language.start)
@@ -120,4 +127,3 @@ def build_attention_bias(
 
     bias = torch.zeros(batch_size, 1, n, n, dtype=dtype, device=device)
     return bias.masked_fill(~allowed[:, None], float("-inf"))
-

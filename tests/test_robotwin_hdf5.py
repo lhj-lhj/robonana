@@ -10,6 +10,7 @@ from robonana.data.robotwin_hdf5 import (
     RoboTwinHDF5Dataset,
     RoboTwinMixtureSampler,
 )
+from robonana.data.flux_cache import episode_dino_cache_path
 
 
 def _stats(dim=14):
@@ -155,3 +156,33 @@ def test_mixture_sampler_keeps_roots_separate_and_respects_weights(tmp_path):
     indices = list(sampler)
     assert len(indices) == 8
     assert all(index >= len(initial) for index in indices)
+
+
+def test_dino_cache_uses_same_clamped_future_index(tmp_path):
+    root = tmp_path / "hf_dataset"
+    task_dir = root / "task" / "aloha-agilex_clean_50"
+    (task_dir / "data").mkdir(parents=True)
+    (task_dir / "flux_cache" / "latents").mkdir(parents=True)
+    with h5py.File(task_dir / "data" / "episode0.hdf5", "w") as handle:
+        handle.create_dataset("joint_action/vector", data=np.zeros((3, 14), dtype=np.float32))
+    torch.save(torch.zeros(3, 2, 4), task_dir / "flux_cache/latents/episode_000000.pt")
+    torch.save(torch.zeros(2, 3), task_dir / "flux_cache/language_context.pt")
+    dino = torch.arange(3 * 3 * 4).reshape(3, 3, 4).to(torch.bfloat16)
+    path = episode_dino_cache_path(task_dir, 0)
+    path.parent.mkdir(parents=True)
+    torch.save(dino, path)
+    stats_path = root / "norm_stats.json"
+    stats_path.write_text(json.dumps(_stats()), encoding="utf-8")
+    dataset = RoboTwinHDF5Dataset(
+        str(root),
+        stats_path=str(stats_path),
+        fixed_horizon=2,
+        dino_cache=True,
+        dino_token_count=3,
+        dino_feature_dim=4,
+        eval_horizons=(1,),
+    )
+    dataset.open()
+    sample = dataset._get_data(2)
+    assert sample["future_index"].item() == 2
+    torch.testing.assert_close(sample["future_dino"], dino[2])

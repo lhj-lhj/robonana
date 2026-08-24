@@ -19,6 +19,7 @@ class RoboNanaCheckpointConfig:
     state_dim: int
     value_dim: int
     max_horizon: int
+    dino_dim: int | None
     source: str
 
 
@@ -76,6 +77,9 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
         state_dim=int(models["state_dim"]),
         value_dim=int(models["value_dim"]),
         max_horizon=int(models["max_horizon"]),
+        # Legacy checkpoints explicitly reconstruct the pre-DINO architecture.
+        # We never infer this dimension from checkpoint tensor shapes.
+        dino_dim=None if models.get("dino_dim") is None else int(models["dino_dim"]),
         source=str(path),
     )
 
@@ -89,6 +93,7 @@ def resolve_checkpoint_config(
     state_dim: int | None = None,
     value_dim: int | None = None,
     max_horizon: int | None = None,
+    dino_dim: int | None = None,
 ) -> RoboNanaCheckpointConfig:
     """Resolve an exact architecture; never infer structure from model tensors."""
 
@@ -113,6 +118,7 @@ def resolve_checkpoint_config(
                 state_dim=int(state_dim),
                 value_dim=int(value_dim),
                 max_horizon=int(max_horizon),
+                dino_dim=None if dino_dim is None else int(dino_dim),
                 source="explicit model metadata",
             )
         raise FileNotFoundError(
@@ -130,4 +136,5 @@ def resolve_checkpoint_config(
         state_dim=int(state_dim) if state_dim is not None else resolved.state_dim,
         value_dim=int(value_dim) if value_dim is not None else resolved.value_dim,
         max_horizon=int(max_horizon) if max_horizon is not None else resolved.max_horizon,
+        dino_dim=int(dino_dim) if dino_dim is not None else resolved.dino_dim,
     )

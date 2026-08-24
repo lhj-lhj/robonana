@@ -50,3 +50,25 @@ def test_padded_context_keys_are_blocked_without_all_masked_rows():
     assert torch.isfinite(bias[padded, padded])
     valid_queries = torch.arange(seg.total_length) != padded
     assert torch.isneginf(bias[valid_queries, padded]).all()
+
+
+def test_dino_is_trailing_one_way_auxiliary_sink():
+    seg = SegmentMap.from_lengths(
+        language=2,
+        state=1,
+        ref_image=2,
+        pred_action=2,
+        gt_action=2,
+        horizon=1,
+        future_state=1,
+        value=1,
+        future_image=3,
+        future_dino=4,
+    )
+    bias = build_attention_bias(seg, batch_size=1, dtype=torch.float32, device="cpu")[0, 0]
+
+    assert torch.isfinite(bias[seg.future_dino, seg.future_image]).all()
+    assert torch.isfinite(bias[seg.future_dino, seg.future_dino]).all()
+    assert torch.isfinite(bias[seg.future_dino, seg.gt_action]).all()
+    assert torch.isneginf(bias[seg.future_image, seg.future_dino]).all()
+    assert torch.isneginf(bias[seg.pred_action, seg.future_dino]).all()
