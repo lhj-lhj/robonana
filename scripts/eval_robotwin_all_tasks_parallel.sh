@@ -137,7 +137,8 @@ run_worker() {
     "SKIP_ACTION_RENDER_SYNC=0"
     "ROBONANA_OVERLAY_CHUNK_VALUE=1"
     "ROBONANA_STAGE2_IMAGE_ROOT=${run_dir}/stage2_images"
-    "ROBONANA_SAPIEN_RENDER_DEVICE=cuda:${gpu}"
+    # cuda:0 is this rank's sole logical device after CUDA_VISIBLE_DEVICES isolation.
+    "ROBONANA_SAPIEN_RENDER_DEVICE=cuda:0"
     "ROBONANA_SAPIEN_DENOISER=optix"
   )
 

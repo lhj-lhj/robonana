@@ -12,12 +12,14 @@ def configure_sapien_runtime(
     denoiser: str | None = None,
     sapien_module: Any | None = None,
 ) -> tuple[str, str]:
-    """Bind default SAPIEN scenes to one physical GPU before RoboTwin imports.
+    """Bind default SAPIEN scenes to one CUDA-visible GPU before RoboTwin imports.
 
     SAPIEN 3's deprecated ``Engine`` wrapper ignores ``SapienRenderer`` and
     constructs ``RenderSystem()`` with the first physical Vulkan device.  That
-    behavior also ignores ``CUDA_VISIBLE_DEVICES``.  Patch the wrapper's default
-    scene constructor before RoboTwin's startup render check creates a scene.
+    behavior can ignore ``CUDA_VISIBLE_DEVICES`` when selecting its default.
+    Patch the wrapper before RoboTwin's startup render check creates a scene;
+    callers should normally pass logical ``cuda:0`` after isolating one physical
+    GPU with ``CUDA_VISIBLE_DEVICES``.
     """
 
     selected_device = str(
