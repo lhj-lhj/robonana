@@ -116,12 +116,16 @@ class DinoV3FeatureEncoder(nn.Module):
             raise RuntimeError(f"DINOv3 ViT-B/16 must have embed_dim=768, got {self.embed_dim}")
         self.register_buffer(
             "image_mean",
-            torch.tensor((0.485, 0.456, 0.406), dtype=dtype).reshape(1, 3, 1, 1),
+            torch.tensor(
+                (0.485, 0.456, 0.406), device=torch.device(device), dtype=dtype
+            ).reshape(1, 3, 1, 1),
             persistent=False,
         )
         self.register_buffer(
             "image_std",
-            torch.tensor((0.229, 0.224, 0.225), dtype=dtype).reshape(1, 3, 1, 1),
+            torch.tensor(
+                (0.229, 0.224, 0.225), device=torch.device(device), dtype=dtype
+            ).reshape(1, 3, 1, 1),
             persistent=False,
         )
 
