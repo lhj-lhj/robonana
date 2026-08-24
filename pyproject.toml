@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "robonana"
 version = "0.1.0"
-description = "A minimal FACT data-path and FLUX.2 shared-DiT world-action model scaffold."
+description = "A shared-FLUX.2 RoboTwin world-action model with a training-only DINOv3 flow target."
 requires-python = ">=3.10"
 dependencies = [
   "torch>=2.6",

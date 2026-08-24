@@ -1,4 +1,4 @@
-"""RoboTwin 2.0 full-training config for FACT's loop and FLUX.2 Klein 4B."""
+"""Shared FACT/HDF5 and FLUX.2 Klein 4B compatibility config."""
 
 from __future__ import annotations
 

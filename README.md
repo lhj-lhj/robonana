@@ -1,233 +1,214 @@
-# robonana
+# RoboNana
 
-Minimal implementation scaffold for a RoboTwin 2.0 world-action model that:
+RoboNana is a RoboTwin 2.0 world-action model built by extending FACT's data and
+training path with one shared FLUX.2 DiT. The repository keeps upstream FACT and
+FLUX.2 implementations external and contains only the adapters, masks, cache
+contracts, losses, training hooks, and RoboTwin integration needed by the current
+experiment.
 
-- reuses FACT's dataset/transform contract;
-- subclasses the official `flux2.model.Flux2` backbone;
-- sends image, action, state, horizon, and value tokens through the same FLUX.2 DiT blocks;
-- adds only token adapters, output heads, per-segment timestep modulation, and an explicit attention mask.
+## Current experiment
 
-## Upstream source trees
+The supported training target is `robonana.configs.robotwin_flux2_800m_dino.config`:
 
-The repository intentionally does not copy FACT or FLUX.2 source files. Make them importable:
+- scratch FLUX.2-shaped DiT: 800,776,704 parameters;
+- hidden size 1536, 12 attention heads, 4 double-stream blocks, and 16
+  single-stream blocks;
+- ordinary BF16 DDP on eight GPUs, without ZeRO-2 or gradient checkpointing;
+- 120,000 optimizer steps at global batch size 256 (`32 x 8`);
+- FACT RoboTwin-v2: 2,500 Clean episodes plus 25,000 Randomized episodes;
+- language, robot state, three-view current image, action, horizon, future state,
+  scalar value, future FLUX-AE image, and a training-only future DINOv3 target;
+- fixed-horizon W&B visualization at `h = 12, 24, 48` every 1,000 steps.
+
+Training samples `h=24` with probability 0.5 and otherwise samples uniformly
+from `1..48`. A target beyond an episode uses the final valid frame/action, which
+matches the retained FACT tail-clipping behavior.
+
+## Shared-DiT design
+
+The exact token order is:
+
+```text
+[language | state | current_image | pred_action | gt_action_full_clean |
+ idx_h | future_state | value | future_image_vae | future_image_dino]
+```
+
+All segments pass through the same FLUX.2 double-stream and single-stream
+blocks. Image, action, future-state, value, and DINO predictions use separate
+output projections; they are not separate transformer backbones. The DINO branch
+adds only:
+
+```text
+dino_in  = Linear(3072, 1536)
+dino_out = Linear(1536, 3072)
+```
+
+The attention policy is prefix-structured:
+
+| Query | Visible keys |
+|---|---|
+| language, state, current image | language, state, current image |
+| predicted action | clean prefix + predicted action |
+| full-clean GT action | clean prefix + GT action |
+| horizon | clean prefix + GT action + horizon |
+| future state | previous world prefix + future state |
+| value | previous world prefix + value |
+| future FLUX latent | previous world prefix + future FLUX latent |
+| future DINO | complete world prefix + future DINO |
+
+Both action tracks use full bidirectional attention inside their own 48-token
+chunk; neither uses action-time causal masking. The predicted-action track is a
+sink and is never visible to the GT/world path. DINO is a final one-way auxiliary
+sink, so earlier tokens cannot depend on it. Inference omits the DINO suffix and
+therefore uses the unchanged action and future-image samplers.
+
+See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact upstream reuse
+boundary.
+
+## Repository layout
+
+```text
+src/robonana/models/       shared FLUX.2 wrapper, attention mask, strict checkpoint config
+src/robonana/data/         LeRobot-v2 loader, rollout HDF5 loader, cache and stats contracts
+src/robonana/training/     FACT trainer hook, joint flow losses, W&B visualization
+src/robonana/inference/    two-stage RoboTwin policy; no DINO inference path
+src/robonana/sim/          SAPIEN/OIDN runtime compatibility
+src/robonana_robotwin*     FACT/RoboTwin TCP adapter and client
+scripts/                   current preprocessing, training, evaluation, and rollout entrypoints
+tests/                     maintained unit/integration contract tests
+```
+
+The 4B and non-DINO config modules remain only as inheritance layers used by the
+current 800M+DINO config. They are not the default experiment entrypoints.
+
+## Environment and upstream code
+
+The canonical checkout on `hongjia@208.64.254.190` is:
+
+```text
+~/robonana -> /data3/hongjia/robonana
+```
+
+Create an environment and make the upstream repositories importable:
 
 ```bash
+cd ~/robonana
+python -m venv --system-site-packages .venv
+.venv/bin/python -m pip install -e '.[train,preprocess,dev]'
+
 git clone https://github.com/Bariona/FACT.git third_party/FACT
 git clone https://github.com/black-forest-labs/flux2.git third_party/flux2
-export PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src:$PYTHONPATH"
+
+export PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-## Verification
-
-All verification is run on `pyromind-west1-58` under `/workspace/hongjia/robonana`:
+Place the official FLUX.2 Klein component checkpoint at
+`checkpoints/FLUX.2-klein-base-4B` or set `ROBONANA_FLUX_CHECKPOINT_DIR`. It must
+contain the local Qwen3 text encoder and FLUX AE used for offline caches and
+pixel decoding. Download the DINOv3 ViT-B/16 weights into the Hugging Face cache
+with the current `hf` CLI:
 
 ```bash
-bash scripts/verify_remote.sh
+hf auth login
+HF_HOME=/data3/hongjia/hf-cache \
+  hf download timm/vit_base_patch16_dinov3.lvd1689m
 ```
 
-## W&B tracking
+Never put Hugging Face or W&B tokens in Git. Authenticate W&B once with
+`wandb login`; runs use project `robonana` and entity
+`hongjia-liu-aalto-university`.
 
-Training uploads to the `robonana` project in the
-`hongjia-liu-aalto-university` entity by default. Authenticate once on each
-training host with `wandb login`; never place the API key in Git, Notion, a
-launcher, or a committed config file.
+## Dataset and offline caches
 
-## Real RoboTwin training
+The full dataset root on the current server is:
 
-The production path now uses FACT's `Trainer`, `DefaultCollator`, sampler
-registry, optimizer/scheduler builders, Accelerate/DeepSpeed wrapping,
-checkpointing, and W&B scalar logging. RoboNana adds only a raw-HDF5 dataset
-adapter and the FLUX-specific forward step.
-
-Generate the portable episode index and FACT-compatible normalization stats
-once after the FLUX/Qwen caches are complete:
-
-```bash
-PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
-  .venv/bin/python scripts/compute_robotwin_metadata.py \
-  --dataset-root /workspace/datasets/RoboTwin/hf_dataset
+```text
+/data3/hongjia/robonana-migration/datasets/fact-robotwin-v2/RoboTwin
 ```
 
-Launch full shared-DiT training. `ROBONANA_GPU_IDS` defaults to `0,2,5,7`,
-batch size defaults to one per GPU, and multi-GPU execution reuses FACT's
-DeepSpeed ZeRO-2 config.
+Per episode, preprocessing writes:
 
-```bash
-ROBONANA_GPU_IDS=0,1,2,3,4,5,6,7 \
-ROBONANA_BATCH_SIZE=16 \
-  bash scripts/run_robotwin_train.sh
+```text
+flux_cache/language/episode_NNNNNN.pt  BF16 [512, 7680]
+flux_cache/latents/episode_NNNNNN.pt   BF16 [T, 288, 128]
+flux_cache/dino/episode_NNNNNN.pt      BF16 [T, 147, 3072]
 ```
 
-Every 100 optimizer steps, the trainer evaluates each selected current frame at
-fixed horizons `idx_h = 12, 24, 48` after backward and optimizer completion.
-Every rank evaluates a different local current frame, lazily loads the frozen
-FP32 FLUX.2 AE, and locally decodes its current/GT/predicted images. Each AE is
-immediately removed from GPU; compact uint8 pixels are gathered to rank 0 for
-CPU composition and upload as one eight-row W&B panel. Evaluation mirrors
-inference: it first samples action
-from pure noise, feeds the resulting clean action into the teacher-forcing
-track, then jointly samples future image/state/value from pure noise with
-20-step Flow-Euler. A second panel reuses the same future noise but conditions
-the world stage on the dataset GT action, isolating world-model alignment from
-action-generation error. W&B keys are `eval/fixed_horizon_grid` and
-`eval/fixed_horizon_gt_action_grid`. Set `ROBONANA_NUM_INFERENCE_STEPS` to use
-a different shared eval/inference step count.
+The FLUX cache uses the same three-view `384 x 192` composite geometry as the
+training input. The DINO cache processes each native camera separately with
+DINOv3 ViT-B/16, obtains `14 x 14 x 768` patch features, and applies lossless
+`2 x 2` pixel-unshuffle. This gives `3 cameras x 7 x 7 = 147` tokens with
+feature width `4 x 768 = 3072`.
 
-Ordinary training batches do not carry fixed-horizon eval targets. They retain
-only a scalar sample index; after periodic pure-noise sampling completes, the
-three GT future latents are loaded lazily for W&B comparison only.
+The released 27,500 episodes contain 6,075,103 frames. An exact BF16 DINO cache
+therefore requires about 4.99 TiB before filesystem overhead. The preprocessor
+checks free capacity before writing any DINO episode and fails loudly when the
+requested cache does not fit; `--allow-low-disk` must not be used as a substitute
+for adding storage or selecting a deliberate smaller subset.
 
-Training horizons use a rollout-aligned mixture by default: 50% of samples use
-`idx_h = 24`, while the remaining 50% draw uniformly from `1..48`. Override the
-anchor and mixture probability with `ROBONANA_ROLLOUT_HORIZON` and
-`ROBONANA_ROLLOUT_HORIZON_PROB`. Current-frame inputs remain clean cached FLUX
-latents; no online pixel augmentation or VAE encoding is performed.
-
-The launcher tees combined stdout/stderr to a timestamped file under
-`$ROBONANA_PROJECT_DIR/logs`. In addition to the normal 1000-step checkpoint
-interval, step 100 is saved by default; override it with a comma-separated
-`ROBONANA_EARLY_CHECKPOINT_STEPS` value.
-
-See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact reuse boundary.
-
-### Scratch 200M BF16 DDP experiment
-
-`robonana.configs.robotwin_flux2_small200m.config` keeps the full original
-50-task/2500-episode dataset and its language, token order, inputs, outputs,
-episode-uniform, action-chunk, tail-clip, and horizon sampling behavior. It
-initializes an approximately 200M-parameter FLUX.2-shaped DiT from scratch,
-disables both model-native gradient checkpointing and FACT activation
-checkpointing, and launches ordinary BF16 `MULTI_GPU` DDP without DeepSpeed.
+The resumable full pipeline builds metadata, DINO/Qwen3/FLUX caches, validates
+all cache shapes, waits for eight idle GPUs and valid W&B authentication, then
+starts the 120k-step job:
 
 ```bash
-ROBONANA_GPU_IDS=0,1,2,3,4,5,6,7 \
-ROBONANA_BATCH_SIZE=32 \
-ROBONANA_MAX_STEPS=10000 \
-ROBONANA_PROJECT_DIR="$PWD/experiments/robotwin_flux2_small200m" \
-  bash scripts/run_robotwin_train.sh \
-  --config robonana.configs.robotwin_flux2_small200m.config
-```
-
-The small config defaults to learning rate `1e-4` with 500 warmup steps. Use
-`ROBONANA_LR` and `ROBONANA_WARMUP_STEPS` to override them.
-
-### Full RoboTwin-v2 scratch 800M experiment
-
-`robonana.configs.robotwin_flux2_800m.config` reads FACT's released LeRobot-v2
-layout directly: 50 Clean tasks with 50 episodes each plus 50 Randomized tasks
-with 500 episodes each. It reuses the same RoboNana token order, action chunk,
-tail clipping, language conditioning, horizon mixture, heads, and losses. The
-FLUX-shaped DiT has 791,333,376 parameters (`hidden_size=1536`, 12 heads, 4
-double-stream blocks, 16 single-stream blocks), is initialized from scratch,
-and runs ordinary BF16 DDP without gradient checkpointing.
-
-The resumable background pipeline computes full-dataset norm stats/index,
-per-episode Qwen3 contexts, per-frame FLUX AE tokens, validates all 27,500
-episodes, waits until all eight GPUs are free, then starts 120k steps at global
-batch size 256 (32 samples per GPU):
-
-```bash
+export ROBONANA_DATASET_ROOT=/data3/hongjia/robonana-migration/datasets/fact-robotwin-v2/RoboTwin
+export ROBONANA_FLUX_CHECKPOINT_DIR=$PWD/checkpoints/FLUX.2-klein-base-4B
 setsid -f bash scripts/run_full800m_pipeline.sh
-cat /data3/hongjia/robonana-jobs/full800m_bs256_120k/status.txt
-tail -f /data3/hongjia/robonana-jobs/full800m_bs256_120k/pipeline.log
+
+cat /data3/hongjia/robonana-jobs/full800m_dino_bs256_120k/status.txt
+tail -f /data3/hongjia/robonana-jobs/full800m_dino_bs256_120k/pipeline.log
 ```
 
-The source archive is not duplicated when its size and Hugging Face LFS SHA256
-already match. Preprocessing uses GPUs 1-7 by default so a pre-existing GPU 0
-job is left untouched; training waits for all eight GPUs rather than evicting
-another process.
-
-## RoboTwin FLUX caches
-
-Raw RoboTwin HDF5 tasks are converted without changing FACT's three-view
-layout. Qwen3 is run once per task and every RGB frame is encoded once; the
-training loader selects current/future tokens using `current_index` and
-`idx_h`.
+For a bounded cache smoke test, use `--max-tasks` or `--max-episodes` explicitly:
 
 ```bash
-PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
-  .venv/bin/python scripts/preprocess_robotwin_flux.py \
-  --dataset-root /workspace/datasets/RoboTwin/hf_dataset \
-  --checkpoint checkpoints/FLUX.2-klein-base-4B \
-  --stage language
-
-PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src" \
-  .venv/bin/python -m torch.distributed.run --standalone --nproc-per-node 8 \
-  scripts/preprocess_robotwin_flux.py \
-  --dataset-root /workspace/datasets/RoboTwin/hf_dataset \
-  --checkpoint checkpoints/FLUX.2-klein-base-4B \
-  --stage images --batch-size 16
+CUDA_VISIBLE_DEVICES=0 \
+.venv/bin/python scripts/preprocess_robotwin_lerobot_flux.py \
+  --dataset-root "$ROBONANA_DATASET_ROOT" \
+  --checkpoint "$ROBONANA_FLUX_CHECKPOINT_DIR" \
+  --stage dino --max-episodes 1 --dino-batch-size 16
 ```
 
-On west1-58, the resumable four-GPU launcher defaults to the currently agreed
-physical GPUs `0,2,5,7`:
+## Training
+
+After all three cache families validate, the default launcher runs the current
+800M+DINO config:
 
 ```bash
-setsid -f bash scripts/run_robotwin_flux_cache.sh
-tail -f logs/preprocess_robotwin_flux_full.log
+export ROBONANA_GPU_IDS=0,1,2,3,4,5,6,7
+export ROBONANA_BATCH_SIZE=32
+export ROBONANA_MAX_STEPS=120000
+export ROBONANA_PIXEL_EVAL_INTERVAL=1000
+export ROBONANA_CHECKPOINT_INTERVAL=1000
+bash scripts/run_robotwin_train.sh
 ```
 
-## RoboTwin simulation evaluation
+The joint flow loss weights are image `1.0`, action `10.0`, future state `0.4`,
+value `0.4`, and DINO `0.1`. Periodic visualization samples action from pure
+noise, then samples future image/state/value with 20-step Flow-Euler. W&B gets
+both the predicted-action result and a GT-action-conditioned reconstruction for
+the same current frame and noise seed.
 
-RoboNana keeps FACT's TCP client and RoboTwin `eval_policy.py`; only the online
-FLUX/Qwen encoder and checkpoint adapter are new.  RoboTwin commit `2eeec32`
-expects CuRobo's pre-refactor API, so pin the checkout created by RoboTwin's
-installer to the newest compatible tag once:
+Checkpoint loading is strict. Evaluation must find a complete FACT `config.json`
+next to the experiment checkpoint or receive `--model-config`; model size is
+never guessed from checkpoint tensor shapes.
 
-```bash
-git -C /workspace/hongjia/RoboTwin/envs/curobo switch --detach v0.7.8
-/workspace/.conda/envs/robotwin2/bin/python -m pip install --no-build-isolation \
-  -e /workspace/hongjia/RoboTwin/envs/curobo
-```
+## Full RoboTwin evaluation
 
-Start the step-100 policy server with the DiT on physical GPU 6 and FLUX AE on
-physical GPU 7:
-
-```bash
-CUDA_VISIBLE_DEVICES=6,7 \
-PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src:$PWD/third_party/flux2_official/src" \
-.venv/bin/python scripts/inference_server_robotwin.py \
-  --checkpoint experiments/robotwin_flux2_h24mix_bs12_10k_20260819/models/checkpoint_epoch_1_step_100/transformer/diffusion_pytorch_model.bin \
-  --flux-checkpoint-dir checkpoints/FLUX.2-klein-base-4B \
-  --stats-path /workspace/datasets/RoboTwin/hf_dataset/robonana_norm_stats.json \
-  --model-device cuda:0 --vae-device cuda:1 --port 8094
-```
-
-In a second shell, run one RoboTwin episode on physical GPU 7.  Do not force
-`VK_ICD_FILENAMES`; SAPIEN's automatic ICD selection is required on west1-58.
+The eight-way launcher audits train/eval instructions, evaluates all 50 tasks,
+saves native MP4s, one value trace per episode, and the decoded Stage-2 future
+images. Each 48-action chunk uses one `h=24` value, which is overlaid on every
+executed frame in that chunk.
 
 ```bash
-CUDA_VISIBLE_DEVICES=7 \
-XDG_RUNTIME_DIR=/tmp/robonana_robotwin_eval_8094 \
-PYTHONPATH="$PWD/src" \
-FACT_CONDA_ENV="$PWD/.venv" \
-ROBOTWIN_PATH=/workspace/hongjia/RoboTwin \
-ROBOTWIN_CONDA_ENV=/workspace/.conda/envs/robotwin2 \
-POLICY_NAME=robonana_robotwin.adapter \
-PORT=8094 TEST_NUM=1 EXECUTE_ACTIONS_PER_PLAN=48 \
-SERVER_TIMEOUT_MS=600000 SERVER_WAIT_SECONDS=600 EVAL_VIDEO_LOG=0 \
-bash third_party/FACT/evaluation/robotwin/launch_client.sh \
-  beat_block_hammer demo_clean step100 0
-```
-
-The inference server resolves model size from the exact training metadata. It
-discovers the FACT `config.json` above the checkpoint, or accepts an explicit
-`--model-config /path/to/config.json`. The config must contain complete
-`models.params`, action/state/value dimensions, and `max_horizon`; missing or
-partial metadata is a hard error and is never inferred from checkpoint tensors.
-
-For the canonical 50-task evaluation, use the eight-way launcher. It starts one
-800M inference server and one RoboTwin client per GPU, assigns the 50 tasks
-round-robin, enables native MP4 recording, and saves one value trace per episode:
-
-```bash
-export ROBONANA_TRAINED_CHECKPOINT="$PWD/experiments/<run>/models/<checkpoint>/transformer/diffusion_pytorch_model.bin"
+export ROBONANA_TRAINED_CHECKPOINT=$PWD/experiments/<run>/models/<checkpoint>/transformer/diffusion_pytorch_model.bin
+export ROBONANA_DATASET_ROOT=/data3/hongjia/robonana-migration/datasets/fact-robotwin-v2/RoboTwin
 export ROBONANA_EVAL_GPUS=0,1,2,3,4,5,6,7
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
 
-The renderer denoiser is explicit. The default is `optix`; to match RoboTwin's
-official OIDN data-generation path and run tasks serially on one GPU, use:
+The default renderer denoiser is OptiX for parallel throughput. To match the
+official OIDN rendering path, run serially on one GPU:
 
 ```bash
 export ROBONANA_EVAL_GPUS=2
@@ -235,76 +216,48 @@ export ROBONANA_SAPIEN_DENOISER=oidn
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
 
-Blackwell GPUs require OIDN 2.3.3 or newer. SAPIEN 3.0.0b1 and 3.0.3 bundle
-OIDN 2.0.1, which reports `unsupported device type: CUDA` / `invalid handle` on
-Blackwell. Upgrade an isolated RoboTwin environment with the pinned installer:
+Blackwell requires the pinned OIDN-compatible environment installed by:
 
 ```bash
-bash scripts/install_sapien_oidn_blackwell.sh \
-  /path/to/robotwin2-oidn233
+bash scripts/install_sapien_oidn_blackwell.sh /path/to/robotwin2-oidn233
 export ROBOTWIN_CONDA_ENV=/path/to/robotwin2-oidn233
 ```
 
-The launcher first audits all 27,500 training episodes. Their metadata prompt
-must match RoboTwin's `seen` template family and exactly match the prompt stored
-beside the Qwen3 cache. Evaluation therefore uses `instruction_type: seen`, not
-RoboTwin's default `unseen`. Each plan runs Stage-2 world sampling at `h=24`,
-denormalizes its scalar value, stores it in `values_per_plan` inside the episode
-NPZ trace, and overlays the same `chunk/h/value` label on every native video
-frame executed from that 48-action chunk. The run fails if it does not produce
-all 50 task results, `50 * test_num` MP4s, and the same number of value traces.
+## Failure rollout collection
 
-## Separate rollout collection and retraining
-
-Policy-generated data is never written into the initial RoboTwin root.  Each
-collection has its own dataset root:
-
-```text
-/workspace/hongjia/robonana_rollouts/<collection>/
-  robonana_collection.json
-  robonana_index.json
-  robonana_norm_stats.json
-  robonana_ready.json
-  <task>/robonana_rollout/
-    data/episode0.hdf5
-    instructions/episode0.json
-    metadata/episode0.json
-    flux_cache/language/episode_000000.pt
-    flux_cache/latents/episode_000000.pt
-```
-
-One command runs RoboTwin, records aligned three-view RGB/state/executed action,
-stops its temporary inference server, builds the episode index, copies the
-initial normalization contract, and generates episode-level Qwen3 plus FLUX AE
-caches:
+Rollouts are always written outside the initial dataset. The current collector
+saves aligned three-view RGB, observed state, actually executed action,
+success/failure metadata, Qwen3 context, and FLUX AE cache into a separate HDF5
+collection:
 
 ```bash
-export ROBONANA_TRAINED_CHECKPOINT="$PWD/experiments/<run>/models/<checkpoint>/transformer/diffusion_pytorch_model.bin"
+export ROBONANA_INITIAL_DATASET_ROOT="$ROBONANA_DATASET_ROOT"
+export ROBONANA_STATS_SOURCE="$ROBONANA_DATASET_ROOT/robonana_norm_stats.json"
+export ROBONANA_TRAINED_CHECKPOINT=$PWD/experiments/<run>/models/<checkpoint>/transformer/diffusion_pytorch_model.bin
+
 TEST_NUM=1 PORT=8095 \
-ROBONANA_SERVER_GPU_IDS=6,7 \
-ROBONANA_CLIENT_GPU_ID=7 \
-ROBONANA_PREPARE_GPU_ID=7 \
 bash scripts/collect_prepare_robotwin_rollouts.sh \
   beat_block_hammer demo_clean step1000_failures 0
 ```
 
-The writer rejects any rollout root nested inside
-`/workspace/datasets/RoboTwin/hf_dataset`.  It stores observed state in
-`joint_action/vector` and the action actually sent to RoboTwin separately in
-`policy_action/vector`.  Failed episodes carry `success=false`, use the FACT
-failure value penalty, and return `action_loss_mask=0` in the dataset.
+Failed episodes have `action_loss_mask=0` while retaining their world/value
+supervision. The separate rollout format and collection path are maintained, but
+the current 800M+DINO config does not yet mix these episodes into training: the
+rollout preprocessor must first add the exact DINO cache contract and the 800M
+config must add an explicit LeRobot+HDF5 mixture. Do not set rollout-mixture
+environment variables for the current DINO run until that integration exists.
 
-To continue training, restart the same experiment directory with the collection
-enabled.  The checkpoint resumes normally, while the initial and rollout files
-remain in separate roots and are joined only by the sampler:
+## Verification
+
+Executable validation is performed only on `pyromind-west1-58` from a checkout
+under `/workspace/hongjia/robonana`:
 
 ```bash
-export ROBONANA_PROJECT_DIR="$PWD/experiments/<run>"
-export ROBONANA_ROLLOUT_DATASET_ROOT=/workspace/hongjia/robonana_rollouts/step1000_failures
-export ROBONANA_ROLLOUT_DATASET_WEIGHT=1.0
-bash scripts/run_robotwin_train.sh
+bash scripts/verify_remote.sh
+
+# Optional real DINO weight/GPU test
+ROBONANA_TEST_REAL_DINO=1 bash scripts/verify_remote.sh
 ```
 
-`ROBONANA_ROLLOUT_DATASET_WEIGHT` is the rollout collection's sampling weight
-relative to the initial dataset's fixed weight of `1.0`.  Restart training after
-adding episodes so DataLoader workers rebuild the collection index.
+Data, caches, checkpoints, outputs, logs, credentials, and upstream source trees
+are ignored and must never be committed.

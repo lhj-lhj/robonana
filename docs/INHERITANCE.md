@@ -3,7 +3,8 @@
 ## Runtime graph
 
 ```text
-RoboTwinHDF5Dataset
+RoboTwinLeRobotDataset (initial FACT RoboTwin-v2)
+  or RoboTwinHDF5Dataset (separate policy rollouts)
   -> FACT sampler + DefaultCollator + Trainer
     -> Flux2FACTModel (subclasses official Flux2)
       -> existing Flux2.double_blocks
@@ -17,7 +18,7 @@ RoboTwinHDF5Dataset
 
 | Upstream | Reused code | robonana extension |
 |---|---|---|
-| FACT | sampler registry and `DefaultCollator` | raw-HDF5 RoboTwin dataset adapter |
+| FACT | sampler registry and `DefaultCollator` | LeRobot-v2 initial-data adapter and raw-HDF5 rollout adapter |
 | FACT | `Trainer` loop, Accelerate/DeepSpeed, optimizer, checkpoint and logging | FLUX-specific forward/eval hooks |
 | FLUX.2 | `Flux2`, image/text projections, RoPE and modulation | `Flux2FACTModel` subclass |
 | FLUX.2 | all `DoubleStreamBlock` parameters | masked forward using existing private helpers |
