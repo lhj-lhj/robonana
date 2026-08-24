@@ -168,7 +168,7 @@ run_worker() {
       return 0
     fi
 
-    local attempt attempt_dir attempt_csv row attempt_rc
+    local attempt attempt_dir attempt_csv attempt_log row attempt_rc
     for ((attempt = 1; attempt <= task_max_attempts; attempt++)); do
       attempt_dir="${worker_dir}/attempts/${task_name}/attempt_${attempt}_$(date +%Y%m%d_%H%M%S)"
       mkdir -p "${attempt_dir}"
@@ -181,10 +181,16 @@ run_worker() {
           bash "${repo_root}/third_party/FACT/evaluation/robotwin/eval_all_tasks.sh" \
             "${task_config}" "${test_num}" || attempt_rc=$?
       attempt_csv="${attempt_dir}/results.csv"
+      attempt_log="${attempt_dir}/logs/${task_name}.log"
       row=""
       if [[ -f "${attempt_csv}" ]]; then
         row=$(awk -F, -v task_name="${task_name}" \
           '$1 == task_name && $4 != "ERROR" && $3 != "" {print; exit}' "${attempt_csv}")
+      fi
+      if [[ -n "${row}" && -f "${attempt_log}" ]] \
+        && grep -Eq 'OIDN Error:|ErrorDeviceLost|DeviceLost|Render Error' "${attempt_log}"; then
+        echo "[retry] ${task_name}: renderer error found in successful client log"
+        row=""
       fi
       if [[ -n "${row}" ]]; then
         upsert_result "${task_name}" "${row}"
