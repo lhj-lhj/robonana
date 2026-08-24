@@ -16,13 +16,17 @@ gpu_csv=${ROBONANA_EVAL_GPUS:-0,1,2,3,4,5,6,7}
 port_base=${ROBONANA_PORT_BASE:-18000}
 run_dir=${ROBONANA_EVAL_RUN_DIR:-${repo_root}/outputs/robotwin_full_eval_$(date +%Y%m%d_%H%M%S)}
 deploy_policy=${ROBONANA_DEPLOY_POLICY_PATH:-${repo_root}/src/robonana/configs/robotwin_eval_train_seen.yml}
+task_timeout_seconds=${ROBONANA_TASK_TIMEOUT_SECONDS:-21600}
+task_max_attempts=${ROBONANA_TASK_MAX_ATTEMPTS:-3}
+client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
 
 IFS=',' read -r -a gpu_ids <<< "${gpu_csv}"
 if [[ ${#gpu_ids[@]} -eq 0 ]]; then
   echo "ROBONANA_EVAL_GPUS resolved to an empty GPU list" >&2
   exit 2
 fi
-for required in "${checkpoint}" "${stats_path}" "${deploy_policy}" "${model_python}"; do
+for required in "${checkpoint}" "${stats_path}" "${deploy_policy}" "${model_python}" \
+  "${robotwin_env}/bin/python" "${client_python_wrapper}"; do
   if [[ ! -f "${required}" ]]; then
     echo "Required file does not exist: ${required}" >&2
     exit 2
@@ -30,6 +34,10 @@ for required in "${checkpoint}" "${stats_path}" "${deploy_policy}" "${model_pyth
 done
 if [[ ! -d "${flux_checkpoint}" || ! -d "${robotwin_env}" ]]; then
   echo "Missing FLUX checkpoint or RoboTwin environment" >&2
+  exit 2
+fi
+if ! [[ ${task_timeout_seconds} =~ ^[1-9][0-9]*$ && ${task_max_attempts} =~ ^[1-9][0-9]*$ ]]; then
+  echo "ROBONANA_TASK_TIMEOUT_SECONDS and ROBONANA_TASK_MAX_ATTEMPTS must be positive integers" >&2
   exit 2
 fi
 
@@ -41,7 +49,7 @@ if [[ ${#tasks[@]} -ne 50 ]]; then
 fi
 
 mkdir -p "${run_dir}/workers" "${run_dir}/value_traces" "${run_dir}/stage2_images"
-touch "${run_dir}/.started"
+[[ -e "${run_dir}/.started" ]] || touch "${run_dir}/.started"
 "${model_python}" "${repo_root}/scripts/audit_robotwin_instructions.py" \
   --dataset-root "${dataset_root}" \
   --robotwin-root "${robotwin_path}" \
@@ -62,7 +70,10 @@ run_worker() {
       shard+=("${tasks[index]}")
     fi
   done
-  mkdir -p "${worker_dir}" "${runtime_dir}"
+  local sweep_dir="${worker_dir}/sweep"
+  local results_csv="${sweep_dir}/results.csv"
+  mkdir -p "${worker_dir}" "${runtime_dir}" "${sweep_dir}/logs" "${worker_dir}/attempts"
+  [[ -f "${results_csv}" ]] || echo "task,success,total,success_rate" > "${results_csv}"
 
   local server_args=(
     "${model_python}" "${repo_root}/scripts/inference_server_robotwin.py"
@@ -102,36 +113,96 @@ run_worker() {
     > "${worker_dir}/server.log" 2>&1 &
   server_pid=$!
 
-  env \
-    CUDA_VISIBLE_DEVICES="${gpu}" \
-    XDG_RUNTIME_DIR="${runtime_dir}" \
-    PYTHONPATH="${repo_root}/src" \
-    ROBOTWIN_PATH="${robotwin_path}" \
-    ROBOTWIN_CONDA_ENV="${robotwin_env}" \
-    CLIENT_PYTHON="${robotwin_env}/bin/python" \
-    FACT_CONDA_ENV="${fact_conda_env}" \
-    DEPLOY_POLICY_PATH="${deploy_policy}" \
-    POLICY_NAME=robonana_robotwin.adapter \
-    PORT="${port}" \
-    TEST_NUM="${test_num}" \
-    EXECUTE_ACTIONS_PER_PLAN=48 \
-    SERVER_TIMEOUT_MS=600000 \
-    SERVER_WAIT_SECONDS=600 \
-    EVAL_VIDEO_LOG=1 \
-    TRACE_ROOT="${run_dir}/value_traces" \
-    ENABLE_VALUE_VIS=1 \
-    TRACE_VALUE_ONLY=1 \
-    LOW_FREQUENCY_RGB=0 \
-    SKIP_ACTION_RENDER_SYNC=0 \
-    ROBONANA_OVERLAY_CHUNK_VALUE=1 \
-    ROBONANA_STAGE2_IMAGE_ROOT="${run_dir}/stage2_images" \
-    TASK_LIST="${shard[*]}" \
-    SWEEP_OUT="${worker_dir}/sweep" \
-    bash "${repo_root}/third_party/FACT/evaluation/robotwin/eval_all_tasks.sh" \
-      "${task_config}" "${test_num}" || client_status=$?
+  local client_env=(
+    "CUDA_VISIBLE_DEVICES=${gpu}"
+    "XDG_RUNTIME_DIR=${runtime_dir}"
+    "PYTHONPATH=${repo_root}/src"
+    "ROBOTWIN_PATH=${robotwin_path}"
+    "ROBOTWIN_CONDA_ENV=${robotwin_env}"
+    "ROBONANA_ROBOTWIN_PYTHON=${robotwin_env}/bin/python"
+    "CLIENT_PYTHON=${client_python_wrapper}"
+    "FACT_CONDA_ENV=${fact_conda_env}"
+    "DEPLOY_POLICY_PATH=${deploy_policy}"
+    "POLICY_NAME=robonana_robotwin.adapter"
+    "PORT=${port}"
+    "TEST_NUM=${test_num}"
+    "EXECUTE_ACTIONS_PER_PLAN=48"
+    "SERVER_TIMEOUT_MS=600000"
+    "SERVER_WAIT_SECONDS=600"
+    "EVAL_VIDEO_LOG=1"
+    "TRACE_ROOT=${run_dir}/value_traces"
+    "ENABLE_VALUE_VIS=1"
+    "TRACE_VALUE_ONLY=1"
+    "LOW_FREQUENCY_RGB=0"
+    "SKIP_ACTION_RENDER_SYNC=0"
+    "ROBONANA_OVERLAY_CHUNK_VALUE=1"
+    "ROBONANA_STAGE2_IMAGE_ROOT=${run_dir}/stage2_images"
+    "ROBONANA_SAPIEN_RENDER_DEVICE=cuda:${gpu}"
+    "ROBONANA_SAPIEN_DENOISER=optix"
+  )
+
+  upsert_result() {
+    local task_name=$1
+    local row=$2
+    local temporary="${results_csv}.tmp.$$"
+    awk -F, -v task_name="${task_name}" 'NR == 1 || $1 != task_name' \
+      "${results_csv}" > "${temporary}"
+    printf '%s\n' "${row}" >> "${temporary}"
+    mv "${temporary}" "${results_csv}"
+  }
+
+  run_task() {
+    local task_name=$1
+    local existing
+    existing=$(awk -F, -v task_name="${task_name}" \
+      '$1 == task_name && $4 != "ERROR" && $3 != "" {print; exit}' "${results_csv}")
+    if [[ -n "${existing}" ]]; then
+      echo "[resume-skip] ${task_name}: ${existing}"
+      return 0
+    fi
+
+    local attempt attempt_dir attempt_csv row attempt_rc
+    for ((attempt = 1; attempt <= task_max_attempts; attempt++)); do
+      attempt_dir="${worker_dir}/attempts/${task_name}/attempt_${attempt}_$(date +%Y%m%d_%H%M%S)"
+      mkdir -p "${attempt_dir}"
+      echo "[attempt ${attempt}/${task_max_attempts}] ${task_name} timeout=${task_timeout_seconds}s"
+      attempt_rc=0
+      timeout --signal=TERM --kill-after=60 "${task_timeout_seconds}" \
+        env "${client_env[@]}" \
+          TASK_LIST="${task_name}" \
+          SWEEP_OUT="${attempt_dir}" \
+          bash "${repo_root}/third_party/FACT/evaluation/robotwin/eval_all_tasks.sh" \
+            "${task_config}" "${test_num}" || attempt_rc=$?
+      attempt_csv="${attempt_dir}/results.csv"
+      row=""
+      if [[ -f "${attempt_csv}" ]]; then
+        row=$(awk -F, -v task_name="${task_name}" \
+          '$1 == task_name && $4 != "ERROR" && $3 != "" {print; exit}' "${attempt_csv}")
+      fi
+      if [[ -n "${row}" ]]; then
+        upsert_result "${task_name}" "${row}"
+        if [[ -f "${attempt_dir}/logs/${task_name}.log" ]]; then
+          cp "${attempt_dir}/logs/${task_name}.log" \
+            "${sweep_dir}/logs/${task_name}.attempt_${attempt}.log"
+        fi
+        echo "[recovered] ${row}"
+        return 0
+      fi
+      echo "[retry] ${task_name}: attempt ${attempt} rc=${attempt_rc}"
+    done
+    upsert_result "${task_name}" "${task_name},,,ERROR"
+    echo "[failed] ${task_name}: exhausted ${task_max_attempts} attempts" >&2
+    return 1
+  }
+
+  local client_status=0
+  local task_name
+  for task_name in "${shard[@]}"; do
+    run_task "${task_name}" || client_status=1
+  done
   cleanup_worker
   trap - EXIT INT TERM
-  return "${client_status:-0}"
+  return "${client_status}"
 }
 
 declare -a worker_pids=()
@@ -207,7 +278,7 @@ expected_episodes=$((50 * test_num))
 if [[ ${worker_status} -ne 0 ]] \
   || grep -q ',ERROR$' "${results_csv}" \
   || [[ ${result_tasks} -ne 50 ]] \
-  || [[ ${mp4_count} -ne ${expected_episodes} ]] \
+  || [[ ${mp4_count} -lt ${expected_episodes} ]] \
   || [[ ${value_trace_count} -ne ${expected_episodes} ]] \
   || [[ ${stage2_image_count} -lt ${expected_episodes} ]]; then
   echo "One or more eval workers/tasks failed; inspect ${run_dir}/workers" >&2
