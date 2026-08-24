@@ -70,22 +70,44 @@ def _allow(allowed: torch.Tensor, query: slice, *keys: slice) -> None:
         allowed[:, query, key] = True
 
 
+def _allow_causal(allowed: torch.Tensor, segment: slice) -> None:
+    length = segment.stop - segment.start
+    if length:
+        allowed[:, segment, segment] = torch.ones(
+            length,
+            length,
+            dtype=torch.bool,
+            device=allowed.device,
+        ).tril()
+
+
 def build_attention_bias(
     segments: SegmentMap,
     *,
     batch_size: int,
     dtype: torch.dtype,
     device: torch.device | str,
+    horizon_idx: torch.Tensor,
     context_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build additive attention bias with ``0`` allowed and ``-inf`` blocked.
 
-    A and G use full bidirectional attention within their own action chunks.
-    A is a sink; G and all future targets cannot read A.
+    Both action tracks are causal: action token ``t`` cannot read ``t + 1``.
+    A is a sink; G and all future targets cannot read A.  For each sample,
+    H/S/V/I/D can read only the first ``idx_h`` full-clean G tokens.
     """
 
     if not dtype.is_floating_point:
         raise TypeError(f"attention bias requires a floating dtype, got {dtype}")
+    if horizon_idx.ndim != 1 or tuple(horizon_idx.shape) != (batch_size,):
+        raise ValueError(f"horizon_idx must have shape {(batch_size,)}, got {tuple(horizon_idx.shape)}")
+
+    gt_action_length = segments.gt_action.stop - segments.gt_action.start
+    horizon_idx = horizon_idx.to(device=device, dtype=torch.long)
+    if torch.any(horizon_idx < 1) or torch.any(horizon_idx > gt_action_length):
+        raise ValueError(
+            f"horizon_idx must lie in [1, {gt_action_length}] so future targets have a valid G prefix"
+        )
 
     n = segments.total_length
     allowed = torch.zeros(batch_size, n, n, dtype=torch.bool, device=device)
@@ -99,15 +121,25 @@ def build_attention_bias(
     d = segments.future_dino
 
     _allow(allowed, c, c)
-    _allow(allowed, a, c, a)
-    _allow(allowed, g, c, g)
-    _allow(allowed, h, c, g, h)
-    _allow(allowed, s, c, g, h, s)
-    _allow(allowed, v, c, g, h, s, v)
-    _allow(allowed, i, c, g, h, s, v, i)
+    _allow(allowed, a, c)
+    _allow_causal(allowed, a)
+    _allow(allowed, g, c)
+    _allow_causal(allowed, g)
+
+    visible_gt = (
+        torch.arange(gt_action_length, device=device)[None, :]
+        < horizon_idx[:, None]
+    )
+    for query in (h, s, v, i, d):
+        allowed[:, query, g] = visible_gt[:, None, :]
+
+    _allow(allowed, h, c, h)
+    _allow(allowed, s, c, h, s)
+    _allow(allowed, v, c, h, s, v)
+    _allow(allowed, i, c, h, s, v, i)
     # DINO is a trailing training-only auxiliary sink. It can use the complete
     # world-model path, while no earlier token can depend on DINO features.
-    _allow(allowed, d, c, g, h, s, v, i, d)
+    _allow(allowed, d, c, h, s, v, i, d)
 
     if context_mask is not None:
         expected = (batch_size, segments.language.stop - segments.language.start)

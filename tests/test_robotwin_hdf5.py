@@ -10,7 +10,6 @@ from robonana.data.robotwin_hdf5 import (
     RoboTwinHDF5Dataset,
     RoboTwinMixtureSampler,
 )
-from robonana.data.flux_cache import episode_dino_cache_path
 
 
 def _stats(dim=14):
@@ -158,31 +157,36 @@ def test_mixture_sampler_keeps_roots_separate_and_respects_weights(tmp_path):
     assert all(index >= len(initial) for index in indices)
 
 
-def test_dino_cache_uses_same_clamped_future_index(tmp_path):
+def test_future_state_and_value_follow_the_sampled_horizon_not_chunk_end(tmp_path):
     root = tmp_path / "hf_dataset"
     task_dir = root / "task" / "aloha-agilex_clean_50"
     (task_dir / "data").mkdir(parents=True)
     (task_dir / "flux_cache" / "latents").mkdir(parents=True)
+    vectors = np.arange(5 * 14, dtype=np.float32).reshape(5, 14)
     with h5py.File(task_dir / "data" / "episode0.hdf5", "w") as handle:
-        handle.create_dataset("joint_action/vector", data=np.zeros((3, 14), dtype=np.float32))
-    torch.save(torch.zeros(3, 2, 4), task_dir / "flux_cache/latents/episode_000000.pt")
+        handle.create_dataset("joint_action/vector", data=vectors)
+    torch.save(torch.zeros(5, 2, 4), task_dir / "flux_cache/latents/episode_000000.pt")
     torch.save(torch.zeros(2, 3), task_dir / "flux_cache/language_context.pt")
-    dino = torch.arange(3 * 3 * 4).reshape(3, 3, 4).to(torch.bfloat16)
-    path = episode_dino_cache_path(task_dir, 0)
-    path.parent.mkdir(parents=True)
-    torch.save(dino, path)
     stats_path = root / "norm_stats.json"
     stats_path.write_text(json.dumps(_stats()), encoding="utf-8")
-    dataset = RoboTwinHDF5Dataset(
-        str(root),
-        stats_path=str(stats_path),
-        fixed_horizon=2,
-        dino_cache=True,
-        dino_token_count=3,
-        dino_feature_dim=4,
-        eval_horizons=(1,),
-    )
-    dataset.open()
-    sample = dataset._get_data(2)
-    assert sample["future_index"].item() == 2
-    torch.testing.assert_close(sample["future_dino"], dino[2])
+    samples = []
+    for horizon in (1, 3):
+        dataset = RoboTwinHDF5Dataset(
+            str(root),
+            stats_path=str(stats_path),
+            action_chunk=4,
+            max_horizon=4,
+            fixed_horizon=horizon,
+            eval_horizons=(1,),
+        )
+        dataset.open()
+        samples.append(dataset._get_data(0))
+
+    assert [sample["future_index"].item() for sample in samples] == [1, 3]
+    torch.testing.assert_close(samples[0]["future_state"], torch.from_numpy(vectors[1]))
+    torch.testing.assert_close(samples[1]["future_state"], torch.from_numpy(vectors[3]))
+    expected_raw_time_to_go = (0.75, 0.25)
+    expected_normalized = [((value + 1.0) / 3.0) * 2.0 - 1.0 for value in expected_raw_time_to_go]
+    torch.testing.assert_close(samples[0]["value"], torch.tensor([expected_normalized[0]]))
+    torch.testing.assert_close(samples[1]["value"], torch.tensor([expected_normalized[1]]))
+    assert not torch.equal(samples[0]["value"], samples[1]["value"])

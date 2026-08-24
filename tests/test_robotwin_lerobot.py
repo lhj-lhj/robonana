@@ -9,11 +9,13 @@ import torch
 pd = pytest.importorskip("pandas")
 pytest.importorskip("pyarrow")
 
+import robonana.data.robotwin_lerobot as robotwin_lerobot  # noqa: E402
 from robonana.data.robotwin_lerobot import (  # noqa: E402
     RoboTwinLeRobotDataset,
     discover_lerobot_episode_records,
 )
 from robonana.data.stats import compute_robotwin_lerobot_metadata  # noqa: E402
+from world_action_model.image_layouts import ROBOTWIN_VIEW_KEYS  # noqa: E402
 
 
 def _write_dataset(root):
@@ -31,6 +33,7 @@ def _write_dataset(root):
             "observation.state": list(state),
             "action": list(action),
             "frame_index": np.arange(3),
+            "timestamp": np.asarray([0.0, 0.1, 0.2]),
         }
     )
     frame.to_parquet(task / "data" / "chunk-000" / "episode_000000.parquet")
@@ -79,3 +82,51 @@ def test_lerobot_metadata_has_full_source_contract(tmp_path):
     assert index["episodes"][0]["source"].endswith("episode_000000.parquet")
     assert stats["source_format"] == "lerobot-v2"
     assert stats["action_chunk"] == 4
+
+
+def test_online_dino_decodes_only_the_horizon_selected_three_view_frame(tmp_path, monkeypatch):
+    root = tmp_path / "RoboTwin"
+    task, _, _ = _write_dataset(root)
+    for view_key in ROBOTWIN_VIEW_KEYS:
+        path = task / "videos" / "chunk-000" / view_key / "episode_000000.mp4"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    stats_path = root / "robonana_norm_stats.json"
+    stats_path.write_text(
+        json.dumps(
+            {
+                "norm_stats": {
+                    "observation.state": {"mean": [0] * 14, "std": [1] * 14},
+                    "action": {"mean": [0] * 14, "std": [1] * 14},
+                    "value": {"min": [-1], "max": [2]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    decoded_timestamps = []
+
+    def fake_decode(path, timestamps, kwargs):
+        decoded_timestamps.append((path, timestamps.copy(), kwargs.copy()))
+        height = 8 if "cam_high" in path else 4
+        return np.full((1, height, 6, 3), 17, dtype=np.uint8)
+
+    monkeypatch.setattr(robotwin_lerobot, "_decode_frames_by_timestamps_pyav", fake_decode)
+    dataset = RoboTwinLeRobotDataset(
+        str(root),
+        stats_path=str(stats_path),
+        task_globs=("Clean/*",),
+        action_chunk=4,
+        fixed_horizon=2,
+        dino_online=True,
+    )
+    dataset.open()
+    sample = dataset._get_data(0)
+    assert tuple(sample["future_dino_images"]) == ROBOTWIN_VIEW_KEYS
+    assert [tuple(image.shape) for image in sample["future_dino_images"].values()] == [
+        (3, 8, 6),
+        (3, 4, 6),
+        (3, 4, 6),
+    ]
+    assert len(decoded_timestamps) == 3
+    assert all(row[1].tolist() == [0.2] for row in decoded_timestamps)

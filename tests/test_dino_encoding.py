@@ -48,6 +48,42 @@ def test_dino_encoder_uses_patch_tokens_and_returns_lossless_fold(monkeypatch):
     assert output.shape == (2, 49, 3072)
 
 
+def test_dino_encoder_online_views_accept_uint8_and_preserve_camera_order(monkeypatch):
+    class FakeDino(nn.Module):
+        num_prefix_tokens = 1
+        embed_dim = 768
+
+        def __init__(self):
+            super().__init__()
+            self.anchor = nn.Parameter(torch.zeros(()))
+
+        def forward_features(self, images):
+            per_image = images.mean(dim=(1, 2, 3)).reshape(-1, 1, 1)
+            patches = per_image.expand(-1, 196, 768)
+            prefix = torch.zeros(images.shape[0], 1, 768, device=images.device, dtype=images.dtype)
+            return torch.cat([prefix, patches], dim=1)
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "timm",
+        SimpleNamespace(create_model=lambda *args, **kwargs: FakeDino()),
+    )
+    encoder = DinoV3FeatureEncoder(device="cpu")
+    output = encoder.encode_views(
+        {
+            "high": torch.zeros(2, 3, 32, 24, dtype=torch.uint8),
+            "left": torch.full((2, 3, 16, 12), 64, dtype=torch.uint8),
+            "right": torch.full((2, 3, 8, 6), 255, dtype=torch.uint8),
+        },
+        view_keys=("high", "left", "right"),
+        inference_batch_size=2,
+    )
+    assert output.shape == (2, 147, 3072)
+    assert not torch.is_inference(output)
+    assert not torch.equal(output[:, :49], output[:, 49:98])
+    assert not torch.equal(output[:, 49:98], output[:, 98:])
+
+
 @pytest.mark.skipif(
     os.environ.get("ROBONANA_TEST_REAL_DINO") != "1",
     reason="opt-in Hugging Face weight download and GPU smoke",
@@ -56,6 +92,15 @@ def test_real_dinov3_vitb16_checkpoint_smoke():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the real DINO smoke")
     encoder = DinoV3FeatureEncoder(device="cuda")
-    output = encoder(torch.zeros(1, 3, 224, 224, device="cuda"))
-    assert output.shape == (1, 49, 3072)
+    output = encoder.encode_views(
+        {
+            "high": torch.zeros(1, 3, 192, 256, dtype=torch.uint8),
+            "left": torch.zeros(1, 3, 96, 128, dtype=torch.uint8),
+            "right": torch.zeros(1, 3, 96, 128, dtype=torch.uint8),
+        },
+        view_keys=("high", "left", "right"),
+        inference_batch_size=3,
+    )
+    assert output.shape == (1, 147, 3072)
     assert torch.isfinite(output).all()
+    assert not output.requires_grad

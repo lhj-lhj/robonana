@@ -44,17 +44,22 @@ There is no MoT, ActionDiT, or second transformer backbone.
 ```
 
 The attention mask is applied inside every reused FLUX.2 double-stream and single-stream block.
+The noisy-action and full-clean-action tracks are independently causal. For a
+sample with horizon `idx_h`, horizon/state/value/VAE/DINO target queries can read
+only clean action tokens `G_1..G_idx_h`; they cannot read the clean action suffix
+or any noisy-action token. This per-sample mask is rebuilt from the batch's
+`idx_h` tensor on every forward.
 The DINO suffix is a one-way auxiliary sink: it reads the complete world-model
 prefix and itself, while every earlier token is blocked from reading DINO.
 Inference omits this zero-length suffix and therefore keeps the existing action
 and VAE-latent sampling path unchanged.
 
-## Offline cache path
+## Offline/online feature path
 
 ```text
 RoboTwin instruction -> official FLUX.2 Qwen3Embedder.forward -> language_context.pt
 RoboTwin HDF5 cameras -> FACT build_robotwin_three_view_tensor -> FLUX.2 AE -> frame tokens
-RoboTwin three native camera frames -> DINOv3 ViT-B/16 -> 14x14x768 patches
+RoboTwin three native camera frames at t_h -> frozen online DINOv3 ViT-B/16 -> 14x14x768 patches
   -> lossless 2x2 pixel-unshuffle per camera -> 3x(7x7x3072) frame features
 ```
 
@@ -62,5 +67,11 @@ The cache adds no alternative preprocessing geometry. It calls FACT's existing
 three-view layout helper and reproduces the official FLUX.2 Klein VAE
 patchify/BatchNorm sequence. One episode tensor is indexed as both
 `current_latent[t]` and `future_latent[min(t + idx_h, T - 1)]`.
-The optional DINO cache uses the same clamped future frame index and stores one
-BF16 `[T, 147, 3072]` tensor per episode under `flux_cache/dino/`.
+The DINO branch decodes only that same clamped future frame from each native
+camera and computes `[147, 3072]` online. The frozen encoder is not an optimizer
+parameter, is not written into RoboNana checkpoints, and is not loaded by
+inference.
+
+At `t_h = min(t + idx_h, T - 1)`, `future_state` is one state vector from exactly
+that frame. The scalar value is the normalized time-to-go at `t_h`, not a single
+label shared by every possible horizon or the final step of the action chunk.

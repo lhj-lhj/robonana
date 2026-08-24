@@ -16,11 +16,12 @@ config["project_dir"] = os.environ.get(
     str(repo_root / "experiments" / "robotwin_flux2_800m_dino_full_bs256_120k"),
 )
 config["models"]["dino_dim"] = 3072
+config["models"]["dino_encoder_model"] = "vit_base_patch16_dinov3.lvd1689m"
+config["models"]["dino_encoder_batch_size"] = int(
+    os.environ.get("ROBONANA_DINO_ENCODER_BATCH_SIZE", "96")
+)
 config["dataloaders"]["train"]["data_or_config"].update(
-    dino_cache=True,
-    dino_cache_size=1,
-    dino_token_count=147,
-    dino_feature_dim=3072,
+    dino_online=True,
 )
 config["train"]["loss_weights"]["dino_loss"] = float(
     os.environ.get("ROBONANA_DINO_LOSS_WEIGHT", "0.1")

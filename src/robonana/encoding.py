@@ -93,7 +93,7 @@ def pixel_unshuffle_dino_patches(
 
 
 class DinoV3FeatureEncoder(nn.Module):
-    """Thin frozen timm DINOv3 ViT-B/16 adapter used only by cache jobs."""
+    """Thin frozen timm DINOv3 ViT-B/16 adapter for online targets."""
 
     def __init__(
         self,
@@ -106,7 +106,7 @@ class DinoV3FeatureEncoder(nn.Module):
         try:
             import timm
         except ImportError as error:
-            raise ImportError("DINO preprocessing requires timm; install robonana[preprocess]") from error
+            raise ImportError("DINO training requires timm; install robonana[train]") from error
         self.model_name = str(model_name)
         self.model = timm.create_model(self.model_name, pretrained=True, num_classes=0)
         self.model.eval().requires_grad_(False).to(device=torch.device(device), dtype=dtype)
@@ -129,13 +129,12 @@ class DinoV3FeatureEncoder(nn.Module):
             persistent=False,
         )
 
-    @torch.inference_mode()
-    def forward(self, images: Tensor) -> Tensor:
-        """Encode RGB ``[N,3,H,W]`` images in ``[0,1]`` to ``[N,49,3072]``."""
-
+    def _prepare_images(self, images: Tensor, *, allow_uint8: bool) -> Tensor:
         if images.ndim != 4 or images.shape[1] != 3:
             raise ValueError(f"DINO images must be [N,3,H,W], got {tuple(images.shape)}")
-        if not torch.is_floating_point(images):
+        if images.dtype == torch.uint8 and allow_uint8:
+            images = images.to(dtype=torch.float32).div_(255.0)
+        elif not torch.is_floating_point(images):
             raise TypeError("DINO images must be floating point in [0, 1]")
         if images.numel() and (images.amin().item() < 0.0 or images.amax().item() > 1.0):
             raise ValueError("DINO images must be normalized to [0, 1]")
@@ -148,7 +147,10 @@ class DinoV3FeatureEncoder(nn.Module):
             align_corners=False,
             antialias=True,
         )
-        output = self.model.forward_features((images - self.image_mean) / self.image_std)
+        return (images - self.image_mean) / self.image_std
+
+    def _encode_prepared(self, images: Tensor) -> Tensor:
+        output = self.model.forward_features(images)
         if isinstance(output, Mapping):
             try:
                 patches = output["x_norm_patchtokens"]
@@ -161,3 +163,55 @@ class DinoV3FeatureEncoder(nn.Module):
         if tuple(patches.shape[1:]) != (196, 768):
             raise RuntimeError(f"Expected native DINO patches [N,196,768], got {tuple(patches.shape)}")
         return pixel_unshuffle_dino_patches(patches, factor=2)
+
+    @torch.no_grad()
+    def forward(self, images: Tensor) -> Tensor:
+        """Encode RGB ``[N,3,H,W]`` images in ``[0,1]`` to ``[N,49,3072]``."""
+
+        return self._encode_prepared(self._prepare_images(images, allow_uint8=False))
+
+    @torch.no_grad()
+    def encode_views(
+        self,
+        images_by_view: Mapping[str, Tensor],
+        *,
+        view_keys: tuple[str, ...],
+        inference_batch_size: int,
+    ) -> Tensor:
+        """Encode ordered per-camera RGB batches into ``[B,V*49,3072]``.
+
+        Each camera may have a different source resolution. Inputs may be
+        ``uint8`` in ``[0,255]`` or floating point in ``[0,1]``.
+        """
+
+        if inference_batch_size <= 0:
+            raise ValueError("DINO inference_batch_size must be positive")
+        if not view_keys:
+            raise ValueError("DINO view_keys must be non-empty")
+        missing = [key for key in view_keys if key not in images_by_view]
+        if missing:
+            raise KeyError(f"DINO input is missing camera views: {missing}")
+
+        prepared = []
+        batch_size = None
+        for key in view_keys:
+            images = images_by_view[key]
+            if batch_size is None:
+                batch_size = images.shape[0]
+            elif images.shape[0] != batch_size:
+                raise ValueError("all DINO camera views must have the same batch size")
+            prepared.append(self._prepare_images(images, allow_uint8=True))
+        all_images = torch.cat(prepared, dim=0)
+        features = torch.cat(
+            [
+                self._encode_prepared(all_images[start : start + inference_batch_size])
+                for start in range(0, all_images.shape[0], inference_batch_size)
+            ],
+            dim=0,
+        )
+        assert batch_size is not None
+        return features.reshape(len(view_keys), batch_size, 49, 3072).permute(1, 0, 2, 3).reshape(
+            batch_size,
+            len(view_keys) * 49,
+            3072,
+        )

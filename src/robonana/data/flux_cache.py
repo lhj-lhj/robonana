@@ -13,9 +13,6 @@ CACHE_SCHEMA_VERSION = 1
 LANGUAGE_CONTEXT_NAME = "language_context.pt"
 LATENT_FOLDER_NAME = "latents"
 EPISODE_LANGUAGE_FOLDER_NAME = "language"
-DINO_FOLDER_NAME = "dino"
-DINO_TOKEN_COUNT = 147
-DINO_FEATURE_DIM = 3072
 
 
 def instruction_for_episode(task_dir: str | Path, episode_index: int) -> tuple[str, Path | None]:
@@ -65,15 +62,6 @@ def episode_language_context_path(task_dir: str | Path, episode_index: int) -> P
         Path(task_dir)
         / "flux_cache"
         / EPISODE_LANGUAGE_FOLDER_NAME
-        / f"episode_{episode_index:06d}.pt"
-    )
-
-
-def episode_dino_cache_path(task_dir: str | Path, episode_index: int) -> Path:
-    return (
-        Path(task_dir)
-        / "flux_cache"
-        / DINO_FOLDER_NAME
         / f"episode_{episode_index:06d}.pt"
     )
 

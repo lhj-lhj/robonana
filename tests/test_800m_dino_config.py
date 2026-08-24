@@ -5,11 +5,13 @@ from robonana.configs.robotwin_flux2_800m_dino import config
 from robonana.models.flux2_fact import Flux2FACTModel
 
 
-def test_800m_dino_config_enables_strict_cache_contract():
+def test_800m_dino_config_enables_strict_online_encoder_contract():
     data = config["dataloaders"]["train"]["data_or_config"]
     assert config["models"]["dino_dim"] == 3072
-    assert data["dino_cache"] is True
-    assert (data["dino_token_count"], data["dino_feature_dim"]) == (147, 3072)
+    assert config["models"]["dino_encoder_model"] == "vit_base_patch16_dinov3.lvd1689m"
+    assert config["models"]["dino_encoder_batch_size"] == 96
+    assert data["dino_online"] is True
+    assert "dino_cache" not in data
     assert config["train"]["loss_weights"]["dino_loss"] == 0.1
 
 

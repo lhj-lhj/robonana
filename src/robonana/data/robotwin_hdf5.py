@@ -6,22 +6,22 @@ import json
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterator
 
 import h5py
 import numpy as np
 import torch
+from PIL import Image
 
 from fact_datasets.datasets.base_dataset import BaseDataset
 from fact_datasets.datasets.dataset import register_dataset
 from fact_train.samplers.build import SAMPLERS
+from world_action_model.image_layouts import ROBOTWIN_VIEW_KEYS
 
 from .flux_cache import (
-    DINO_FEATURE_DIM,
-    DINO_TOKEN_COUNT,
     episode_cache_path,
-    episode_dino_cache_path,
     episode_language_context_path,
     language_context_path,
     select_current_future_latents,
@@ -126,10 +126,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         latent_cache_size: int = 4,
         language_cache_size: int = 8,
         hdf5_cache_size: int = 4,
-        dino_cache: bool = False,
-        dino_cache_size: int = 1,
-        dino_token_count: int = DINO_TOKEN_COUNT,
-        dino_feature_dim: int = DINO_FEATURE_DIM,
+        dino_online: bool = False,
     ) -> None:
         super().__init__(data_path=data_path)
         self.stats_path = str(stats_path)
@@ -149,10 +146,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self.latent_cache_size = int(latent_cache_size)
         self.language_cache_size = int(language_cache_size)
         self.hdf5_cache_size = int(hdf5_cache_size)
-        self.dino_cache = bool(dino_cache)
-        self.dino_cache_size = int(dino_cache_size)
-        self.dino_token_count = int(dino_token_count)
-        self.dino_feature_dim = int(dino_feature_dim)
+        self.dino_online = bool(dino_online)
         if self.action_chunk <= 0 or self.max_horizon <= 0:
             raise ValueError("action_chunk and max_horizon must be positive")
         if self.action_dim <= 0 or self.action_dim > ALOHA_DELTA_MASK.size:
@@ -165,10 +159,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
             raise ValueError("rollout_horizon_prob must lie in [0, 1]")
         if not self.eval_horizons or any(value < 1 or value > self.max_horizon for value in self.eval_horizons):
             raise ValueError("eval_horizons must be non-empty and lie in [1, max_horizon]")
-        if min(self.latent_cache_size, self.language_cache_size, self.hdf5_cache_size, self.dino_cache_size) < 1:
+        if min(self.latent_cache_size, self.language_cache_size, self.hdf5_cache_size) < 1:
             raise ValueError("all cache sizes must be at least one")
-        if min(self.dino_token_count, self.dino_feature_dim) <= 0:
-            raise ValueError("DINO token count and feature dimension must be positive")
 
         self.records: list[EpisodeRecord] = []
         self.episode_starts = np.empty((0,), dtype=np.int64)
@@ -177,7 +169,6 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self._latent_cache: OrderedDict[Path, torch.Tensor] = OrderedDict()
         self._language_cache: OrderedDict[Path, torch.Tensor] = OrderedDict()
         self._hdf5_cache: OrderedDict[Path, Any] = OrderedDict()
-        self._dino_cache: OrderedDict[Path, torch.Tensor] = OrderedDict()
 
     @classmethod
     def load(cls, data_or_config):
@@ -208,9 +199,6 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self._hdf5_cache.clear()
         self._latent_cache.clear()
         self._language_cache.clear()
-        dino_cache = getattr(self, "_dino_cache", None)
-        if dino_cache is not None:
-            dino_cache.clear()
 
     def __len__(self) -> int:
         self._ensure_index()
@@ -265,20 +253,20 @@ class RoboTwinHDF5Dataset(BaseDataset):
             self.language_cache_size,
         )
 
-    def _dino_features(self, record: EpisodeRecord) -> torch.Tensor:
-        path = episode_dino_cache_path(record.task_dir, record.episode_index)
-        value = self._lru_get(
-            self._dino_cache,
-            path,
-            lambda p: torch.load(p, map_location="cpu", weights_only=True, mmap=True),
-            self.dino_cache_size,
-        )
-        expected = (record.length, self.dino_token_count, self.dino_feature_dim)
-        if tuple(value.shape) != expected or value.dtype != torch.bfloat16:
-            raise RuntimeError(
-                f"DINO cache must be BF16 {expected}, got {tuple(value.shape)} {value.dtype}: {path}"
-            )
-        return value
+    def _future_dino_images(self, record: EpisodeRecord, future_index: int) -> dict[str, torch.Tensor]:
+        """Decode exactly one horizon-selected RGB frame from each HDF5 camera."""
+
+        camera_names = ("head_camera", "left_camera", "right_camera")
+        handle = self._handle(record.source)
+        images = {}
+        for view_key, camera_name in zip(ROBOTWIN_VIEW_KEYS, camera_names, strict=True):
+            dataset_key = f"observation/{camera_name}/rgb"
+            if dataset_key not in handle:
+                raise KeyError(f"online DINO requires {dataset_key} in {record.source}")
+            with Image.open(BytesIO(bytes(handle[dataset_key][future_index]))) as image:
+                array = np.asarray(image.convert("RGB"), dtype=np.uint8).copy()
+            images[view_key] = torch.from_numpy(array).permute(2, 0, 1)
+        return images
 
     def _locate(self, index: int) -> tuple[EpisodeRecord, int]:
         if index < 0 or index >= len(self):
@@ -342,6 +330,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
             )
         state_raw = vector[frame_index]
         action_raw = policy_action[action_indices]
+        # The state target is one frame at t_h=min(t+idx_h, episode_end), not
+        # the last state of the fixed-length action chunk.
         future_state_raw = vector[future_index]
 
         assert self._stats is not None
@@ -359,12 +349,14 @@ class RoboTwinHDF5Dataset(BaseDataset):
         norm_future_state = (future_state_raw - state_mean) / state_std
         norm_action = (delta - action_mean) / action_std
 
-        remaining_value = 0.0 if record.length <= 1 else (record.length - future_index - 1) / (record.length - 1)
+        # Time-to-go is evaluated at the same t_h as future_state/image, so
+        # changing idx_h changes the target whenever t_h is not tail-clipped.
+        horizon_time_to_go = 0.0 if record.length <= 1 else (record.length - future_index - 1) / (record.length - 1)
         value_min = float(np.asarray(self._stats["norm_stats"]["value"]["min"]).reshape(-1)[0])
         value_max = float(np.asarray(self._stats["norm_stats"]["value"]["max"]).reshape(-1)[0])
         if not record.success:
-            remaining_value += 1.0
-        value_normalized = ((remaining_value - value_min) / max(value_max - value_min, 1e-8)) * 2.0 - 1.0
+            horizon_time_to_go += 1.0
+        value_normalized = ((horizon_time_to_go - value_min) / max(value_max - value_min, 1e-8)) * 2.0 - 1.0
         value_normalized = float(np.clip(value_normalized, -1.0, 1.0))
 
         frame_latents = self._latents(record)
@@ -392,8 +384,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
             "future_index": torch.tensor(future_index, dtype=torch.long),
             "episode_length": torch.tensor(record.length, dtype=torch.long),
         }
-        if self.dino_cache:
-            sample["future_dino"] = self._dino_features(record)[future_index]
+        if self.dino_online:
+            sample["future_dino_images"] = self._future_dino_images(record, future_index)
         return sample
 
 

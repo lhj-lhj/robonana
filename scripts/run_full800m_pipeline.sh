@@ -67,22 +67,8 @@ write_status
   --task-glob 'Clean/*' \
   --task-glob 'Randomized/*'
 
-stage="dino_cache"
-write_status
 IFS=',' read -r -a preprocess_gpu_ids <<<"${preprocess_gpus}"
 preprocess_world_size="${#preprocess_gpu_ids[@]}"
-CUDA_VISIBLE_DEVICES="${preprocess_gpus}" \
-  "${python_bin}" -m torch.distributed.run \
-  --standalone \
-  --nproc-per-node "${preprocess_world_size}" \
-  scripts/preprocess_robotwin_lerobot_flux.py \
-  --dataset-root "${dataset_root}" \
-  --checkpoint "${checkpoint}" \
-  --stage dino \
-  --dino-batch-size "${ROBONANA_DINO_CACHE_BATCH_SIZE:-64}" \
-  --minimum-free-gib "${ROBONANA_DINO_MINIMUM_FREE_GIB:-256}" \
-  --pyav-thread-count "${ROBONANA_PYAV_THREADS:-2}"
-
 stage="qwen3_and_flux_cache"
 write_status
 CUDA_VISIBLE_DEVICES="${preprocess_gpus}" \
@@ -97,11 +83,10 @@ CUDA_VISIBLE_DEVICES="${preprocess_gpus}" \
   --language-batch-size "${ROBONANA_LANGUAGE_BATCH_SIZE:-4}" \
   --pyav-thread-count "${ROBONANA_PYAV_THREADS:-2}"
 
-stage="validate_full_cache_with_dino"
+stage="validate_full_cache"
 write_status
 "${python_bin}" scripts/validate_robotwin_lerobot_flux.py \
   --dataset-root "${dataset_root}" \
-  --require-dino \
   | tee "${job_dir}/cache_validation.json"
 
 stage="waiting_for_8_gpus"

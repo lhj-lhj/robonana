@@ -253,6 +253,7 @@ class Flux2FACTModel(Flux2):
             batch_size=batch_size,
             dtype=dtype,
             device=device,
+            horizon_idx=horizon_idx,
             context_mask=context_mask,
         )
 

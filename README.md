@@ -48,19 +48,27 @@ The attention policy is prefix-structured:
 | Query | Visible keys |
 |---|---|
 | language, state, current image | language, state, current image |
-| predicted action | clean prefix + predicted action |
-| full-clean GT action | clean prefix + GT action |
-| horizon | clean prefix + GT action + horizon |
+| predicted action token `A_t` | clean prefix + `A_1..A_t` |
+| full-clean GT action token `G_t` | clean prefix + `G_1..G_t` |
+| horizon | clean prefix + `G_1..G_idx_h` + horizon |
 | future state | previous world prefix + future state |
 | value | previous world prefix + value |
 | future FLUX latent | previous world prefix + future FLUX latent |
 | future DINO | complete world prefix + future DINO |
 
-Both action tracks use full bidirectional attention inside their own 48-token
-chunk; neither uses action-time causal masking. The predicted-action track is a
-sink and is never visible to the GT/world path. DINO is a final one-way auxiliary
-sink, so earlier tokens cannot depend on it. Inference omits the DINO suffix and
-therefore uses the unchanged action and future-image samplers.
+Both action tracks are causal inside their own 48-token chunk: token `t` cannot
+read token `t+1`. For every sample, horizon, future state, value, future FLUX
+latent, and future DINO can read only the first `idx_h` full-clean action tokens.
+The mask is constructed dynamically from the batch's `idx_h` tensor. The
+predicted-action track remains a sink and is never visible to the GT/world path.
+DINO is a final one-way auxiliary sink, so earlier tokens cannot depend on it.
+Inference omits the DINO suffix and uses the unchanged action and future-image
+samplers.
+
+Let `t_h = min(t + idx_h, T - 1)`. `future_state` is exactly the single robot
+state at `t_h`; it is not the last state of the 48-action chunk. The value target
+is the normalized time-to-go evaluated at the same `t_h`, so two unclipped
+horizons have different value targets.
 
 See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact upstream reuse
 boundary.
@@ -131,24 +139,20 @@ Per episode, preprocessing writes:
 ```text
 flux_cache/language/episode_NNNNNN.pt  BF16 [512, 7680]
 flux_cache/latents/episode_NNNNNN.pt   BF16 [T, 288, 128]
-flux_cache/dino/episode_NNNNNN.pt      BF16 [T, 147, 3072]
 ```
 
 The FLUX cache uses the same three-view `384 x 192` composite geometry as the
-training input. The DINO cache processes each native camera separately with
-DINOv3 ViT-B/16, obtains `14 x 14 x 768` patch features, and applies lossless
-`2 x 2` pixel-unshuffle. This gives `3 cameras x 7 x 7 = 147` tokens with
-feature width `4 x 768 = 3072`.
+training input. DINO is deliberately not cached. The loader decodes only the
+three native RGB frames at `t_h`; a frozen DINOv3 ViT-B/16 on each training rank
+computes `14 x 14 x 768` patch features online and applies lossless `2 x 2`
+pixel-unshuffle. This gives `3 cameras x 7 x 7 = 147` tokens with feature width
+`4 x 768 = 3072`. The encoder is excluded from the optimizer and RoboNana
+checkpoints. This removes the roughly 4.99 TiB full-dataset DINO cache, at the
+cost of three random MP4 frame reads and one frozen ViT forward per sample.
 
-The released 27,500 episodes contain 6,075,103 frames. An exact BF16 DINO cache
-therefore requires about 4.99 TiB before filesystem overhead. The preprocessor
-checks free capacity before writing any DINO episode and fails loudly when the
-requested cache does not fit; `--allow-low-disk` must not be used as a substitute
-for adding storage or selecting a deliberate smaller subset.
-
-The resumable full pipeline builds metadata, DINO/Qwen3/FLUX caches, validates
-all cache shapes, waits for eight idle GPUs and valid W&B authentication, then
-starts the 120k-step job:
+The resumable full pipeline builds metadata and Qwen3/FLUX caches, validates
+their shapes, waits for eight idle GPUs and valid W&B authentication, then starts
+the 120k-step job:
 
 ```bash
 export ROBONANA_DATASET_ROOT=/data3/hongjia/robonana-migration/datasets/fact-robotwin-v2/RoboTwin
@@ -166,12 +170,12 @@ CUDA_VISIBLE_DEVICES=0 \
 .venv/bin/python scripts/preprocess_robotwin_lerobot_flux.py \
   --dataset-root "$ROBONANA_DATASET_ROOT" \
   --checkpoint "$ROBONANA_FLUX_CHECKPOINT_DIR" \
-  --stage dino --max-episodes 1 --dino-batch-size 16
+  --stage all --max-episodes 1 --batch-size 16 --language-batch-size 1
 ```
 
 ## Training
 
-After all three cache families validate, the default launcher runs the current
+After the Qwen3 and FLUX cache families validate, the default launcher runs the current
 800M+DINO config:
 
 ```bash
@@ -243,9 +247,10 @@ bash scripts/collect_prepare_robotwin_rollouts.sh \
 Failed episodes have `action_loss_mask=0` while retaining their world/value
 supervision. The separate rollout format and collection path are maintained, but
 the current 800M+DINO config does not yet mix these episodes into training: the
-rollout preprocessor must first add the exact DINO cache contract and the 800M
-config must add an explicit LeRobot+HDF5 mixture. Do not set rollout-mixture
-environment variables for the current DINO run until that integration exists.
+800M config must first add an explicit LeRobot+HDF5 mixture. The HDF5 loader can
+already decode the horizon-selected three-view RGB online for DINO. Do not set
+rollout-mixture environment variables for the current DINO run until the
+mixture is configured explicitly.
 
 ## Verification
 

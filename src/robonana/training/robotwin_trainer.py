@@ -11,9 +11,11 @@ from torch import Tensor
 
 from fact_train import Trainer
 from flux2.model import Flux2Params
+from world_action_model.image_layouts import ROBOTWIN_VIEW_KEYS
 
 # Imports register the raw HDF5 dataset and sampler with FACT.
 from robonana.data import robotwin_hdf5 as _robotwin_hdf5  # noqa: F401
+from robonana.encoding import DinoV3FeatureEncoder
 from robonana.models.pretrained import (
     configure_trainable_parameters,
     initialize_flux2_fact_model,
@@ -87,6 +89,8 @@ class RoboNanaTrainer(Trainer):
         self.vae_checkpoint_dir: str | None = None
         self.vae_dtype = torch.float32
         self.dino_dim: int | None = None
+        self.dino_encoder: DinoV3FeatureEncoder | None = None
+        self.dino_encoder_batch_size = 0
 
     def get_models(self, model_config):
         action_dim = int(_config_value(model_config, "action_dim", 14))
@@ -96,6 +100,25 @@ class RoboNanaTrainer(Trainer):
         raw_dino_dim = _config_value(model_config, "dino_dim", None)
         dino_dim = None if raw_dino_dim is None else int(raw_dino_dim)
         self.dino_dim = dino_dim
+        if dino_dim is not None:
+            if dino_dim != 3072:
+                raise ValueError(f"online DINOv3 ViT-B/16 requires dino_dim=3072, got {dino_dim}")
+            self.dino_encoder_batch_size = int(
+                _config_value(model_config, "dino_encoder_batch_size", 96)
+            )
+            if self.dino_encoder_batch_size <= 0:
+                raise ValueError("models.dino_encoder_batch_size must be positive")
+            self.dino_encoder = DinoV3FeatureEncoder(
+                str(
+                    _config_value(
+                        model_config,
+                        "dino_encoder_model",
+                        "vit_base_patch16_dinov3.lvd1689m",
+                    )
+                ),
+                device=self.device,
+                dtype=self.dtype,
+            )
         params_config = _config_value(model_config, "params", None)
         if params_config is None:
             raise ValueError("models.params must record the complete FLUX.2 architecture")
@@ -166,6 +189,12 @@ class RoboNanaTrainer(Trainer):
                 model.gradient_checkpointing,
                 self.pixel_eval_interval,
             )
+            if self.dino_encoder is not None:
+                self.logger.info(
+                    "Frozen online DINO encoder=%s; inference_batch_size=%d; checkpoint_excluded=true",
+                    self.dino_encoder.model_name,
+                    self.dino_encoder_batch_size,
+                )
         return model
 
     def _sample_timestep(self, batch_size: int) -> Tensor:
@@ -500,9 +529,17 @@ class RoboNanaTrainer(Trainer):
         future = batch_dict["future_latents"].to(device=self.device, dtype=self.dtype)
         future_dino = None
         if self.dino_dim is not None:
-            if "future_dino" not in batch_dict:
-                raise KeyError("DINO-enabled training requires a future_dino cache tensor in every sample")
-            future_dino = batch_dict["future_dino"].to(device=self.device, dtype=self.dtype)
+            if self.dino_encoder is None:
+                raise RuntimeError("DINO-enabled model is missing its frozen online encoder")
+            if "future_dino_images" not in batch_dict:
+                raise KeyError(
+                    "DINO-enabled training requires future_dino_images from the horizon-selected frame"
+                )
+            future_dino = self.dino_encoder.encode_views(
+                batch_dict["future_dino_images"],
+                view_keys=ROBOTWIN_VIEW_KEYS,
+                inference_batch_size=self.dino_encoder_batch_size,
+            ).to(dtype=self.dtype)
         state = batch_dict["state"].to(device=self.device, dtype=self.dtype).unsqueeze(1)
         action = batch_dict["action"].to(device=self.device, dtype=self.dtype)
         future_state = batch_dict["future_state"].to(device=self.device, dtype=self.dtype).unsqueeze(1)
@@ -547,7 +584,7 @@ class RoboNanaTrainer(Trainer):
         if future_dino is not None:
             if tuple(future_dino.shape[1:]) != (147, self.dino_dim):
                 raise ValueError(
-                    f"cached DINO target must be [B, 147, {self.dino_dim}], "
+                    f"online DINO target must be [B, 147, {self.dino_dim}], "
                     f"got {tuple(future_dino.shape)}"
                 )
             dino_ids = dino_position_ids(
