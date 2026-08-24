@@ -17,6 +17,9 @@ def main() -> int:
     entrypoint = Path(sys.argv[1]).resolve()
     if not entrypoint.is_file():
         raise FileNotFoundError(f"RoboTwin entrypoint does not exist: {entrypoint}")
+    # Match ``python path/to/script.py`` so sibling imports such as
+    # RoboTwin's ``from test_render import Sapien_TEST`` continue to work.
+    sys.path.insert(0, str(entrypoint.parent))
     sys.argv = [str(entrypoint), *sys.argv[2:]]
     runpy.run_path(str(entrypoint), run_name="__main__")
     return 0
