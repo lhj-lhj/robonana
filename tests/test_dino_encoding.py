@@ -1,5 +1,7 @@
+import os
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -44,3 +46,16 @@ def test_dino_encoder_uses_patch_tokens_and_returns_lossless_fold(monkeypatch):
     encoder = DinoV3FeatureEncoder(device="cpu")
     output = encoder(torch.zeros(2, 3, 32, 24))
     assert output.shape == (2, 49, 3072)
+
+
+@pytest.mark.skipif(
+    os.environ.get("ROBONANA_TEST_REAL_DINO") != "1",
+    reason="opt-in Hugging Face weight download and GPU smoke",
+)
+def test_real_dinov3_vitb16_checkpoint_smoke():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the real DINO smoke")
+    encoder = DinoV3FeatureEncoder(device="cuda")
+    output = encoder(torch.zeros(1, 3, 224, 224, device="cuda"))
+    assert output.shape == (1, 49, 3072)
+    assert torch.isfinite(output).all()
