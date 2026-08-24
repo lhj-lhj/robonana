@@ -13,6 +13,7 @@ model_python=${ROBONANA_MODEL_PYTHON:-/data3/hongjia/conda/envs/robonana/bin/pyt
 robotwin_env=${ROBOTWIN_CONDA_ENV:-/data3/hongjia/conda/envs/robotwin2}
 fact_conda_env=${FACT_CONDA_ENV:-$(dirname "$(dirname "${model_python}")")}
 gpu_csv=${ROBONANA_EVAL_GPUS:-0,1,2,3,4,5,6,7}
+sapien_denoiser=${ROBONANA_SAPIEN_DENOISER:-optix}
 port_base=${ROBONANA_PORT_BASE:-18000}
 run_dir=${ROBONANA_EVAL_RUN_DIR:-${repo_root}/outputs/robotwin_full_eval_$(date +%Y%m%d_%H%M%S)}
 deploy_policy=${ROBONANA_DEPLOY_POLICY_PATH:-${repo_root}/src/robonana/configs/robotwin_eval_train_seen.yml}
@@ -23,6 +24,11 @@ client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
 IFS=',' read -r -a gpu_ids <<< "${gpu_csv}"
 if [[ ${#gpu_ids[@]} -eq 0 ]]; then
   echo "ROBONANA_EVAL_GPUS resolved to an empty GPU list" >&2
+  exit 2
+fi
+if [[ "${sapien_denoiser}" != "oidn" && "${sapien_denoiser}" != "optix" \
+  && "${sapien_denoiser}" != "none" ]]; then
+  echo "ROBONANA_SAPIEN_DENOISER must be one of: oidn, optix, none" >&2
   exit 2
 fi
 for required in "${checkpoint}" "${stats_path}" "${deploy_policy}" "${model_python}" \
@@ -139,7 +145,7 @@ run_worker() {
     "ROBONANA_STAGE2_IMAGE_ROOT=${run_dir}/stage2_images"
     # cuda:0 is this rank's sole logical device after CUDA_VISIBLE_DEVICES isolation.
     "ROBONANA_SAPIEN_RENDER_DEVICE=cuda:0"
-    "ROBONANA_SAPIEN_DENOISER=optix"
+    "ROBONANA_SAPIEN_DENOISER=${sapien_denoiser}"
   )
 
   upsert_result() {

@@ -226,6 +226,15 @@ export ROBONANA_EVAL_GPUS=0,1,2,3,4,5,6,7
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
 
+The renderer denoiser is explicit. The default is `optix`; to match RoboTwin's
+official OIDN data-generation path and run tasks serially on one GPU, use:
+
+```bash
+export ROBONANA_EVAL_GPUS=2
+export ROBONANA_SAPIEN_DENOISER=oidn
+bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
+```
+
 The launcher first audits all 27,500 training episodes. Their metadata prompt
 must match RoboTwin's `seen` template family and exactly match the prompt stored
 beside the Qwen3 cache. Evaluation therefore uses `instruction_type: seen`, not
