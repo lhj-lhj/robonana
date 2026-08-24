@@ -82,22 +82,22 @@ def test_episode_sampler_returns_valid_indices(tmp_path):
     assert all(0 <= index < len(dataset) for index in indices)
 
 
-def test_horizon_sampler_mixes_rollout_anchor_and_uniform(monkeypatch):
+def test_horizon_sampler_is_uniform_unless_fixed(monkeypatch):
     dataset = object.__new__(RoboTwinHDF5Dataset)
     dataset._hdf5_cache = {}
     dataset._latent_cache = {}
     dataset._language_cache = {}
     dataset.fixed_horizon = 0
     dataset.max_horizon = 48
-    dataset.rollout_horizon = 24
-    dataset.rollout_horizon_prob = 0.5
 
-    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(0.25))
-    assert dataset._sample_horizon() == 24
+    def fake_randint(low, high, size):
+        assert (low, high, size) == (1, 49, ())
+        return torch.tensor(37)
 
-    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(0.75))
-    monkeypatch.setattr(torch, "randint", lambda *args, **kwargs: torch.tensor(37))
+    monkeypatch.setattr(torch, "randint", fake_randint)
     assert dataset._sample_horizon() == 37
+    dataset.fixed_horizon = 12
+    assert dataset._sample_horizon() == 12
 
 
 def _write_minimal_dataset(root, task, variant, *, success=True, policy_value=None):

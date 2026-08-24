@@ -20,9 +20,9 @@ The supported training target is `robonana.configs.robotwin_flux2_800m_dino.conf
   scalar value, future FLUX-AE image, and a training-only future DINOv3 target;
 - fixed-horizon W&B visualization at `h = 12, 24, 48` every 1,000 steps.
 
-Training samples `h=24` with probability 0.5 and otherwise samples uniformly
-from `1..48`. A target beyond an episode uses the final valid frame/action, which
-matches the retained FACT tail-clipping behavior.
+Training samples `idx_h` uniformly from `1..48`. A target beyond an episode uses
+the final valid frame/action, which matches the retained FACT tail-clipping
+behavior.
 
 ## Shared-DiT design
 

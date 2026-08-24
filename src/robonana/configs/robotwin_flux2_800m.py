@@ -50,8 +50,6 @@ config["dataloaders"]["train"].update(
         action_chunk=48,
         action_dim=14,
         max_horizon=48,
-        rollout_horizon=int(os.environ.get("ROBONANA_ROLLOUT_HORIZON", "24")),
-        rollout_horizon_prob=float(os.environ.get("ROBONANA_ROLLOUT_HORIZON_PROB", "0.5")),
         eval_horizons=(12, 24, 48),
     ),
     batch_size_per_gpu=int(os.environ.get("ROBONANA_BATCH_SIZE", "32")),

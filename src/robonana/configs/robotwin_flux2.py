@@ -31,8 +31,6 @@ MAX_STEPS = int(os.environ.get("ROBONANA_MAX_STEPS", "150000"))
 BATCH_SIZE_PER_GPU = int(os.environ.get("ROBONANA_BATCH_SIZE", "1"))
 NUM_WORKERS = int(os.environ.get("ROBONANA_NUM_WORKERS", "4"))
 TRAIN_MODE = os.environ.get("ROBONANA_TRAIN_MODE", "full")
-ROLLOUT_HORIZON = int(os.environ.get("ROBONANA_ROLLOUT_HORIZON", "24"))
-ROLLOUT_HORIZON_PROB = float(os.environ.get("ROBONANA_ROLLOUT_HORIZON_PROB", "0.5"))
 PIXEL_EVAL_INTERVAL = int(os.environ.get("ROBONANA_PIXEL_EVAL_INTERVAL", "100"))
 LOG_INTERVAL = int(os.environ.get("ROBONANA_LOG_INTERVAL", "10"))
 MEMORY_LIMIT_GIB = float(os.environ.get("ROBONANA_MEMORY_LIMIT_GIB", "0"))
@@ -75,8 +73,6 @@ def _dataset_config(root: Path, task_glob: str, *, stats_path: Path | None = Non
         action_chunk=48,
         action_dim=14,
         max_horizon=48,
-        rollout_horizon=ROLLOUT_HORIZON,
-        rollout_horizon_prob=ROLLOUT_HORIZON_PROB,
         eval_horizons=(12, 24, 48),
     )
 
