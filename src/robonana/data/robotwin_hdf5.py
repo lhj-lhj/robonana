@@ -208,7 +208,9 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self._hdf5_cache.clear()
         self._latent_cache.clear()
         self._language_cache.clear()
-        self._dino_cache.clear()
+        dino_cache = getattr(self, "_dino_cache", None)
+        if dino_cache is not None:
+            dino_cache.clear()
 
     def __len__(self) -> int:
         self._ensure_index()
