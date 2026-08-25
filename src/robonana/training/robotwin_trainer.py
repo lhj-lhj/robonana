@@ -22,7 +22,7 @@ from robonana.models.pretrained import (
     load_flux2_fact_checkpoint,
 )
 from robonana.models.position_ids import dino_position_ids, image_position_ids, text_position_ids
-from robonana.sampling import flow_euler_schedule, sample_two_stage_flow, sample_world_flow
+from robonana.sampling import flow_euler_schedule, sample_world_flow
 from robonana.training.losses import joint_flow_loss
 from robonana.training.visualization import (
     decode_flux2_tokens,
@@ -339,39 +339,8 @@ class RoboNanaTrainer(Trainer):
         self.model.eval()
         try:
             with torch.inference_mode():
-                # Stage 1 mirrors FACT inference: denoise action alone from pure
-                # Gaussian noise. The attention mask makes the action sink
-                # independent of every dummy suffix token supplied here.
-                action_noise = torch.randn_like(action[:1])
-                dummy_gt_action = torch.zeros_like(action_noise)
-                dummy_future = torch.zeros_like(future_template[:1])
-                dummy_future_state = torch.zeros_like(future_state_template[:1])
-                dummy_value = torch.zeros_like(value_template[:1])
-                clean_time = torch.zeros(1, device=self.device, dtype=torch.float32)
-
-                def predict_action(sampled_action: Tensor, sigma: Tensor) -> Tensor:
-                    action_time = sigma.expand(1)
-                    action_output = self.model(
-                        context=eval_context[:1],
-                        context_ids=context_ids[:1],
-                        current_latents=eval_current[:1],
-                        current_ids=current_ids[:1],
-                        noisy_future_latents=dummy_future,
-                        future_ids=future_ids[:1],
-                        state=eval_state[:1],
-                        noisy_pred_action=sampled_action,
-                        gt_action_cond=dummy_gt_action,
-                        horizon_idx=horizons[:1],
-                        noisy_future_state=dummy_future_state,
-                        noisy_value=dummy_value,
-                        action_timestep=action_time,
-                        wm_timestep=clean_time,
-                        context_mask=eval_context_mask[:1],
-                    )
-                    return action_output.action
-
-                # Stage 2 uses the fully denoised Stage-1 action as the clean
-                # teacher-forcing track and jointly denoises world targets.
+                # Training-time pixel monitoring evaluates only Stage 2 under
+                # the batch's full-clean GT action teacher-forcing track.
                 future_noise = torch.randn_like(future_template)
                 future_state_noise = torch.randn_like(future_state_template)
                 value_noise = torch.randn_like(value_template)
@@ -406,16 +375,7 @@ class RoboNanaTrainer(Trainer):
                     )
                     return world_output.image, world_output.future_state, world_output.value
 
-                samples = sample_two_stage_flow(
-                    action_noise=action_noise,
-                    future_noise=future_noise,
-                    future_state_noise=future_state_noise,
-                    value_noise=value_noise,
-                    schedule=schedule,
-                    predict_action=predict_action,
-                    predict_world=predict_world,
-                )
-                gt_action_samples = sample_world_flow(
+                samples = sample_world_flow(
                     clean_action=action[:1].expand(count, -1, -1),
                     future_noise=future_noise,
                     future_state_noise=future_state_noise,
@@ -470,20 +430,12 @@ class RoboNanaTrainer(Trainer):
                     grid_height=self.grid_height,
                     grid_width=self.grid_width,
                 )
-                local_gt_action_predictions = decode_flux2_tokens(
-                    vae,
-                    gt_action_samples.future,
-                    grid_height=self.grid_height,
-                    grid_width=self.grid_width,
-                )
-
                 def to_uint8(images: Tensor) -> Tensor:
                     return images.mul(255).round().to(torch.uint8)
 
                 local_current = to_uint8(local_current)
                 local_targets = to_uint8(local_targets)
                 local_predictions = to_uint8(local_predictions)
-                local_gt_action_predictions = to_uint8(local_gt_action_predictions)
         finally:
             vae.to("cpu")
             del vae
@@ -498,13 +450,6 @@ class RoboNanaTrainer(Trainer):
         gathered_predictions = self.accelerator.gather(local_predictions).reshape(
             self.accelerator.num_processes, count, *local_predictions.shape[1:]
         )
-        gathered_gt_action_predictions = self.accelerator.gather(
-            local_gt_action_predictions
-        ).reshape(
-            self.accelerator.num_processes,
-            count,
-            *local_gt_action_predictions.shape[1:],
-        )
         gathered_horizons = self.accelerator.gather(horizons.unsqueeze(0))
 
         try:
@@ -512,16 +457,12 @@ class RoboNanaTrainer(Trainer):
                 decoded_current = gathered_current.float().div(255).cpu()
                 decoded_targets = gathered_targets.float().div(255).cpu()
                 decoded_predictions = gathered_predictions.float().div(255).cpu()
-                decoded_gt_action_predictions = (
-                    gathered_gt_action_predictions.float().div(255).cpu()
-                )
                 log_pixel_eval(
                     accelerator=self.accelerator,
                     step=self.cur_step,
                     current=decoded_current,
                     targets=decoded_targets,
                     predictions=decoded_predictions,
-                    gt_action_predictions=decoded_gt_action_predictions,
                     horizons=gathered_horizons,
                     num_inference_steps=self.num_inference_steps,
                 )

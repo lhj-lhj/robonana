@@ -75,13 +75,13 @@ def test_pixel_eval_combines_one_sample_from_every_rank(monkeypatch):
         current=current,
         targets=futures,
         predictions=futures,
-        gt_action_predictions=futures,
         horizons=horizons,
         num_inference_steps=20,
     )
     payload = calls[0][0]
-    assert payload["eval/fixed_horizon_grid"].tensor.shape == (3, 8, 35)
     assert payload["eval/num_ranks"] == 2
-    assert "one different current frame per rank" in payload["eval/fixed_horizon_grid"].caption
     assert payload["eval/fixed_horizon_gt_action_grid"].tensor.shape == (3, 8, 35)
+    assert "one different current frame per rank" in payload[
+        "eval/fixed_horizon_gt_action_grid"
+    ].caption
     assert "GT-action conditioning" in payload["eval/fixed_horizon_gt_action_grid"].caption

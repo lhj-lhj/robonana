@@ -48,7 +48,6 @@ def log_pixel_eval(
     current: Tensor,
     targets: Tensor,
     predictions: Tensor,
-    gt_action_predictions: Tensor | None = None,
     horizons: Tensor,
     num_inference_steps: int,
 ) -> None:
@@ -64,18 +63,10 @@ def log_pixel_eval(
     current_images = current.detach().cpu()
     target_images = targets.detach().cpu()
     prediction_images = predictions.detach().cpu()
-    gt_action_prediction_images = (
-        None if gt_action_predictions is None else gt_action_predictions.detach().cpu()
-    )
     horizon_tensor = horizons.detach().cpu()
 
     if target_images.ndim != 5 or prediction_images.shape != target_images.shape:
         raise ValueError("distributed targets and predictions must have shape [R, H, C, Y, X]")
-    if (
-        gt_action_prediction_images is not None
-        and gt_action_prediction_images.shape != target_images.shape
-    ):
-        raise ValueError("GT-action predictions must match distributed target shape")
     rank_count, horizon_count = target_images.shape[:2]
     if current_images.shape[0] != rank_count:
         raise ValueError("current, targets, and predictions must have the same rank dimension")
@@ -91,34 +82,24 @@ def log_pixel_eval(
             rows.append(torch.cat(cells, dim=-1))
         return torch.cat(rows, dim=-2)
 
-    predicted_action_panel = build_panel(prediction_images)
-    predicted_action_caption = (
-        "rows: one different current frame per rank; predicted-action conditioning; columns: current | "
+    gt_action_panel = build_panel(prediction_images)
+    gt_action_caption = (
+        "rows: one different current frame per rank; GT-action conditioning; columns: current | "
         + " | ".join(f"GT h={value} | pred h={value}" for value in horizon_rows[0])
     )
 
     shared_horizons = horizon_rows[0]
     tracker = accelerator.get_tracker("wandb", unwrap=True)
     payload = {
-        "eval/fixed_horizon_grid": wandb.Image(
-            predicted_action_panel,
-            caption=predicted_action_caption,
+        "eval/fixed_horizon_gt_action_grid": wandb.Image(
+            gt_action_panel,
+            caption=gt_action_caption,
         ),
         "eval/fixed_horizons": ",".join(str(value) for value in shared_horizons),
         "eval/num_ranks": int(current_images.shape[0]),
-        "eval/sampling": "two_stage_flow_euler_from_pure_noise",
-        "eval/gt_action_sampling": "world_flow_euler_from_pure_noise_with_gt_action",
+        "eval/sampling": "stage2_world_flow_from_pure_noise_with_gt_action",
         "eval/num_inference_steps": int(num_inference_steps),
     }
-    if gt_action_prediction_images is not None:
-        gt_action_caption = (
-            "rows: one different current frame per rank; GT-action conditioning; columns: current | "
-            + " | ".join(f"GT h={value} | pred h={value}" for value in horizon_rows[0])
-        )
-        payload["eval/fixed_horizon_gt_action_grid"] = wandb.Image(
-            build_panel(gt_action_prediction_images),
-            caption=gt_action_caption,
-        )
     tracker.log(
         payload,
         step=int(step),

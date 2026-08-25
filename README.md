@@ -35,12 +35,13 @@ The exact token order is:
 
 All segments pass through the same FLUX.2 double-stream and single-stream
 blocks. Image, action, future-state, value, and DINO predictions use separate
-output projections; they are not separate transformer backbones. The DINO branch
-adds only:
+output projections; they are not separate transformer backbones. The DINO
+branch adds only two projections whose middle dimension follows the selected
+shared DiT hidden size:
 
 ```text
-dino_in  = Linear(3072, 1536)
-dino_out = Linear(1536, 3072)
+800M: dino_in/out = Linear(3072, 1536) / Linear(1536, 3072)
+4B:   dino_in/out = Linear(3072, 3072) / Linear(3072, 3072)
 ```
 
 The attention policy is prefix-structured:
@@ -189,11 +190,26 @@ export ROBONANA_CHECKPOINT_INTERVAL=1000
 bash scripts/run_robotwin_train.sh
 ```
 
+The FLUX.2 Klein 4B+DINO config keeps the same dataset, token order, attention
+mask, output heads, and loss contract. It uses pretrained Klein 4B, ZeRO-2, no
+gradient checkpointing, local micro-batch 16, two accumulation steps
+(`16 x 8 x 2 = 256` global batch), and GT-action-only Stage-2 pixel eval every
+2,000 optimizer steps:
+
+```bash
+export ROBONANA_GPU_IDS=0,1,2,3,4,5,6,7
+export ROBONANA_BATCH_SIZE=16
+export ROBONANA_MAX_STEPS=120000
+export ROBONANA_PIXEL_EVAL_INTERVAL=2000
+bash scripts/run_robotwin_train.sh \
+  --config robonana.configs.robotwin_flux2_4b_dino.config
+```
+
 The joint flow loss weights are image `1.0`, action `10.0`, future state `0.4`,
-value `0.4`, and DINO `0.1`. Periodic visualization samples action from pure
-noise, then samples future image/state/value with 20-step Flow-Euler. W&B gets
-both the predicted-action result and a GT-action-conditioned reconstruction for
-the same current frame and noise seed.
+value `0.4`, and DINO `0.1`. Periodic training visualization performs only
+Stage 2: it conditions on the batch's full-clean GT action and samples future
+image/state/value from pure noise with 20-step Flow-Euler. It does not run
+Stage-1 action diffusion. The standalone inference modes below are unchanged.
 
 Checkpoint loading is strict. Evaluation must find a complete FACT `config.json`
 next to the experiment checkpoint or receive `--model-config`; model size is
