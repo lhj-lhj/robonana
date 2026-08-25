@@ -15,6 +15,8 @@ def test_4b_dino_training_contract():
     assert config["models"]["dino_dim"] == 3072
     assert config["models"]["params"]["hidden_size"] == 3072
     assert config["dataloaders"]["train"]["data_or_config"]["dino_online"] is True
+    assert config["optimizers"]["lr"] == 2e-5
+    assert config["optimizers"]["robot_lr"] == 1e-4
 
 
 def test_4b_dino_adapters_match_backbone_hidden_size():

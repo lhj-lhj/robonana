@@ -42,6 +42,10 @@ config["models"].update(
         os.environ.get("ROBONANA_DINO_ENCODER_BATCH_SIZE", "48")
     ),
 )
+config["optimizers"].update(
+    lr=float(os.environ.get("ROBONANA_BACKBONE_LR", "2e-5")),
+    robot_lr=float(os.environ.get("ROBONANA_ROBOT_LR", "1e-4")),
+)
 config["train"].update(
     gradient_accumulation_steps=2,
     pixel_eval_interval=int(os.environ.get("ROBONANA_PIXEL_EVAL_INTERVAL", "2000")),

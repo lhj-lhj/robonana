@@ -194,13 +194,17 @@ The FLUX.2 Klein 4B+DINO config keeps the same dataset, token order, attention
 mask, output heads, and loss contract. It uses pretrained Klein 4B, ZeRO-2, no
 gradient checkpointing, local micro-batch 16, two accumulation steps
 (`16 x 8 x 2 = 256` global batch), and GT-action-only Stage-2 pixel eval every
-2,000 optimizer steps:
+2,000 optimizer steps. AdamW uses `2e-5` for the pretrained FLUX backbone and
+`1e-4` for RoboNana heads, token embeddings, and DINO adapters; both groups
+share the same warmup/cosine multiplier:
 
 ```bash
 export ROBONANA_GPU_IDS=0,1,2,3,4,5,6,7
 export ROBONANA_BATCH_SIZE=16
 export ROBONANA_MAX_STEPS=120000
 export ROBONANA_PIXEL_EVAL_INTERVAL=2000
+export ROBONANA_BACKBONE_LR=2e-5
+export ROBONANA_ROBOT_LR=1e-4
 bash scripts/run_robotwin_train.sh \
   --config robonana.configs.robotwin_flux2_4b_dino.config
 ```
