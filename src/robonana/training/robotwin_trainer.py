@@ -22,11 +22,11 @@ from robonana.models.pretrained import (
     configure_trainable_parameters,
     initialize_flux2_fact_model,
     load_flux2_fact_checkpoint,
-    robot_parameter_names,
 )
 from robonana.models.position_ids import dino_position_ids, image_position_ids, text_position_ids
 from robonana.sampling import flow_euler_schedule, sample_world_flow
 from robonana.training.losses import joint_flow_loss
+from robonana.training.optimizer import build_optimizer_param_groups
 from robonana.training.visualization import (
     decode_flux2_tokens,
     log_pixel_eval,
@@ -61,36 +61,6 @@ def _config_value(config: Any, name: str, default: Any = None) -> Any:
             return config.get(name, default)
         getter = getattr(config, "get", None)
         return getter(name, default) if getter is not None else default
-
-
-def build_optimizer_param_groups(
-    model: torch.nn.Module,
-    *,
-    base_lr: float,
-    robot_lr: float,
-) -> list[dict[str, Any]]:
-    """Split trainable tensors into pretrained FLUX and new RoboNana modules."""
-
-    if base_lr <= 0 or robot_lr <= 0:
-        raise ValueError("base_lr and robot_lr must both be positive")
-    robot_names = set(robot_parameter_names(model))
-    buckets: dict[str, list[torch.nn.Parameter]] = {
-        "flux_backbone": [],
-        "robot_modules": [],
-    }
-    seen: set[int] = set()
-    for name, parameter in model.named_parameters():
-        if not parameter.requires_grad or id(parameter) in seen:
-            continue
-        seen.add(id(parameter))
-        group_name = "robot_modules" if name in robot_names else "flux_backbone"
-        buckets[group_name].append(parameter)
-
-    param_groups = [
-        {"name": "flux_backbone", "params": buckets["flux_backbone"], "lr": float(base_lr)},
-        {"name": "robot_modules", "params": buckets["robot_modules"], "lr": float(robot_lr)},
-    ]
-    return [group for group in param_groups if group["params"]]
 
 
 class RoboNanaTrainer(Trainer):

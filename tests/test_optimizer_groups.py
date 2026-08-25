@@ -3,7 +3,7 @@ from flux2.model import Flux2Params
 
 from robonana.models.flux2_fact import Flux2FACTModel
 from robonana.models.pretrained import robot_parameter_names
-from robonana.training.robotwin_trainer import build_optimizer_param_groups
+from robonana.training.optimizer import build_optimizer_param_groups
 
 
 def _tiny_params() -> Flux2Params:
