@@ -222,6 +222,51 @@ default to four isolated blocks per forward because packing 48 full FLUX image
 grids into one dense-attention sequence is impractical; configure this with
 `--stage2-image-horizon-batch-size`.
 
+Run from the repository root. Define the shared arguments once, then launch
+exactly one of the four commands:
+
+```bash
+export ROBONANA_TRAINED_CHECKPOINT=$PWD/experiments/<run>/models/<checkpoint>/transformer/diffusion_pytorch_model.bin
+export ROBONANA_FLUX_CHECKPOINT=/path/to/FLUX.2-klein-4B
+export ROBONANA_STATS_PATH=/path/to/robonana_norm_stats.json
+
+ROBONANA_SERVER=(
+  python scripts/inference_server_robotwin.py
+  --checkpoint "$ROBONANA_TRAINED_CHECKPOINT"
+  --flux-checkpoint-dir "$ROBONANA_FLUX_CHECKPOINT"
+  --stats-path "$ROBONANA_STATS_PATH"
+  --model-device cuda:0
+  --vae-device cuda:0
+  --text-encoder-device cpu
+  --dtype bf16
+  --action-chunk 48
+  --num-inference-steps 20
+)
+
+# 1. Stage-1 only: fastest action inference.
+"${ROBONANA_SERVER[@]}" --inference-mode action --port 8094
+
+# 2. Stage-1 plus state/value for every h=1..48; no future VAE/DINO tokens.
+"${ROBONANA_SERVER[@]}" --inference-mode action_values --port 8094
+
+# 3. Supplied action chunk plus all state/value/VAE/pixel horizons.
+"${ROBONANA_SERVER[@]}" \
+  --inference-mode world_all \
+  --stage2-image-horizon-batch-size 4 \
+  --vae-decode-batch-size 4 \
+  --port 8094
+
+# 4. Supplied action chunk and h plus one state/value/VAE/pixel prediction.
+"${ROBONANA_SERVER[@]}" --inference-mode world_horizon --port 8094
+```
+
+Requests to `world_all` must include an absolute robot-space
+`action_chunk` tensor with shape `[48, action_dim]`. `world_horizon` requires
+the same `action_chunk` plus one integer `horizon` in `[1, 48]`. Both modes
+still require the normal observation state, three RGB views, and instruction.
+If `model_config.json`/`config.json` is not discoverable above the checkpoint,
+add `--model-config /path/to/model_config.json` to `ROBONANA_SERVER`.
+
 ## Full RoboTwin evaluation
 
 The eight-way launcher audits train/eval instructions, evaluates all 50 tasks,
