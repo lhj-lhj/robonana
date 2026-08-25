@@ -4,9 +4,11 @@ import torch
 from flux2.model import Flux2Params
 
 from robonana.inference.robotwin_policy import (
+    InferenceMode,
     observation_component_digests,
     observation_digest,
     postprocess_action,
+    preprocess_action_chunk,
     seeded_randn_like,
 )
 from robonana.models.flux2_fact import Flux2FACTModel
@@ -83,6 +85,38 @@ def test_online_action_postprocess_matches_training_delta_convention():
     )
 
 
+def test_external_action_preprocess_inverts_postprocess_without_clipping():
+    zeros = torch.zeros(2)
+    ones = torch.ones(2)
+    normalization = NormalizationTensors(
+        state_mean=zeros,
+        state_std=ones,
+        state_min=torch.full((2,), -2.0),
+        state_max=torch.full((2,), 2.0),
+        action_mean=zeros,
+        action_std=ones,
+        action_min=torch.full((2,), -1.0),
+        action_max=torch.full((2,), 1.0),
+        value_min=torch.tensor([-1.0]),
+        value_max=torch.tensor([2.0]),
+    )
+    state = torch.tensor([0.5, 0.5])
+    normalized = torch.tensor([[0.25, 0.25], [-0.5, 0.1]])
+    absolute = postprocess_action(
+        normalized,
+        state,
+        normalization,
+        delta_mask=torch.tensor([True, False]),
+    )
+    restored = preprocess_action_chunk(
+        absolute,
+        state,
+        normalization,
+        delta_mask=torch.tensor([True, False]),
+    )
+    torch.testing.assert_close(restored, normalized)
+
+
 def test_seeded_action_noise_is_reproducible_without_mutating_global_rng():
     reference = torch.empty(3, 4)
     torch.manual_seed(9)
@@ -128,6 +162,7 @@ def test_online_policy_returns_denormalized_chunk_value_contract(monkeypatch):
     policy.dtype = torch.float32
     policy.state_dim = 2
     policy.horizon = 24
+    policy.inference_mode = InferenceMode.ACTION
     policy.return_chunk_value = True
     policy.return_stage2_image = True
     policy.delta_mask = torch.tensor([False, False])
@@ -207,6 +242,9 @@ def test_online_value_sampler_runs_full_world_path_reproducibly():
     policy.grid_height = 1
     policy.grid_width = 2
     policy.state_dim = 3
+    policy.action_dim = 4
+    policy.max_horizon = 4
+    policy.stage2_image_horizon_batch_size = 2
     policy.model = Flux2FACTModel(
         params,
         action_dim=4,
@@ -232,3 +270,181 @@ def test_online_value_sampler_runs_full_world_path_reproducibly():
     assert torch.isfinite(first.value).all()
     torch.testing.assert_close(first.future, second.future)
     torch.testing.assert_close(first.value, second.value)
+
+
+def test_packed_stage2_samples_all_values_without_future_image_tokens():
+    from robonana.inference.robotwin_policy import RoboNanaRobotWinPolicy
+
+    params = Flux2Params(
+        in_channels=8,
+        context_in_dim=16,
+        hidden_size=32,
+        num_heads=4,
+        depth=1,
+        depth_single_blocks=1,
+        axes_dim=[2, 2, 2, 2],
+        mlp_ratio=2.0,
+        use_guidance_embed=False,
+    )
+    policy = object.__new__(RoboNanaRobotWinPolicy)
+    policy.model_device = torch.device("cpu")
+    policy.dtype = torch.float32
+    policy.grid_height = 1
+    policy.grid_width = 2
+    policy.state_dim = 3
+    policy.action_dim = 4
+    policy.max_horizon = 4
+    policy.model = Flux2FACTModel(
+        params,
+        action_dim=4,
+        state_dim=3,
+        value_dim=1,
+        max_horizon=4,
+    ).eval()
+    policy.schedule = flow_euler_schedule(1, flow_shift=1.0, device="cpu")
+    result = policy._sample_stage2(
+        context=torch.randn(1, 2, 16),
+        current=torch.randn(1, 2, 8),
+        state=torch.randn(1, 1, 3),
+        clean_action=torch.randn(1, 4, 4),
+        horizons=torch.tensor([1, 2, 3, 4]),
+        include_image=False,
+        sampling_seed=31,
+    )
+
+    assert result.future.shape == (1, 4, 0, 8)
+    assert result.future_state.shape == (1, 4, 3)
+    assert result.value.shape == (1, 4, 1)
+    assert torch.isfinite(result.future_state).all()
+    assert torch.isfinite(result.value).all()
+
+
+def test_image_stage2_chunks_horizons_and_restores_order():
+    from robonana.inference.robotwin_policy import RoboNanaRobotWinPolicy
+
+    policy = object.__new__(RoboNanaRobotWinPolicy)
+    policy.model_device = torch.device("cpu")
+    policy.stage2_image_horizon_batch_size = 2
+    calls = []
+
+    def sample_chunk(**kwargs):
+        horizons = kwargs["horizons"]
+        calls.append(horizons.tolist())
+        count = horizons.numel()
+        return SimpleNamespace(
+            future=horizons.float().reshape(1, count, 1, 1),
+            future_state=horizons.float().reshape(1, count, 1),
+            value=horizons.float().reshape(1, count, 1),
+        )
+
+    policy._sample_stage2_chunk = sample_chunk
+    result = policy._sample_stage2(
+        context=torch.empty(1, 0, 1),
+        current=torch.empty(1, 0, 1),
+        state=torch.empty(1, 0, 1),
+        clean_action=torch.empty(1, 0, 1),
+        horizons=torch.arange(1, 6),
+        include_image=True,
+        sampling_seed=7,
+    )
+
+    assert calls == [[1, 2], [3, 4], [5]]
+    assert result.value.reshape(-1).tolist() == [1, 2, 3, 4, 5]
+
+
+def _mock_policy(mode: InferenceMode):
+    from robonana.inference.robotwin_policy import RoboNanaRobotWinPolicy
+
+    policy = object.__new__(RoboNanaRobotWinPolicy)
+    policy.model_device = torch.device("cpu")
+    policy.vae_device = torch.device("cpu")
+    policy.dtype = torch.float32
+    policy.state_dim = 2
+    policy.action_dim = 2
+    policy.action_chunk = 3
+    policy.max_horizon = 3
+    policy.horizon = 2
+    policy.inference_mode = mode
+    policy.return_chunk_value = False
+    policy.return_stage2_image = False
+    policy.delta_mask = torch.tensor([False, False])
+    policy.model = SimpleNamespace(value_dim=1)
+    zeros = torch.zeros(2)
+    ones = torch.ones(2)
+    policy.normalization = NormalizationTensors(
+        state_mean=zeros,
+        state_std=ones,
+        state_min=torch.full((2,), -2.0),
+        state_max=torch.full((2,), 2.0),
+        action_mean=zeros,
+        action_std=ones,
+        action_min=torch.full((2,), -1.0),
+        action_max=torch.full((2,), 1.0),
+        value_min=torch.tensor([-1.0]),
+        value_max=torch.tensor([2.0]),
+    )
+    policy._sync = lambda device: None
+    policy._current_image_tokens = lambda observation: torch.zeros(1, 2, 8)
+    policy._context = lambda instruction: torch.zeros(1, 2, 4)
+    return policy
+
+
+def test_action_values_mode_runs_stage1_then_all_horizons(monkeypatch):
+    policy = _mock_policy(InferenceMode.ACTION_VALUES)
+    policy._sample_action = lambda **kwargs: torch.zeros(1, 3, 2)
+    captured = {}
+
+    def sample_stage2(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            future=torch.empty(1, 3, 0, 8),
+            future_state=torch.zeros(1, 3, 2),
+            value=torch.tensor([[[-1.0], [0.0], [1.0]]]),
+        )
+
+    policy._sample_stage2 = sample_stage2
+    response = policy.inference(
+        {"observation.state": torch.zeros(2), "instruction": "move the object"}
+    )
+
+    assert captured["include_image"] is False
+    assert captured["horizons"].tolist() == [1, 2, 3]
+    assert response["horizons"].tolist() == [1, 2, 3]
+    torch.testing.assert_close(response["values"], torch.tensor([-1.0, 0.5, 2.0]))
+    assert response["chunk_value"] == 0.5
+    assert "future_latents" not in response
+    assert "images" not in response
+
+
+def test_world_horizon_mode_requires_and_uses_external_action_and_horizon():
+    policy = _mock_policy(InferenceMode.WORLD_HORIZON)
+    policy._sample_action = lambda **kwargs: (_ for _ in ()).throw(
+        AssertionError("Stage-1 must not run in world_horizon mode")
+    )
+    captured = {}
+
+    def sample_stage2(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            future=torch.zeros(1, 1, 2, 8),
+            future_state=torch.zeros(1, 1, 2),
+            value=torch.zeros(1, 1, 1),
+        )
+
+    policy._sample_stage2 = sample_stage2
+    policy._decode_stage2_images = lambda future: torch.zeros(1, 3, 1, 4, 8)
+    response = policy.inference(
+        {
+            "observation.state": torch.zeros(2),
+            "instruction": "move the object",
+            "action_chunk": torch.full((3, 2), 0.25),
+            "horizon": 3,
+        }
+    )
+
+    assert captured["include_image"] is True
+    assert captured["horizons"].tolist() == [3]
+    torch.testing.assert_close(captured["clean_action"], torch.full((1, 3, 2), 0.25))
+    assert response["horizons"].tolist() == [3]
+    assert response["future_latents"].shape == (1, 2, 8)
+    assert response["images"].shape == (1, 3, 1, 4, 8)

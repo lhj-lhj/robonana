@@ -161,3 +161,73 @@ def test_dino_head_is_optional_and_cannot_change_earlier_outputs():
     assert not torch.equal(first.dino, second.dino)
     for name in ("image", "action", "future_state", "value"):
         torch.testing.assert_close(getattr(first, name), getattr(second, name))
+
+
+def test_packed_horizon_forward_matches_isolated_single_horizon_queries():
+    torch.manual_seed(11)
+    model = _tiny_model().eval()
+    batch, horizon_count, image_tokens = 1, 2, 1
+    context = torch.randn(batch, 2, 16)
+    current = torch.randn(batch, 2, 8)
+    state = torch.randn(batch, 1, 6)
+    action = torch.randn(batch, 4, 6)
+    horizons = torch.tensor([[1, 3]])
+    future_state = torch.randn(batch, horizon_count, 6)
+    value = torch.randn(batch, horizon_count, 1)
+    future = torch.randn(batch, horizon_count, image_tokens, 8)
+    context_ids = torch.zeros(batch, 2, 4)
+    current_ids = torch.zeros(batch, 2, 4)
+    future_ids = torch.zeros(batch, horizon_count, image_tokens, 4)
+    common = dict(
+        context=context,
+        context_ids=context_ids,
+        current_latents=current,
+        current_ids=current_ids,
+        state=state,
+        noisy_pred_action=torch.empty(batch, 0, 6),
+        gt_action_cond=action,
+        action_timestep=torch.zeros(batch),
+        wm_timestep=torch.full((batch,), 0.6),
+    )
+    with torch.inference_mode():
+        packed = model(
+            noisy_future_latents=future,
+            future_ids=future_ids,
+            horizon_idx=horizons,
+            noisy_future_state=future_state,
+            noisy_value=value,
+            **common,
+        )
+        singles = [
+            model(
+                noisy_future_latents=future[:, index],
+                future_ids=future_ids[:, index],
+                horizon_idx=horizons[:, index],
+                noisy_future_state=future_state[:, index, None],
+                noisy_value=value[:, index, None],
+                **common,
+            )
+            for index in range(horizon_count)
+        ]
+
+    assert packed.image.shape == (batch, horizon_count, image_tokens, 8)
+    assert packed.future_state.shape == (batch, horizon_count, 6)
+    assert packed.value.shape == (batch, horizon_count, 1)
+    torch.testing.assert_close(
+        packed.image,
+        torch.stack([output.image for output in singles], dim=1),
+        atol=2e-5,
+        rtol=2e-5,
+    )
+    torch.testing.assert_close(
+        packed.future_state,
+        torch.cat([output.future_state for output in singles], dim=1),
+        atol=2e-5,
+        rtol=2e-5,
+    )
+    torch.testing.assert_close(
+        packed.value,
+        torch.cat([output.value for output in singles], dim=1),
+        atol=2e-5,
+        rtol=2e-5,
+    )

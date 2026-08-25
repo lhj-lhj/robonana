@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -32,11 +33,31 @@ from world_action_model.pipeline.utils import (
     NormalizationTensors,
     add_state_to_action,
     denormalize_action,
+    denormalize_state,
     denormalize_value,
     extract_normalization_tensors,
     load_stats,
     normalize_state,
 )
+
+
+class InferenceMode(str, Enum):
+    """The four supported RoboNana inference graphs."""
+
+    ACTION = "action"
+    ACTION_VALUES = "action_values"
+    WORLD_ALL = "world_all"
+    WORLD_HORIZON = "world_horizon"
+
+
+def _parse_inference_mode(value: str | InferenceMode) -> InferenceMode:
+    if isinstance(value, InferenceMode):
+        return value
+    try:
+        return InferenceMode(str(value))
+    except ValueError as error:
+        choices = ", ".join(mode.value for mode in InferenceMode)
+        raise ValueError(f"inference_mode must be one of: {choices}") from error
 
 
 def _clamp_like(value: Tensor, lower: Tensor, upper: Tensor) -> Tensor:
@@ -112,6 +133,32 @@ def postprocess_action(
     return _clamp_like(action, normalization.state_min, normalization.state_max)
 
 
+def preprocess_action_chunk(
+    absolute_action: Tensor,
+    raw_state: Tensor,
+    normalization: NormalizationTensors,
+    *,
+    delta_mask: Tensor,
+) -> Tensor:
+    """Apply the exact inverse of ``postprocess_action`` for Stage-2 inputs."""
+
+    if absolute_action.ndim != 2:
+        raise ValueError("action_chunk must have shape [T, action_dim]")
+    action_dim = normalization.action_mean.shape[-1]
+    if absolute_action.shape[-1] != action_dim:
+        raise ValueError(f"action_chunk must have action_dim={action_dim}")
+    if raw_state.numel() < action_dim:
+        raise ValueError(f"observation state must contain at least {action_dim} values")
+    if not torch.isfinite(absolute_action).all():
+        raise ValueError("action_chunk contains non-finite values")
+    delta_mask = delta_mask.to(device=absolute_action.device, dtype=torch.bool)
+    delta = absolute_action.float().clone()
+    delta[:, delta_mask] -= raw_state.float()[None, :action_dim][:, delta_mask]
+    return (
+        delta - normalization.action_mean.to(device=delta.device)
+    ) / normalization.action_std.to(device=delta.device).clamp_min(1e-8)
+
+
 class RoboNanaRobotWinPolicy:
     """Encode a live RoboTwin observation and sample one absolute action chunk."""
 
@@ -138,6 +185,9 @@ class RoboNanaRobotWinPolicy:
         main_view_width: int = 256,
         main_view_height: int = 192,
         model_params: Flux2Params | None = None,
+        inference_mode: str | InferenceMode = InferenceMode.ACTION,
+        stage2_image_horizon_batch_size: int = 4,
+        vae_decode_batch_size: int = 4,
         return_chunk_value: bool = False,
         return_stage2_image: bool = False,
     ) -> None:
@@ -153,12 +203,30 @@ class RoboNanaRobotWinPolicy:
         self.grid_height = int(grid_height)
         self.grid_width = int(grid_width)
         self.main_view_size = (int(main_view_width), int(main_view_height))
+        self.inference_mode = _parse_inference_mode(inference_mode)
+        self.stage2_image_horizon_batch_size = int(stage2_image_horizon_batch_size)
+        self.vae_decode_batch_size = int(vae_decode_batch_size)
         self.return_chunk_value = bool(return_chunk_value)
         self.return_stage2_image = bool(return_stage2_image)
         if self.return_stage2_image and not self.return_chunk_value:
             raise ValueError("return_stage2_image requires return_chunk_value Stage-2 sampling")
-        if self.action_chunk <= 0 or self.num_inference_steps <= 0:
-            raise ValueError("action_chunk and num_inference_steps must be positive")
+        if self.inference_mode is not InferenceMode.ACTION and (
+            self.return_chunk_value or self.return_stage2_image
+        ):
+            raise ValueError(
+                "legacy return_chunk_value/return_stage2_image flags cannot be combined "
+                "with an explicit non-action inference_mode"
+            )
+        if (
+            self.action_chunk <= 0
+            or self.num_inference_steps <= 0
+            or self.stage2_image_horizon_batch_size <= 0
+            or self.vae_decode_batch_size <= 0
+        ):
+            raise ValueError(
+                "action_chunk, num_inference_steps, stage2_image_horizon_batch_size, "
+                "and vae_decode_batch_size must be positive"
+            )
 
         self.model, self.load_report = load_flux2_fact_trained_checkpoint(
             checkpoint,
@@ -175,6 +243,8 @@ class RoboNanaRobotWinPolicy:
         self.max_horizon = int(self.model.max_horizon)
         if not 1 <= self.horizon <= self.max_horizon:
             raise ValueError("horizon must lie in [1, max_horizon]")
+        if self.action_chunk > self.max_horizon:
+            raise ValueError("action_chunk cannot exceed the checkpoint's max_horizon")
         self.model.eval().requires_grad_(False)
         self.vae = AutoencoderKLFlux2.from_pretrained(
             self.flux_checkpoint_dir,
@@ -312,51 +382,82 @@ class RoboNanaRobotWinPolicy:
         )
 
     @torch.inference_mode()
-    def _sample_world(
+    def _sample_stage2_chunk(
         self,
         *,
         context: Tensor,
         current: Tensor,
         state: Tensor,
         clean_action: Tensor,
+        horizons: Tensor,
+        include_image: bool,
         sampling_seed: int | None = None,
     ) -> WorldFlowSample:
-        """Sample image, state, and value through the complete Stage-2 world path."""
+        """Jointly sample isolated horizon blocks under one clean action track."""
 
         batch_size = 1
-        horizon = torch.tensor([self.horizon], device=self.model_device, dtype=torch.long)
+        horizons = torch.as_tensor(
+            horizons,
+            device=self.model_device,
+            dtype=torch.long,
+        ).reshape(-1)
+        if horizons.numel() == 0:
+            raise ValueError("Stage-2 requires at least one horizon")
+        if torch.any(horizons < 1) or torch.any(horizons > self.max_horizon):
+            raise ValueError(f"Stage-2 horizons must lie in [1, {self.max_horizon}]")
+        horizon_count = int(horizons.numel())
+        horizon_matrix = horizons[None]
         context_ids = text_position_ids(batch_size, context.shape[1], self.model_device)
         current_ids = image_position_ids(
             batch_size,
             grid_height=self.grid_height,
             grid_width=self.grid_width,
-            time_coord=torch.zeros_like(horizon),
+            time_coord=torch.zeros(batch_size, device=self.model_device, dtype=torch.long),
             device=self.model_device,
         )
-        future_ids = image_position_ids(
-            batch_size,
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-            time_coord=horizon,
-            device=self.model_device,
-        )
+        if include_image:
+            image_tokens = self.grid_height * self.grid_width
+            future_ids = image_position_ids(
+                horizon_count,
+                grid_height=self.grid_height,
+                grid_width=self.grid_width,
+                time_coord=horizons,
+                device=self.model_device,
+            )[None]
+        else:
+            image_tokens = 0
+            future_ids = torch.empty(
+                batch_size,
+                horizon_count,
+                0,
+                4,
+                device=self.model_device,
+                dtype=torch.long,
+            )
         context_mask = torch.ones(
             batch_size,
             context.shape[1],
             device=self.model_device,
             dtype=torch.bool,
         )
-        future_template = torch.zeros_like(current)
+        future_template = torch.zeros(
+            batch_size,
+            horizon_count,
+            image_tokens,
+            current.shape[-1],
+            device=self.model_device,
+            dtype=self.dtype,
+        )
         future_state_template = torch.zeros(
             batch_size,
-            1,
+            horizon_count,
             self.state_dim,
             device=self.model_device,
             dtype=self.dtype,
         )
         value_template = torch.zeros(
             batch_size,
-            1,
+            horizon_count,
             self.model.value_dim,
             device=self.model_device,
             dtype=self.dtype,
@@ -372,6 +473,13 @@ class RoboNanaRobotWinPolicy:
             batch_size,
             device=self.model_device,
             dtype=torch.float32,
+        )
+        empty_pred_action = torch.empty(
+            batch_size,
+            0,
+            self.action_dim,
+            device=self.model_device,
+            dtype=self.dtype,
         )
 
         def predict_world(
@@ -389,9 +497,9 @@ class RoboNanaRobotWinPolicy:
                 noisy_future_latents=sampled_future,
                 future_ids=future_ids,
                 state=state,
-                noisy_pred_action=torch.zeros_like(sampled_action),
+                noisy_pred_action=empty_pred_action,
                 gt_action_cond=sampled_action,
-                horizon_idx=horizon,
+                horizon_idx=horizon_matrix,
                 noisy_future_state=sampled_future_state,
                 noisy_value=sampled_value,
                 action_timestep=clean_action_time,
@@ -410,17 +518,110 @@ class RoboNanaRobotWinPolicy:
         )
 
     @torch.inference_mode()
-    def _decode_stage2_image(self, future_tokens: Tensor) -> Tensor:
-        """Decode one final Stage-2 FLUX prediction to FACT's [B,C,T,H,W] contract."""
+    def _sample_stage2(
+        self,
+        *,
+        context: Tensor,
+        current: Tensor,
+        state: Tensor,
+        clean_action: Tensor,
+        horizons: Tensor,
+        include_image: bool,
+        sampling_seed: int | None = None,
+    ) -> WorldFlowSample:
+        """Sample all requested horizons, chunking only the dense image suffix."""
 
-        decoded = decode_flux2_tokens(
-            self.vae,
-            future_tokens.to(device=self.vae_device),
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
+        horizons = torch.as_tensor(horizons, device=self.model_device, dtype=torch.long).reshape(-1)
+        if horizons.numel() == 0:
+            raise ValueError("Stage-2 requires at least one horizon")
+        chunk_size = (
+            min(self.stage2_image_horizon_batch_size, int(horizons.numel()))
+            if include_image
+            else int(horizons.numel())
         )
+        chunks = []
+        for start in range(0, int(horizons.numel()), chunk_size):
+            chunk_horizons = horizons[start : start + chunk_size]
+            chunk_seed = (
+                None
+                if sampling_seed is None
+                else int(sampling_seed) + 10_000 * int(chunk_horizons[0].item())
+            )
+            chunks.append(
+                self._sample_stage2_chunk(
+                    context=context,
+                    current=current,
+                    state=state,
+                    clean_action=clean_action,
+                    horizons=chunk_horizons,
+                    include_image=include_image,
+                    sampling_seed=chunk_seed,
+                )
+            )
+        return WorldFlowSample(
+            future=torch.cat([chunk.future for chunk in chunks], dim=1),
+            future_state=torch.cat([chunk.future_state for chunk in chunks], dim=1),
+            value=torch.cat([chunk.value for chunk in chunks], dim=1),
+        )
+
+    @torch.inference_mode()
+    def _sample_world(
+        self,
+        *,
+        context: Tensor,
+        current: Tensor,
+        state: Tensor,
+        clean_action: Tensor,
+        sampling_seed: int | None = None,
+    ) -> WorldFlowSample:
+        """Compatibility wrapper for the former one-horizon Stage-2 path."""
+
+        packed = self._sample_stage2(
+            context=context,
+            current=current,
+            state=state,
+            clean_action=clean_action,
+            horizons=torch.tensor([self.horizon]),
+            include_image=True,
+            sampling_seed=sampling_seed,
+        )
+        return WorldFlowSample(
+            future=packed.future[:, 0],
+            future_state=packed.future_state[:, 0, None],
+            value=packed.value[:, 0, None],
+        )
+
+    @torch.inference_mode()
+    def _decode_stage2_images(self, future_tokens: Tensor) -> Tensor:
+        """Decode ``[B,K,N,C]`` FLUX tokens to FACT's ``[B,C,K,H,W]``."""
+
+        if future_tokens.ndim != 4:
+            raise ValueError("packed future tokens must have shape [B, K, N, C]")
+        batch_size, horizon_count, token_count, channel_count = future_tokens.shape
+        expected_tokens = self.grid_height * self.grid_width
+        if token_count != expected_tokens:
+            raise ValueError(f"future token count must be {expected_tokens}, got {token_count}")
+        flat = future_tokens.reshape(batch_size * horizon_count, token_count, channel_count)
+        decoded_chunks = []
+        for start in range(0, flat.shape[0], self.vae_decode_batch_size):
+            decoded_chunks.append(
+                decode_flux2_tokens(
+                    self.vae,
+                    flat[start : start + self.vae_decode_batch_size].to(device=self.vae_device),
+                    grid_height=self.grid_height,
+                    grid_width=self.grid_width,
+                ).cpu()
+            )
+        decoded = torch.cat(decoded_chunks, dim=0)
+        decoded = decoded.reshape(batch_size, horizon_count, *decoded.shape[1:])
         # FACT's RoboTwin client expects decoded video frames in [-1, 1].
-        return decoded.mul(2.0).sub(1.0).unsqueeze(2).cpu()
+        return decoded.mul(2.0).sub(1.0).permute(0, 2, 1, 3, 4).contiguous()
+
+    @torch.inference_mode()
+    def _decode_stage2_image(self, future_tokens: Tensor) -> Tensor:
+        """Decode one final Stage-2 prediction for the legacy response shape."""
+
+        return self._decode_stage2_images(future_tokens[:, None])
 
     @torch.inference_mode()
     def inference(self, observation: dict[str, Any]) -> dict[str, Any]:
@@ -457,27 +658,95 @@ class RoboNanaRobotWinPolicy:
             self.normalization,
             mode="zscore",
         ).to(dtype=self.dtype).unsqueeze(1)
-        self._sync(self.model_device)
-        start = time.perf_counter()
         sampling_seed = (
             None
             if observation.get("sampling_seed") is None
             else int(observation["sampling_seed"])
         )
-        sampled_action = self._sample_action(
-            context=context,
-            current=current,
-            state=normalized_state,
-            sampling_seed=sampling_seed,
-        )
-        self._sync(self.model_device)
-        timing["action_sample_ms"] = (time.perf_counter() - start) * 1000.0
+        needs_input_action = self.inference_mode in {
+            InferenceMode.WORLD_ALL,
+            InferenceMode.WORLD_HORIZON,
+        }
+        if needs_input_action:
+            if "action_chunk" not in observation:
+                raise KeyError(f"{self.inference_mode.value} requires observation['action_chunk']")
+            action = torch.as_tensor(
+                observation["action_chunk"],
+                device=self.model_device,
+                dtype=torch.float32,
+            )
+            expected_action_shape = (self.action_chunk, self.action_dim)
+            if tuple(action.shape) != expected_action_shape:
+                raise ValueError(
+                    f"action_chunk must have shape {expected_action_shape}, got {tuple(action.shape)}"
+                )
+            sampled_action = preprocess_action_chunk(
+                action,
+                raw_state[0],
+                self.normalization,
+                delta_mask=self.delta_mask,
+            ).to(dtype=self.dtype)[None]
+        else:
+            self._sync(self.model_device)
+            start = time.perf_counter()
+            sampled_action = self._sample_action(
+                context=context,
+                current=current,
+                state=normalized_state,
+                sampling_seed=sampling_seed,
+            )
+            self._sync(self.model_device)
+            timing["action_sample_ms"] = (time.perf_counter() - start) * 1000.0
+            action = postprocess_action(
+                sampled_action[0],
+                raw_state[0],
+                self.normalization,
+                delta_mask=self.delta_mask,
+            )
 
-        chunk_value: float | None = None
-        stage2_image: Tensor | None = None
+        world_sample: WorldFlowSample | None = None
+        horizons: Tensor | None = None
+        include_image = False
+        if self.inference_mode is InferenceMode.ACTION_VALUES:
+            horizons = torch.arange(1, self.action_chunk + 1, device=self.model_device)
+        elif self.inference_mode is InferenceMode.WORLD_ALL:
+            horizons = torch.arange(1, self.action_chunk + 1, device=self.model_device)
+            include_image = True
+        elif self.inference_mode is InferenceMode.WORLD_HORIZON:
+            if "horizon" not in observation:
+                raise KeyError("world_horizon requires observation['horizon']")
+            requested_horizon = torch.as_tensor(observation["horizon"])
+            if requested_horizon.numel() != 1:
+                raise ValueError("horizon must be one integer scalar")
+            horizon_value = int(requested_horizon.item())
+            if float(requested_horizon.item()) != float(horizon_value):
+                raise ValueError("horizon must be an integer")
+            if not 1 <= horizon_value <= self.action_chunk:
+                raise ValueError(f"horizon must lie in [1, {self.action_chunk}]")
+            horizons = torch.tensor([horizon_value], device=self.model_device)
+            include_image = True
+
+        if horizons is not None:
+            start = time.perf_counter()
+            world_sample = self._sample_stage2(
+                context=context,
+                current=current,
+                state=normalized_state,
+                clean_action=sampled_action,
+                horizons=horizons,
+                include_image=include_image,
+                sampling_seed=sampling_seed,
+            )
+            self._sync(self.model_device)
+            timing["stage2_sample_ms"] = (time.perf_counter() - start) * 1000.0
+
+        # Preserve the former single-horizon live-eval path for old launch
+        # scripts. New callers should select one of the four explicit modes.
+        legacy_world: WorldFlowSample | None = None
+        legacy_stage2_image: Tensor | None = None
         if self.return_chunk_value:
             start = time.perf_counter()
-            world_sample = self._sample_world(
+            legacy_world = self._sample_world(
                 context=context,
                 current=current,
                 state=normalized_state,
@@ -485,25 +754,13 @@ class RoboNanaRobotWinPolicy:
                 sampling_seed=sampling_seed,
             )
             self._sync(self.model_device)
-            timing["value_sample_ms"] = (time.perf_counter() - start) * 1000.0
-            chunk_value = float(
-                denormalize_value(world_sample.value[0, 0].float(), self.normalization)
-                .reshape(-1)[0]
-                .item()
-            )
+            timing["legacy_stage2_sample_ms"] = (time.perf_counter() - start) * 1000.0
             if self.return_stage2_image:
                 start = time.perf_counter()
-                stage2_image = self._decode_stage2_image(world_sample.future)
+                legacy_stage2_image = self._decode_stage2_image(legacy_world.future)
                 self._sync(self.vae_device)
                 timing["stage2_image_decode_ms"] = (time.perf_counter() - start) * 1000.0
 
-        action = postprocess_action(
-            sampled_action[0],
-            raw_state[0],
-            self.normalization,
-            delta_mask=self.delta_mask,
-        )
-        timing["total_policy_ms"] = (time.perf_counter() - total_start) * 1000.0
         if log_digest:
             components = observation_component_digests(observation)
             print(
@@ -515,16 +772,51 @@ class RoboNanaRobotWinPolicy:
             )
         response = {
             "action": action.cpu(),
+            "_inference_mode": self.inference_mode.value,
             "_policy_timing_ms": timing,
             "_sampling_seed": observation.get("sampling_seed"),
         }
-        if chunk_value is not None:
+        if world_sample is not None and horizons is not None:
+            future_states = denormalize_state(
+                world_sample.future_state[0].float(), self.normalization, mode="zscore"
+            ).cpu()
+            values = denormalize_value(
+                world_sample.value[0].float(), self.normalization
+            ).reshape(-1).cpu()
+            response.update(
+                horizons=horizons.detach().cpu(),
+                future_states=future_states,
+                values=values,
+                values_per_sample=values,
+            )
+            if self.horizon in horizons.tolist():
+                selected_index = horizons.tolist().index(self.horizon)
+            else:
+                selected_index = 0
+            response.update(
+                chunk_value=float(values[selected_index].item()),
+                value_horizon=int(horizons[selected_index].item()),
+                selected_index=selected_index,
+            )
+            if include_image:
+                response["future_latents"] = world_sample.future[0].detach().cpu()
+                start = time.perf_counter()
+                response["images"] = self._decode_stage2_images(world_sample.future)
+                self._sync(self.vae_device)
+                timing["stage2_image_decode_ms"] = (time.perf_counter() - start) * 1000.0
+        if legacy_world is not None:
+            chunk_value = float(
+                denormalize_value(legacy_world.value[0, 0].float(), self.normalization)
+                .reshape(-1)[0]
+                .item()
+            )
             response.update(
                 chunk_value=chunk_value,
                 value_horizon=self.horizon,
                 values_per_sample=torch.tensor([chunk_value], dtype=torch.float32),
                 selected_index=0,
             )
-        if stage2_image is not None:
-            response["images"] = stage2_image
+        if legacy_stage2_image is not None:
+            response["images"] = legacy_stage2_image
+        timing["total_policy_ms"] = (time.perf_counter() - total_start) * 1000.0
         return response

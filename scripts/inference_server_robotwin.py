@@ -22,7 +22,7 @@ for upstream in reversed(
 
 import torch
 
-from robonana.inference import RoboNanaRobotWinPolicy
+from robonana.inference import InferenceMode, RoboNanaRobotWinPolicy
 from world_action_model import apply_runtime_compat
 from world_action_model.sockets import RobotInferenceServer
 
@@ -51,14 +51,36 @@ def main() -> int:
     parser.add_argument("--horizon", type=int, default=24)
     parser.add_argument("--num-inference-steps", type=int, default=20)
     parser.add_argument(
+        "--inference-mode",
+        choices=tuple(mode.value for mode in InferenceMode),
+        default=InferenceMode.ACTION.value,
+        help=(
+            "action: Stage-1 only; action_values: Stage-1 plus all horizon state/value; "
+            "world_all: supplied action_chunk plus all horizon state/value/image; "
+            "world_horizon: supplied action_chunk and horizon plus one world image."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-image-horizon-batch-size",
+        type=int,
+        default=4,
+        help="Packed horizon blocks per Stage-2 forward when future images are enabled.",
+    )
+    parser.add_argument(
+        "--vae-decode-batch-size",
+        type=int,
+        default=4,
+        help="Number of generated horizon latents decoded by the VAE at once.",
+    )
+    parser.add_argument(
         "--return-chunk-value",
         action="store_true",
-        help="Run the Stage-2 world sampler and return one denormalized value per action chunk.",
+        help="Legacy compatibility: return one h=--horizon value after Stage-1.",
     )
     parser.add_argument(
         "--return-stage2-image",
         action="store_true",
-        help="Decode and return the final Stage-2 future image (requires --return-chunk-value).",
+        help="Legacy compatibility: decode that one Stage-2 image (requires --return-chunk-value).",
     )
     args = parser.parse_args()
     dtype = {
@@ -78,6 +100,9 @@ def main() -> int:
         action_chunk=args.action_chunk,
         horizon=args.horizon,
         num_inference_steps=args.num_inference_steps,
+        inference_mode=args.inference_mode,
+        stage2_image_horizon_batch_size=args.stage2_image_horizon_batch_size,
+        vae_decode_batch_size=args.vae_decode_batch_size,
         return_chunk_value=args.return_chunk_value,
         return_stage2_image=args.return_stage2_image,
     )

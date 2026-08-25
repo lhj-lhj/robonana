@@ -10,6 +10,7 @@ __all__ = [
     "Flux2FACTModel",
     "Flux2FACTOutput",
     "SegmentMap",
+    "WorldBlockMap",
     "build_attention_bias",
     "configure_trainable_parameters",
     "load_flux2_fact_checkpoint",
@@ -18,7 +19,7 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name in {"SegmentMap", "build_attention_bias"}:
+    if name in {"SegmentMap", "WorldBlockMap", "build_attention_bias"}:
         return getattr(import_module(".models.attention_mask", __name__), name)
     if name in {"Flux2FACTModel", "Flux2FACTOutput"}:
         return getattr(import_module(".models.flux2_fact", __name__), name)

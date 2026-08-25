@@ -124,3 +124,38 @@ def test_dino_is_trailing_one_way_auxiliary_sink():
     ).all()
     assert torch.isneginf(bias[seg.future_image, seg.future_dino]).all()
     assert torch.isneginf(bias[seg.pred_action, seg.future_dino]).all()
+
+
+def test_packed_horizon_blocks_see_their_action_prefix_but_not_each_other():
+    seg = SegmentMap.from_block_lengths(
+        language=1,
+        state=1,
+        ref_image=2,
+        pred_action=0,
+        gt_action=4,
+        block_count=2,
+        horizon=1,
+        future_state=1,
+        value=1,
+        future_image=0,
+    )
+    bias = build_attention_bias(
+        seg,
+        batch_size=1,
+        dtype=torch.float32,
+        device="cpu",
+        horizon_idx=torch.tensor([[1, 3]]),
+    )[0, 0]
+    first, second = seg.world_blocks
+
+    for query in (first.horizon, first.future_state, first.value):
+        assert torch.isfinite(bias[query, seg.gt_action.start]).all()
+        assert torch.isneginf(bias[query, seg.gt_action.start + 1 : seg.gt_action.stop]).all()
+    for query in (second.horizon, second.future_state, second.value):
+        assert torch.isfinite(bias[query, seg.gt_action.start : seg.gt_action.start + 3]).all()
+        assert torch.isneginf(bias[query, seg.gt_action.start + 3 : seg.gt_action.stop]).all()
+
+    first_span = slice(first.horizon.start, first.future_dino.stop)
+    second_span = slice(second.horizon.start, second.future_dino.stop)
+    assert torch.isneginf(bias[first_span, second_span]).all()
+    assert torch.isneginf(bias[second_span, first_span]).all()

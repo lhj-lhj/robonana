@@ -199,6 +199,29 @@ Checkpoint loading is strict. Evaluation must find a complete FACT `config.json`
 next to the experiment checkpoint or receive `--model-config`; model size is
 never guessed from checkpoint tensor shapes.
 
+## Inference modes
+
+`scripts/inference_server_robotwin.py --inference-mode <mode>` exposes four
+strict graphs:
+
+| mode | action source | Stage-2 horizons | future image |
+|---|---|---|---|
+| `action` | Stage-1 diffusion | none | none |
+| `action_values` | Stage-1 diffusion | all `1..T` in one packed pass | omitted |
+| `world_all` | request `action_chunk` | all `1..T` in packed horizon batches | FLUX latent + decoded pixels |
+| `world_horizon` | request `action_chunk` | request scalar `horizon` | FLUX latent + decoded pixels |
+
+`action_chunk` is the absolute robot-space `[T, action_dim]` chunk; the policy
+applies the same delta conversion and z-score normalization used in training.
+Packed Stage-2 uses one shared clean causal action track followed by isolated
+`[idx_h | future_state_h | value_h | future_image_h]` blocks. A block sees only
+`G_1..G_h` and itself, never another horizon block. State/value-only inference
+creates zero future-image tokens and never invokes the VAE decoder. DINO is a
+training-only branch and is absent from every inference mode. Image horizons
+default to four isolated blocks per forward because packing 48 full FLUX image
+grids into one dense-attention sequence is impractical; configure this with
+`--stage2-image-horizon-batch-size`.
+
 ## Full RoboTwin evaluation
 
 The eight-way launcher audits train/eval instructions, evaluates all 50 tasks,

@@ -163,25 +163,85 @@ class Flux2FACTModel(Flux2):
         guidance: Tensor | None = None,
     ) -> Flux2FACTOutput:
         batch_size = context.shape[0]
-        if horizon_idx.ndim != 1 or horizon_idx.shape[0] != batch_size:
-            raise ValueError("horizon_idx must have shape [B]")
-        if torch.any(horizon_idx < 1) or torch.any(horizon_idx > self.max_horizon):
+        packed_world = horizon_idx.ndim == 2
+        if horizon_idx.ndim == 1 and horizon_idx.shape[0] == batch_size:
+            horizon_matrix = horizon_idx[:, None]
+        elif horizon_idx.ndim == 2 and horizon_idx.shape[0] == batch_size and horizon_idx.shape[1] > 0:
+            horizon_matrix = horizon_idx
+        else:
+            raise ValueError("horizon_idx must have shape [B] or non-empty [B, K]")
+        horizon_count = horizon_matrix.shape[1]
+        if torch.any(horizon_matrix < 1) or torch.any(horizon_matrix > self.max_horizon):
             raise ValueError(f"horizon_idx must be in [1, {self.max_horizon}]")
-        if current_ids.shape[-1] != 4 or future_ids.shape[-1] != 4 or context_ids.shape[-1] != 4:
+        if current_ids.shape[-1] != 4 or context_ids.shape[-1] != 4:
             raise ValueError("FLUX.2 position IDs must have four axes")
+        if packed_world:
+            if noisy_future_state.shape != (batch_size, horizon_count, self.state_dim):
+                raise ValueError(
+                    "packed noisy_future_state must have shape "
+                    f"{(batch_size, horizon_count, self.state_dim)}"
+                )
+            if noisy_value.shape != (batch_size, horizon_count, self.value_dim):
+                raise ValueError(
+                    f"packed noisy_value must have shape {(batch_size, horizon_count, self.value_dim)}"
+                )
+            if noisy_future_latents.ndim != 4 or noisy_future_latents.shape[:2] != (
+                batch_size,
+                horizon_count,
+            ):
+                raise ValueError("packed noisy_future_latents must have shape [B, K, tokens, channels]")
+            if future_ids.shape != (*noisy_future_latents.shape[:3], 4):
+                raise ValueError("packed future_ids must have shape [B, K, image_tokens, 4]")
+            state_blocks = [noisy_future_state[:, index, None] for index in range(horizon_count)]
+            value_blocks = [noisy_value[:, index, None] for index in range(horizon_count)]
+            image_blocks = [noisy_future_latents[:, index] for index in range(horizon_count)]
+            image_id_blocks = [future_ids[:, index] for index in range(horizon_count)]
+        else:
+            if noisy_future_state.ndim != 3 or noisy_future_state.shape[0] != batch_size:
+                raise ValueError("noisy_future_state must have shape [B, tokens, state_dim]")
+            if noisy_future_state.shape[-1] != self.state_dim:
+                raise ValueError(f"future state dimension must be {self.state_dim}")
+            if noisy_value.ndim != 3 or noisy_value.shape[0] != batch_size:
+                raise ValueError("noisy_value must have shape [B, tokens, value_dim]")
+            if noisy_value.shape[-1] != self.value_dim:
+                raise ValueError(f"value dimension must be {self.value_dim}")
+            if noisy_future_latents.ndim != 3 or noisy_future_latents.shape[0] != batch_size:
+                raise ValueError("noisy_future_latents must have shape [B, tokens, channels]")
+            if future_ids.shape != (*noisy_future_latents.shape[:2], 4):
+                raise ValueError("future_ids must have shape [B, image_tokens, 4]")
+            state_blocks = [noisy_future_state]
+            value_blocks = [noisy_value]
+            image_blocks = [noisy_future_latents]
+            image_id_blocks = [future_ids]
         if (noisy_future_dino is None) != (dino_ids is None):
             raise ValueError("noisy_future_dino and dino_ids must be provided together")
         if noisy_future_dino is not None:
             if self.dino_dim is None:
                 raise ValueError("DINO tokens were provided to a model with dino_dim=None")
-            if noisy_future_dino.ndim != 3 or noisy_future_dino.shape[0] != batch_size:
-                raise ValueError("noisy_future_dino must have shape [B, tokens, dino_dim]")
             if noisy_future_dino.shape[-1] != self.dino_dim:
                 raise ValueError(
                     f"DINO feature dimension must be {self.dino_dim}, got {noisy_future_dino.shape[-1]}"
                 )
-            if dino_ids.shape != (*noisy_future_dino.shape[:2], 4):
-                raise ValueError("dino_ids must have shape [B, DINO tokens, 4]")
+            if packed_world:
+                if noisy_future_dino.ndim != 4 or noisy_future_dino.shape[:2] != (
+                    batch_size,
+                    horizon_count,
+                ):
+                    raise ValueError("packed noisy_future_dino must have shape [B, K, tokens, dino_dim]")
+                if dino_ids.shape != (*noisy_future_dino.shape[:3], 4):
+                    raise ValueError("packed dino_ids must have shape [B, K, DINO tokens, 4]")
+                dino_blocks = [noisy_future_dino[:, index] for index in range(horizon_count)]
+                dino_id_blocks = [dino_ids[:, index] for index in range(horizon_count)]
+            else:
+                if noisy_future_dino.ndim != 3 or noisy_future_dino.shape[0] != batch_size:
+                    raise ValueError("noisy_future_dino must have shape [B, tokens, dino_dim]")
+                if dino_ids.shape != (*noisy_future_dino.shape[:2], 4):
+                    raise ValueError("dino_ids must have shape [B, DINO tokens, 4]")
+                dino_blocks = [noisy_future_dino]
+                dino_id_blocks = [dino_ids]
+        else:
+            dino_blocks = [None] * horizon_count
+            dino_id_blocks = [None] * horizon_count
 
         dtype = self.img_in.weight.dtype
         device = context.device
@@ -195,60 +255,102 @@ class Flux2FACTModel(Flux2):
         noisy_value = noisy_value.to(dtype=dtype)
         if noisy_future_dino is not None:
             noisy_future_dino = noisy_future_dino.to(dtype=dtype)
+        if packed_world:
+            state_blocks = [noisy_future_state[:, index, None] for index in range(horizon_count)]
+            value_blocks = [noisy_value[:, index, None] for index in range(horizon_count)]
+            image_blocks = [noisy_future_latents[:, index] for index in range(horizon_count)]
+            if noisy_future_dino is not None:
+                dino_blocks = [noisy_future_dino[:, index] for index in range(horizon_count)]
+        else:
+            state_blocks = [noisy_future_state]
+            value_blocks = [noisy_value]
+            image_blocks = [noisy_future_latents]
+            if noisy_future_dino is not None:
+                dino_blocks = [noisy_future_dino]
 
-        lengths = {
+        block_lengths = {
+            "horizon": 1,
+            "future_state": state_blocks[0].shape[1],
+            "value": value_blocks[0].shape[1],
+            "future_image": image_blocks[0].shape[1],
+            "future_dino": 0 if dino_blocks[0] is None else dino_blocks[0].shape[1],
+        }
+        for index in range(horizon_count):
+            actual = (
+                state_blocks[index].shape[1],
+                value_blocks[index].shape[1],
+                image_blocks[index].shape[1],
+                0 if dino_blocks[index] is None else dino_blocks[index].shape[1],
+            )
+            expected = (
+                block_lengths["future_state"],
+                block_lengths["value"],
+                block_lengths["future_image"],
+                block_lengths["future_dino"],
+            )
+            if actual != expected:
+                raise ValueError("all packed horizon blocks must have identical token counts")
+        prefix_lengths = {
             "language": context.shape[1],
             "state": state.shape[1],
             "ref_image": current_latents.shape[1],
             "pred_action": noisy_pred_action.shape[1],
             "gt_action": gt_action_cond.shape[1],
-            "horizon": 1,
-            "future_state": noisy_future_state.shape[1],
-            "value": noisy_value.shape[1],
-            "future_image": noisy_future_latents.shape[1],
-            "future_dino": 0 if noisy_future_dino is None else noisy_future_dino.shape[1],
         }
-        segments = SegmentMap.from_lengths(**lengths)
+        segments = SegmentMap.from_block_lengths(
+            **prefix_lengths,
+            block_count=horizon_count,
+            **block_lengths,
+        )
 
         txt = self.txt_in(context)
-        parts = [
-            self.state_in(state),
-            self.img_in(current_latents),
-            self.action_in(noisy_pred_action),
-            self.action_in(gt_action_cond),
-            self.horizon_embed(horizon_idx.long())[:, None, :],
-            self.state_in(noisy_future_state),
-            self.value_in(noisy_value),
-            self.img_in(noisy_future_latents),
+        def with_segment(part: Tensor, segment_id: int) -> Tensor:
+            return part + self.segment_embed.weight[segment_id]
+
+        embedded_parts = [
+            with_segment(self.state_in(state), 0),
+            with_segment(self.img_in(current_latents), 1),
+            with_segment(self.action_in(noisy_pred_action), 2),
+            with_segment(self.action_in(gt_action_cond), 3),
         ]
-        segment_ids = torch.cat(
-            [torch.full((batch_size, part.shape[1]), index, device=device, dtype=torch.long) for index, part in enumerate(parts)],
-            dim=1,
-        )
-        img = torch.cat(parts, dim=1) + self.segment_embed(segment_ids)
-        if noisy_future_dino is not None:
-            dino_part = self.dino_in(noisy_future_dino) + self.dino_segment_embed.weight[0]
-            img = torch.cat([img, dino_part], dim=1)
+        for index in range(horizon_count):
+            embedded_parts.extend(
+                [
+                    with_segment(self.horizon_embed(horizon_matrix[:, index].long())[:, None], 4),
+                    with_segment(self.state_in(state_blocks[index]), 5),
+                    with_segment(self.value_in(value_blocks[index]), 6),
+                    with_segment(self.img_in(image_blocks[index]), 7),
+                ]
+            )
+            if dino_blocks[index] is not None:
+                embedded_parts.append(
+                    self.dino_in(dino_blocks[index]) + self.dino_segment_embed.weight[0]
+                )
+        img = torch.cat(embedded_parts, dim=1)
 
         id_dtype = current_ids.dtype
         action_time = torch.arange(1, noisy_pred_action.shape[1] + 1, device=device, dtype=id_dtype)[None]
         action_time = action_time.expand(batch_size, -1)
         gt_time = torch.arange(1, gt_action_cond.shape[1] + 1, device=device, dtype=id_dtype)[None]
         gt_time = gt_time.expand(batch_size, -1)
-        nontext_ids = torch.cat(
-            [
-                self._robot_ids(batch_size=batch_size, length=state.shape[1], segment_id=1, device=device, dtype=id_dtype),
-                current_ids.to(device=device),
-                self._robot_ids(batch_size=batch_size, length=noisy_pred_action.shape[1], segment_id=3, device=device, dtype=id_dtype, time_ids=action_time),
-                self._robot_ids(batch_size=batch_size, length=gt_action_cond.shape[1], segment_id=4, device=device, dtype=id_dtype, time_ids=gt_time),
-                self._robot_ids(batch_size=batch_size, length=1, segment_id=5, device=device, dtype=id_dtype, time_ids=horizon_idx[:, None]),
-                self._robot_ids(batch_size=batch_size, length=noisy_future_state.shape[1], segment_id=6, device=device, dtype=id_dtype),
-                self._robot_ids(batch_size=batch_size, length=noisy_value.shape[1], segment_id=7, device=device, dtype=id_dtype),
-                future_ids.to(device=device),
-                *([] if dino_ids is None else [dino_ids.to(device=device)]),
-            ],
-            dim=1,
-        )
+        nontext_id_parts = [
+            self._robot_ids(batch_size=batch_size, length=state.shape[1], segment_id=1, device=device, dtype=id_dtype),
+            current_ids.to(device=device),
+            self._robot_ids(batch_size=batch_size, length=noisy_pred_action.shape[1], segment_id=3, device=device, dtype=id_dtype, time_ids=action_time),
+            self._robot_ids(batch_size=batch_size, length=gt_action_cond.shape[1], segment_id=4, device=device, dtype=id_dtype, time_ids=gt_time),
+        ]
+        for index in range(horizon_count):
+            nontext_id_parts.extend(
+                [
+                    self._robot_ids(batch_size=batch_size, length=1, segment_id=5, device=device, dtype=id_dtype, time_ids=horizon_matrix[:, index, None]),
+                    self._robot_ids(batch_size=batch_size, length=state_blocks[index].shape[1], segment_id=6, device=device, dtype=id_dtype),
+                    self._robot_ids(batch_size=batch_size, length=value_blocks[index].shape[1], segment_id=7, device=device, dtype=id_dtype),
+                    image_id_blocks[index].to(device=device),
+                ]
+            )
+            if dino_id_blocks[index] is not None:
+                nontext_id_parts.append(dino_id_blocks[index].to(device=device))
+        nontext_ids = torch.cat(nontext_id_parts, dim=1)
 
         pe_img = self.pe_embedder(nontext_ids)
         pe_txt = self.pe_embedder(context_ids.to(device=device))
@@ -257,7 +359,7 @@ class Flux2FACTModel(Flux2):
             batch_size=batch_size,
             dtype=dtype,
             device=device,
-            horizon_idx=horizon_idx,
+            horizon_idx=horizon_matrix,
             pred_action_bidirectional=self.pred_action_bidirectional,
             context_mask=context_mask,
         )
@@ -270,19 +372,23 @@ class Flux2FACTModel(Flux2):
         double_clean = self.double_stream_modulation_img(vec_clean)
         double_action = self.double_stream_modulation_img(vec_action)
         double_wm = self.double_stream_modulation_img(vec_wm)
-        double_img = _stitch_double(
-            [
-                (lengths["state"], double_clean),
-                (lengths["ref_image"], double_clean),
-                (lengths["pred_action"], double_action),
-                (lengths["gt_action"], double_clean),
-                (lengths["horizon"], double_clean),
-                (lengths["future_state"], double_wm),
-                (lengths["value"], double_wm),
-                (lengths["future_image"], double_wm),
-                (lengths["future_dino"], double_wm),
-            ]
-        )
+        double_parts = [
+            (prefix_lengths["state"], double_clean),
+            (prefix_lengths["ref_image"], double_clean),
+            (prefix_lengths["pred_action"], double_action),
+            (prefix_lengths["gt_action"], double_clean),
+        ]
+        for _ in range(horizon_count):
+            double_parts.extend(
+                [
+                    (block_lengths["horizon"], double_clean),
+                    (block_lengths["future_state"], double_wm),
+                    (block_lengths["value"], double_wm),
+                    (block_lengths["future_image"], double_wm),
+                    (block_lengths["future_dino"], double_wm),
+                ]
+            )
+        double_img = _stitch_double(double_parts)
         double_txt = self.double_stream_modulation_txt(vec_clean)
 
         for block in self.double_blocks:
@@ -305,20 +411,24 @@ class Flux2FACTModel(Flux2):
         single_clean = self.single_stream_modulation(vec_clean)[0]
         single_action = self.single_stream_modulation(vec_action)[0]
         single_wm = self.single_stream_modulation(vec_wm)[0]
-        single_mod = _stitch_triple(
-            [
-                (lengths["language"], single_clean),
-                (lengths["state"], single_clean),
-                (lengths["ref_image"], single_clean),
-                (lengths["pred_action"], single_action),
-                (lengths["gt_action"], single_clean),
-                (lengths["horizon"], single_clean),
-                (lengths["future_state"], single_wm),
-                (lengths["value"], single_wm),
-                (lengths["future_image"], single_wm),
-                (lengths["future_dino"], single_wm),
-            ]
-        )
+        single_parts = [
+            (prefix_lengths["language"], single_clean),
+            (prefix_lengths["state"], single_clean),
+            (prefix_lengths["ref_image"], single_clean),
+            (prefix_lengths["pred_action"], single_action),
+            (prefix_lengths["gt_action"], single_clean),
+        ]
+        for _ in range(horizon_count):
+            single_parts.extend(
+                [
+                    (block_lengths["horizon"], single_clean),
+                    (block_lengths["future_state"], single_wm),
+                    (block_lengths["value"], single_wm),
+                    (block_lengths["future_image"], single_wm),
+                    (block_lengths["future_dino"], single_wm),
+                ]
+            )
+        single_mod = _stitch_triple(single_parts)
         for block in self.single_blocks:
             if self.gradient_checkpointing and self.training:
                 hidden = checkpoint(
@@ -331,16 +441,38 @@ class Flux2FACTModel(Flux2):
             else:
                 hidden = self._single_block_forward(block, hidden, pe, single_mod, bias)
 
-        image_hidden = hidden[:, segments.future_image]
         action_hidden = hidden[:, segments.pred_action]
-        state_hidden = hidden[:, segments.future_state]
-        value_hidden = hidden[:, segments.value]
-        dino_hidden = hidden[:, segments.future_dino]
+        image_hidden = torch.stack(
+            [hidden[:, block.future_image] for block in segments.world_blocks], dim=1
+        )
+        state_hidden = torch.stack(
+            [hidden[:, block.future_state] for block in segments.world_blocks], dim=1
+        )
+        value_hidden = torch.stack(
+            [hidden[:, block.value] for block in segments.world_blocks], dim=1
+        )
+        dino_hidden = torch.stack(
+            [hidden[:, block.future_dino] for block in segments.world_blocks], dim=1
+        )
+        image_shape = image_hidden.shape
+        image_output = self.final_layer(
+            image_hidden.reshape(batch_size, -1, self.hidden_size), vec_wm
+        ).reshape(*image_shape[:-1], self.img_in.in_features)
+        state_output = self.state_out(state_hidden)
+        value_output = self.value_out(value_hidden)
+        if packed_world:
+            state_output = state_output.squeeze(2)
+            value_output = value_output.squeeze(2)
+        else:
+            image_output = image_output[:, 0]
+            state_output = state_output[:, 0]
+            value_output = value_output[:, 0]
+            dino_hidden = dino_hidden[:, 0]
         return Flux2FACTOutput(
-            image=self.final_layer(image_hidden, vec_wm),
+            image=image_output,
             action=self.action_out(action_hidden),
-            future_state=self.state_out(state_hidden),
-            value=self.value_out(value_hidden),
-            dino=self.dino_out(dino_hidden) if self.dino_dim is not None and dino_hidden.shape[1] else None,
+            future_state=state_output,
+            value=value_output,
+            dino=self.dino_out(dino_hidden) if self.dino_dim is not None and dino_hidden.shape[-2] else None,
             segments=segments,
         )

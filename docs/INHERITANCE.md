@@ -43,6 +43,20 @@ There is no MoT, ActionDiT, or second transformer backbone.
  horizon | future state | value | future image VAE | future image DINO]
 ```
 
+The single-horizon order above is unchanged for training. Multi-horizon
+Stage-2 inference extends only the suffix:
+
+```text
+[language | state | current image | A | G |
+ H_1 | S_1 | V_1 | I_1 | H_2 | S_2 | V_2 | I_2 | ... | H_T | S_T | V_T | I_T]
+```
+
+`A` is zero-length in Stage-2. Every horizon block reads the shared clean
+condition and only `G_1..G_h`; attention between different horizon blocks is
+blocked in both directions. Omitting image prediction sets every `I_h` to zero
+tokens, so all state/value horizons share one forward without FLUX-latent or
+VAE-decoder work. DINO is always omitted at inference.
+
 The attention mask is applied inside every reused FLUX.2 double-stream and single-stream block.
 The noisy-action track A is bidirectional for joint diffusion denoising, while
 the full-clean-action track G is causal. For a sample with horizon `idx_h`,
@@ -52,8 +66,7 @@ or any noisy-action token. This per-sample mask is rebuilt from the batch's
 `idx_h` tensor on every forward.
 The DINO suffix is a one-way auxiliary sink: it reads the complete world-model
 prefix and itself, while every earlier token is blocked from reading DINO.
-Inference omits this zero-length suffix and therefore keeps the existing action
-and VAE-latent sampling path unchanged.
+Inference omits this zero-length suffix.
 
 ## Offline/online feature path
 
