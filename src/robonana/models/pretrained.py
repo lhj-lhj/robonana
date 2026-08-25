@@ -68,6 +68,7 @@ def initialize_flux2_fact_model(
     value_dim: int = 1,
     max_horizon: int = 64,
     dino_dim: int | None = None,
+    pred_action_bidirectional: bool = False,
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params,
@@ -81,6 +82,7 @@ def initialize_flux2_fact_model(
         value_dim=value_dim,
         max_horizon=max_horizon,
         dino_dim=dino_dim,
+        pred_action_bidirectional=pred_action_bidirectional,
     )
     return model.to(device=torch.device(device), dtype=dtype)
 
@@ -93,6 +95,7 @@ def load_flux2_fact_checkpoint(
     value_dim: int = 1,
     max_horizon: int = 64,
     dino_dim: int | None = None,
+    pred_action_bidirectional: bool = False,
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params | None = None,
@@ -113,6 +116,7 @@ def load_flux2_fact_checkpoint(
             value_dim=value_dim,
             max_horizon=max_horizon,
             dino_dim=dino_dim,
+            pred_action_bidirectional=pred_action_bidirectional,
         ).to(dtype=dtype)
 
     state_dict = load_file(str(path), device=str(device))
@@ -151,6 +155,7 @@ def load_flux2_fact_trained_checkpoint(
     value_dim: int | None = None,
     max_horizon: int | None = None,
     dino_dim: int | None = None,
+    pred_action_bidirectional: bool | None = None,
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params | None = None,
@@ -171,6 +176,7 @@ def load_flux2_fact_trained_checkpoint(
         value_dim=value_dim,
         max_horizon=max_horizon,
         dino_dim=dino_dim,
+        pred_action_bidirectional=pred_action_bidirectional,
     )
     state_dict = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
 
@@ -182,6 +188,7 @@ def load_flux2_fact_trained_checkpoint(
             value_dim=model_config.value_dim,
             max_horizon=model_config.max_horizon,
             dino_dim=model_config.dino_dim,
+            pred_action_bidirectional=model_config.pred_action_bidirectional,
         ).to(dtype=dtype)
 
     checkpoint_parameters = sum(tensor.numel() for tensor in state_dict.values())

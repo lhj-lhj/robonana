@@ -48,7 +48,7 @@ The attention policy is prefix-structured:
 | Query | Visible keys |
 |---|---|
 | language, state, current image | language, state, current image |
-| predicted action token `A_t` | clean prefix + `A_1..A_t` |
+| predicted action token `A_t` | clean prefix + full `A_1..A_48` chunk |
 | full-clean GT action token `G_t` | clean prefix + `G_1..G_t` |
 | horizon | clean prefix + `G_1..G_idx_h` + horizon |
 | future state | previous world prefix + future state |
@@ -56,9 +56,11 @@ The attention policy is prefix-structured:
 | future FLUX latent | previous world prefix + future FLUX latent |
 | future DINO | complete world prefix + future DINO |
 
-Both action tracks are causal inside their own 48-token chunk: token `t` cannot
-read token `t+1`. For every sample, horizon, future state, value, future FLUX
-latent, and future DINO can read only the first `idx_h` full-clean action tokens.
+The noisy predicted-action track A is bidirectional inside its 48-token chunk,
+so diffusion denoises the complete action trajectory jointly. The full-clean
+conditioning track G is causal: token `t` cannot read token `t+1`. For every
+sample, horizon, future state, value, future FLUX latent, and future DINO can
+read only the first `idx_h` full-clean action tokens.
 The mask is constructed dynamically from the batch's `idx_h` tensor. The
 predicted-action track remains a sink and is never visible to the GT/world path.
 DINO is a final one-way auxiliary sink, so earlier tokens cannot depend on it.

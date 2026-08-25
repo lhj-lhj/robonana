@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -45,6 +46,46 @@ DISABLE_CHECKPOINTING = os.environ.get("ROBONANA_DISABLE_CHECKPOINTING", "0").lo
     "true",
     "yes",
 }
+
+
+def _parse_bool(value: str, *, name: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes"}:
+        return True
+    if normalized in {"0", "false", "no"}:
+        return False
+    raise ValueError(f"{name} must be one of 1/0, true/false, or yes/no")
+
+
+def _resolve_pred_action_bidirectional(project_dir: str | Path) -> bool:
+    """Preserve legacy causal runs while enabling the hybrid layout for new runs."""
+
+    override = os.environ.get("ROBONANA_PRED_ACTION_BIDIRECTIONAL")
+    if override is not None:
+        return _parse_bool(override, name="ROBONANA_PRED_ACTION_BIDIRECTIONAL")
+
+    saved_config = Path(project_dir) / "config.json"
+    if not saved_config.is_file():
+        return True
+    payload = json.loads(saved_config.read_text(encoding="utf-8"))
+    models = payload.get("models")
+    if not isinstance(models, dict):
+        raise ValueError(f"existing experiment has no models mapping: {saved_config}")
+    nested = models.get("train")
+    if isinstance(nested, dict):
+        models = nested
+    if "pred_action_bidirectional" not in models:
+        return False
+    value = models["pred_action_bidirectional"]
+    if not isinstance(value, bool):
+        raise ValueError(
+            "existing models.pred_action_bidirectional must be a JSON boolean: "
+            f"{saved_config}"
+        )
+    return value
+
+
+PRED_ACTION_BIDIRECTIONAL = _resolve_pred_action_bidirectional(PROJECT_DIR)
 
 DEEPSPEED_CONFIG = (
     REPO_ROOT / "third_party" / "FACT" / "fact_train" / "distributed" / "accelerate_configs" / "zero2.json"
@@ -124,6 +165,7 @@ config = dict(
         state_dim=14,
         value_dim=1,
         max_horizon=48,
+        pred_action_bidirectional=PRED_ACTION_BIDIRECTIONAL,
         train_mode=TRAIN_MODE,
         gradient_checkpointing=True,
         vae_dtype="float32",

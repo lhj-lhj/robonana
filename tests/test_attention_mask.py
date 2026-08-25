@@ -3,7 +3,7 @@ import torch
 from robonana.models.attention_mask import SegmentMap, build_attention_bias
 
 
-def test_action_tracks_are_causal_and_future_targets_see_only_horizon_prefix():
+def test_pred_action_is_bidirectional_gt_action_is_causal_and_targets_see_prefix():
     seg = SegmentMap.from_lengths(
         language=2,
         state=1,
@@ -21,14 +21,15 @@ def test_action_tracks_are_causal_and_future_targets_see_only_horizon_prefix():
         dtype=torch.float32,
         device="cpu",
         horizon_idx=torch.tensor([1, 3]),
+        pred_action_bidirectional=True,
     )[:, 0]
 
     for batch_bias in bias:
-        for segment in (seg.pred_action, seg.gt_action):
-            block = batch_bias[segment, segment]
-            causal = torch.ones_like(block, dtype=torch.bool).tril()
-            assert torch.isfinite(block[causal]).all()
-            assert torch.isneginf(block[~causal]).all()
+        assert torch.isfinite(batch_bias[seg.pred_action, seg.pred_action]).all()
+        gt_block = batch_bias[seg.gt_action, seg.gt_action]
+        causal = torch.ones_like(gt_block, dtype=torch.bool).tril()
+        assert torch.isfinite(gt_block[causal]).all()
+        assert torch.isneginf(gt_block[~causal]).all()
         assert torch.isneginf(batch_bias[seg.pred_action, seg.gt_action]).all()
         assert torch.isneginf(batch_bias[seg.gt_action, seg.pred_action]).all()
         assert torch.isneginf(batch_bias[seg.future_image, seg.pred_action]).all()
@@ -37,6 +38,33 @@ def test_action_tracks_are_causal_and_future_targets_see_only_horizon_prefix():
         gt_visibility = bias[batch_index, seg.future_image, seg.gt_action]
         assert torch.isfinite(gt_visibility[:, :horizon]).all()
         assert torch.isneginf(gt_visibility[:, horizon:]).all()
+
+
+def test_legacy_mask_default_keeps_both_action_tracks_causal():
+    seg = SegmentMap.from_lengths(
+        language=1,
+        state=1,
+        ref_image=1,
+        pred_action=3,
+        gt_action=3,
+        horizon=1,
+        future_state=1,
+        value=1,
+        future_image=1,
+    )
+    bias = build_attention_bias(
+        seg,
+        batch_size=1,
+        dtype=torch.float32,
+        device="cpu",
+        horizon_idx=torch.tensor([2]),
+    )[0, 0]
+
+    for segment in (seg.pred_action, seg.gt_action):
+        block = bias[segment, segment]
+        causal = torch.ones_like(block, dtype=torch.bool).tril()
+        assert torch.isfinite(block[causal]).all()
+        assert torch.isneginf(block[~causal]).all()
 
 
 def test_padded_context_keys_are_blocked_without_all_masked_rows():

@@ -20,6 +20,7 @@ class RoboNanaCheckpointConfig:
     value_dim: int
     max_horizon: int
     dino_dim: int | None
+    pred_action_bidirectional: bool
     source: str
 
 
@@ -71,6 +72,13 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
             f"model config {path} is missing model dimensions: {', '.join(missing_dimensions)}"
         )
 
+    raw_pred_action_bidirectional = models.get("pred_action_bidirectional", False)
+    if not isinstance(raw_pred_action_bidirectional, bool):
+        raise ValueError(
+            "models.pred_action_bidirectional must be a JSON boolean in "
+            f"model config: {path}"
+        )
+
     return RoboNanaCheckpointConfig(
         params=Flux2Params(**dict(raw_params)),
         action_dim=int(models["action_dim"]),
@@ -80,6 +88,8 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
         # Legacy checkpoints explicitly reconstruct the pre-DINO architecture.
         # We never infer this dimension from checkpoint tensor shapes.
         dino_dim=None if models.get("dino_dim") is None else int(models["dino_dim"]),
+        # Configs written before the hybrid layout used causal A and causal G.
+        pred_action_bidirectional=raw_pred_action_bidirectional,
         source=str(path),
     )
 
@@ -94,6 +104,7 @@ def resolve_checkpoint_config(
     value_dim: int | None = None,
     max_horizon: int | None = None,
     dino_dim: int | None = None,
+    pred_action_bidirectional: bool | None = None,
 ) -> RoboNanaCheckpointConfig:
     """Resolve an exact architecture; never infer structure from model tensors."""
 
@@ -119,6 +130,11 @@ def resolve_checkpoint_config(
                 value_dim=int(value_dim),
                 max_horizon=int(max_horizon),
                 dino_dim=None if dino_dim is None else int(dino_dim),
+                pred_action_bidirectional=(
+                    False
+                    if pred_action_bidirectional is None
+                    else pred_action_bidirectional
+                ),
                 source="explicit model metadata",
             )
         raise FileNotFoundError(
@@ -137,4 +153,9 @@ def resolve_checkpoint_config(
         value_dim=int(value_dim) if value_dim is not None else resolved.value_dim,
         max_horizon=int(max_horizon) if max_horizon is not None else resolved.max_horizon,
         dino_dim=int(dino_dim) if dino_dim is not None else resolved.dino_dim,
+        pred_action_bidirectional=(
+            pred_action_bidirectional
+            if pred_action_bidirectional is not None
+            else resolved.pred_action_bidirectional
+        ),
     )

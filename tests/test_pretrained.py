@@ -115,6 +115,7 @@ def test_trained_checkpoint_discovers_fact_project_config(tmp_path):
         state_dim=5,
         value_dim=2,
         max_horizon=8,
+        pred_action_bidirectional=True,
     )
     torch.save(expected.state_dict(), checkpoint)
     config_path = project / "config.json"
@@ -127,6 +128,7 @@ def test_trained_checkpoint_discovers_fact_project_config(tmp_path):
                     "state_dim": 5,
                     "value_dim": 2,
                     "max_horizon": 8,
+                    "pred_action_bidirectional": True,
                 }
             }
         ),
@@ -140,7 +142,48 @@ def test_trained_checkpoint_discovers_fact_project_config(tmp_path):
     )
 
     assert actual.hidden_size == _tiny_params().hidden_size
+    assert actual.pred_action_bidirectional is True
+    assert report.model_config.pred_action_bidirectional is True
     assert report.model_config.source == str(config_path.resolve())
+
+
+def test_legacy_project_config_defaults_to_causal_pred_action(tmp_path):
+    project = tmp_path / "legacy-experiment"
+    transformer = project / "models" / "checkpoint_epoch_1_step_10" / "transformer"
+    transformer.mkdir(parents=True)
+    checkpoint = transformer / "diffusion_pytorch_model.bin"
+    expected = Flux2FACTModel(
+        _tiny_params(),
+        action_dim=6,
+        state_dim=5,
+        value_dim=1,
+        max_horizon=8,
+    )
+    torch.save(expected.state_dict(), checkpoint)
+    config_path = project / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "models": {
+                    "params": asdict(_tiny_params()),
+                    "action_dim": 6,
+                    "state_dim": 5,
+                    "value_dim": 1,
+                    "max_horizon": 8,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    actual, report = load_flux2_fact_trained_checkpoint(
+        checkpoint,
+        device="cpu",
+        dtype=torch.float32,
+    )
+
+    assert actual.pred_action_bidirectional is False
+    assert report.model_config.pred_action_bidirectional is False
 
 
 def test_incomplete_project_config_fails_before_loading_checkpoint(tmp_path):

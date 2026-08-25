@@ -99,6 +99,11 @@ class RoboNanaTrainer(Trainer):
         max_horizon = int(_config_value(model_config, "max_horizon", 48))
         raw_dino_dim = _config_value(model_config, "dino_dim", None)
         dino_dim = None if raw_dino_dim is None else int(raw_dino_dim)
+        pred_action_bidirectional = _config_value(
+            model_config, "pred_action_bidirectional", False
+        )
+        if not isinstance(pred_action_bidirectional, bool):
+            raise TypeError("models.pred_action_bidirectional must be a bool")
         self.dino_dim = dino_dim
         if dino_dim is not None:
             if dino_dim != 3072:
@@ -141,6 +146,7 @@ class RoboNanaTrainer(Trainer):
                 value_dim=value_dim,
                 max_horizon=max_horizon,
                 dino_dim=dino_dim,
+                pred_action_bidirectional=pred_action_bidirectional,
                 device=self.device,
                 dtype=self.dtype,
                 params=params,
@@ -153,6 +159,7 @@ class RoboNanaTrainer(Trainer):
                 value_dim=value_dim,
                 max_horizon=max_horizon,
                 dino_dim=dino_dim,
+                pred_action_bidirectional=pred_action_bidirectional,
                 device=self.device,
                 dtype=self.dtype,
                 params=params,
@@ -188,6 +195,10 @@ class RoboNanaTrainer(Trainer):
                 len(trainable_names),
                 model.gradient_checkpointing,
                 self.pixel_eval_interval,
+            )
+            self.logger.info(
+                "Attention layout: A=%s; G=causal; future_targets=G-prefix-through-idx_h",
+                "bidirectional" if model.pred_action_bidirectional else "causal",
             )
             if self.dino_encoder is not None:
                 self.logger.info(

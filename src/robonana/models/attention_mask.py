@@ -88,13 +88,16 @@ def build_attention_bias(
     dtype: torch.dtype,
     device: torch.device | str,
     horizon_idx: torch.Tensor,
+    pred_action_bidirectional: bool = False,
     context_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build additive attention bias with ``0`` allowed and ``-inf`` blocked.
 
-    Both action tracks are causal: action token ``t`` cannot read ``t + 1``.
-    A is a sink; G and all future targets cannot read A.  For each sample,
-    H/S/V/I/D can read only the first ``idx_h`` full-clean G tokens.
+    A is an isolated diffusion sink. New runs use bidirectional attention inside
+    A to denoise the action chunk jointly; the default remains causal so legacy
+    checkpoints without explicit mask metadata retain their original semantics.
+    G is always causal, and H/S/V/I/D can read only the first ``idx_h``
+    full-clean G tokens. G and all future targets cannot read A.
     """
 
     if not dtype.is_floating_point:
@@ -122,7 +125,10 @@ def build_attention_bias(
 
     _allow(allowed, c, c)
     _allow(allowed, a, c)
-    _allow_causal(allowed, a)
+    if pred_action_bidirectional:
+        _allow(allowed, a, a)
+    else:
+        _allow_causal(allowed, a)
     _allow(allowed, g, c)
     _allow_causal(allowed, g)
 

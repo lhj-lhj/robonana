@@ -44,8 +44,9 @@ There is no MoT, ActionDiT, or second transformer backbone.
 ```
 
 The attention mask is applied inside every reused FLUX.2 double-stream and single-stream block.
-The noisy-action and full-clean-action tracks are independently causal. For a
-sample with horizon `idx_h`, horizon/state/value/VAE/DINO target queries can read
+The noisy-action track A is bidirectional for joint diffusion denoising, while
+the full-clean-action track G is causal. For a sample with horizon `idx_h`,
+horizon/state/value/VAE/DINO target queries can read
 only clean action tokens `G_1..G_idx_h`; they cannot read the clean action suffix
 or any noisy-action token. This per-sample mask is rebuilt from the batch's
 `idx_h` tensor on every forward.

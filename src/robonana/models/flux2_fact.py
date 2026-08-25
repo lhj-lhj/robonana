@@ -62,6 +62,7 @@ class Flux2FACTModel(Flux2):
         value_dim: int = 1,
         max_horizon: int = 64,
         dino_dim: int | None = None,
+        pred_action_bidirectional: bool = False,
     ) -> None:
         super().__init__(params)
         self.action_dim = action_dim
@@ -69,6 +70,9 @@ class Flux2FACTModel(Flux2):
         self.value_dim = value_dim
         self.max_horizon = max_horizon
         self.dino_dim = None if dino_dim is None else int(dino_dim)
+        if not isinstance(pred_action_bidirectional, bool):
+            raise TypeError("pred_action_bidirectional must be a bool")
+        self.pred_action_bidirectional = pred_action_bidirectional
         if self.dino_dim is not None and self.dino_dim <= 0:
             raise ValueError("dino_dim must be positive when the DINO branch is enabled")
 
@@ -254,6 +258,7 @@ class Flux2FACTModel(Flux2):
             dtype=dtype,
             device=device,
             horizon_idx=horizon_idx,
+            pred_action_bidirectional=self.pred_action_bidirectional,
             context_mask=context_mask,
         )
 
