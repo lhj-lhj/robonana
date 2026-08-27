@@ -22,12 +22,16 @@ class LocalQwen3Embedder(Qwen3Embedder):
         device = torch.device(device)
         self.model = AutoModelForCausalLM.from_pretrained(
             checkpoint / "text_encoder",
-            dtype=torch.bfloat16,
+            # Match the official FLUX.2 Qwen3 loader. Passing a torch dtype
+            # through Transformers' newer ``dtype=`` alias mutates the config
+            # before it is logged and breaks older versions whose JSON encoder
+            # cannot serialize ``torch.dtype``.
+            torch_dtype=None,
             local_files_only=True,
             low_cpu_mem_usage=True,
         ).eval()
         self.model.requires_grad_(False)
-        self.model.to(device)
+        self.model.to(device=device, dtype=torch.bfloat16)
         self.tokenizer = AutoTokenizer.from_pretrained(
             checkpoint / "tokenizer",
             local_files_only=True,
