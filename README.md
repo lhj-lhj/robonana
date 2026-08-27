@@ -287,6 +287,22 @@ still require the normal observation state, three RGB views, and instruction.
 If `model_config.json`/`config.json` is not discoverable above the checkpoint,
 add `--model-config /path/to/model_config.json` to `ROBONANA_SERVER`.
 
+For closed-loop inspection from training-set first frames, the dataset rollout
+script alternates Stage-1 action sampling and `world_all`, decodes all 48 image
+horizons, overlays each horizon-specific value, and feeds the raw decoded
+`h=48` three-view pixels and predicted state into the next round:
+
+```bash
+python scripts/rollout_dataset_world_all.py \
+  --checkpoint /path/to/checkpoint/transformer/diffusion_pytorch_model.bin \
+  --model-config /path/to/experiment/config.json \
+  --flux-checkpoint-dir /path/to/FLUX.2-klein-base-4B \
+  --dataset-root /path/to/fact-robotwin-v2/RoboTwin \
+  --output-dir outputs/dataset_world_all_rollout \
+  --trajectory-count 10 --rollout-rounds 5 \
+  --stage2-image-horizon-batch-size 2
+```
+
 ## Full RoboTwin evaluation
 
 The eight-way launcher audits train/eval instructions, evaluates all 50 tasks,
