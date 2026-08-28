@@ -34,6 +34,51 @@ ALOHA_DELTA_MASK = np.asarray(
 )
 
 
+def mac_success_targets(
+    *,
+    frame_index: int,
+    horizon_idx: int,
+    episode_length: int,
+    discount: float = 0.999,
+    reward_non_goal: float = -1.0,
+    reward_goal: float = 0.0,
+) -> tuple[int, int, float, float]:
+    """Return ``(future_index, delta, reward_h, q_mc)`` for a successful episode.
+
+    ``reward_h`` covers only the clipped action prefix ``t:t+delta``. ``q_mc``
+    is the complete discounted return from the current frame ``t`` and is
+    therefore independent of the sampled horizon.
+    """
+
+    frame_index = int(frame_index)
+    horizon_idx = int(horizon_idx)
+    episode_length = int(episode_length)
+    discount = float(discount)
+    if episode_length <= 0:
+        raise ValueError("episode_length must be positive")
+    if not 0 <= frame_index < episode_length:
+        raise ValueError("frame_index must lie inside the episode")
+    if horizon_idx < 0:
+        raise ValueError("horizon_idx must be non-negative")
+    if not 0.0 < discount <= 1.0:
+        raise ValueError("discount must lie in (0, 1]")
+
+    final_index = episode_length - 1
+    future_index = min(frame_index + horizon_idx, final_index)
+    delta = future_index - frame_index
+    reward_h = sum(
+        discount**offset * float(reward_non_goal)
+        for offset in range(delta)
+    )
+    remaining_non_goal = final_index - frame_index
+    q_mc = sum(
+        discount**offset * float(reward_non_goal)
+        for offset in range(remaining_non_goal)
+    )
+    q_mc += discount**remaining_non_goal * float(reward_goal)
+    return future_index, delta, float(reward_h), float(q_mc)
+
+
 @dataclass(frozen=True)
 class EpisodeRecord:
     task_name: str
@@ -125,6 +170,10 @@ class RoboTwinHDF5Dataset(BaseDataset):
         language_cache_size: int = 8,
         hdf5_cache_size: int = 4,
         dino_online: bool = False,
+        discount: float = 0.999,
+        reward_non_goal: float = -1.0,
+        reward_goal: float = 0.0,
+        q_target_mode: str = "mc_success",
     ) -> None:
         super().__init__(data_path=data_path)
         self.stats_path = str(stats_path)
@@ -139,6 +188,10 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self.language_cache_size = int(language_cache_size)
         self.hdf5_cache_size = int(hdf5_cache_size)
         self.dino_online = bool(dino_online)
+        self.discount = float(discount)
+        self.reward_non_goal = float(reward_non_goal)
+        self.reward_goal = float(reward_goal)
+        self.q_target_mode = str(q_target_mode)
         if self.action_chunk <= 0 or self.max_horizon <= 0:
             raise ValueError("action_chunk and max_horizon must be positive")
         if self.action_dim <= 0 or self.action_dim > ALOHA_DELTA_MASK.size:
@@ -149,6 +202,12 @@ class RoboTwinHDF5Dataset(BaseDataset):
             raise ValueError("eval_horizons must be non-empty and lie in [1, max_horizon]")
         if min(self.latent_cache_size, self.language_cache_size, self.hdf5_cache_size) < 1:
             raise ValueError("all cache sizes must be at least one")
+        if not 0.0 < self.discount <= 1.0:
+            raise ValueError("discount must lie in (0, 1]")
+        if self.q_target_mode != "mc_success":
+            raise ValueError(
+                "this pretraining dataset currently supports only q_target_mode='mc_success'"
+            )
 
         self.records: list[EpisodeRecord] = []
         self.episode_starts = np.empty((0,), dtype=np.int64)
@@ -169,7 +228,16 @@ class RoboTwinHDF5Dataset(BaseDataset):
     def _ensure_index(self) -> None:
         if self.records:
             return
-        self.records = load_episode_records(self.data_path, self.task_glob, self.index_path)
+        self._set_records(load_episode_records(self.data_path, self.task_glob, self.index_path))
+
+    def _set_records(self, records: list[EpisodeRecord]) -> None:
+        """Keep only complete successful demonstrations for MC pretraining."""
+
+        self.records = [record for record in records if record.success]
+        if not self.records:
+            raise FileNotFoundError(
+                "q_target_mode='mc_success' requires at least one successful episode"
+            )
         lengths = np.asarray([record.length for record in self.records], dtype=np.int64)
         self.episode_stops = np.cumsum(lengths)
         self.episode_starts = self.episode_stops - lengths
@@ -294,7 +362,14 @@ class RoboTwinHDF5Dataset(BaseDataset):
     def _get_data(self, index: int) -> dict[str, Any]:
         record, frame_index = self._locate(int(index))
         horizon_idx = self._sample_horizon()
-        future_index = min(frame_index + horizon_idx, record.length - 1)
+        future_index, horizon_delta, reward_h, q_mc = mac_success_targets(
+            frame_index=frame_index,
+            horizon_idx=horizon_idx,
+            episode_length=record.length,
+            discount=self.discount,
+            reward_non_goal=self.reward_non_goal,
+            reward_goal=self.reward_goal,
+        )
         action_indices = np.clip(
             frame_index + np.arange(self.action_chunk, dtype=np.int64),
             0,
@@ -328,22 +403,12 @@ class RoboTwinHDF5Dataset(BaseDataset):
         state_std = np.maximum(state_std, 1e-8)
         action_std = np.maximum(action_std, 1e-8)
 
-        delta = action_raw.copy()
+        action_delta = action_raw.copy()
         delta_mask = ALOHA_DELTA_MASK[: self.action_dim]
-        delta[:, delta_mask] -= state_raw[None, delta_mask]
+        action_delta[:, delta_mask] -= state_raw[None, delta_mask]
         norm_state = (state_raw - state_mean) / state_std
         norm_future_state = (future_state_raw - state_mean) / state_std
-        norm_action = (delta - action_mean) / action_std
-
-        # Time-to-go is evaluated at the same t_h as future_state/image, so
-        # changing idx_h changes the target whenever t_h is not tail-clipped.
-        horizon_time_to_go = 0.0 if record.length <= 1 else (record.length - future_index - 1) / (record.length - 1)
-        value_min = float(np.asarray(self._stats["norm_stats"]["value"]["min"]).reshape(-1)[0])
-        value_max = float(np.asarray(self._stats["norm_stats"]["value"]["max"]).reshape(-1)[0])
-        if not record.success:
-            horizon_time_to_go += 1.0
-        value_normalized = ((horizon_time_to_go - value_min) / max(value_max - value_min, 1e-8)) * 2.0 - 1.0
-        value_normalized = float(np.clip(value_normalized, -1.0, 1.0))
+        norm_action = (action_delta - action_mean) / action_std
 
         frame_latents = self._latents(record)
         if frame_latents.shape[0] != record.length:
@@ -361,8 +426,13 @@ class RoboTwinHDF5Dataset(BaseDataset):
             "state": torch.from_numpy(norm_state.copy()),
             "action": torch.from_numpy(norm_action.copy()),
             "future_state": torch.from_numpy(norm_future_state.copy()),
-            "value": torch.tensor([value_normalized], dtype=torch.float32),
+            "reward": torch.tensor([reward_h], dtype=torch.float32),
+            "q": torch.tensor([q_mc], dtype=torch.float32),
             "horizon_idx": torch.tensor(horizon_idx, dtype=torch.long),
+            "delta": torch.tensor(horizon_delta, dtype=torch.long),
+            "terminal_h": torch.tensor(
+                float(future_index == record.length - 1), dtype=torch.float32
+            ),
             "action_loss_mask": torch.tensor(float(record.success), dtype=torch.float32),
             "failure_episode_mask": torch.tensor(float(not record.success), dtype=torch.float32),
             "sample_index": torch.tensor(index, dtype=torch.long),

@@ -36,6 +36,10 @@ PIXEL_EVAL_INTERVAL = int(os.environ.get("ROBONANA_PIXEL_EVAL_INTERVAL", "100"))
 LOG_INTERVAL = int(os.environ.get("ROBONANA_LOG_INTERVAL", "10"))
 MEMORY_LIMIT_GIB = float(os.environ.get("ROBONANA_MEMORY_LIMIT_GIB", "0"))
 NUM_INFERENCE_STEPS = int(os.environ.get("ROBONANA_NUM_INFERENCE_STEPS", "20"))
+DISCOUNT = float(os.environ.get("ROBONANA_DISCOUNT", "0.999"))
+REWARD_NON_GOAL = float(os.environ.get("ROBONANA_REWARD_NON_GOAL", "-1.0"))
+REWARD_GOAL = float(os.environ.get("ROBONANA_REWARD_GOAL", "0.0"))
+Q_TARGET_MODE = os.environ.get("ROBONANA_Q_TARGET_MODE", "mc_success")
 EARLY_CHECKPOINT_STEPS = tuple(
     int(value)
     for value in os.environ.get("ROBONANA_EARLY_CHECKPOINT_STEPS", "100").split(",")
@@ -115,6 +119,10 @@ def _dataset_config(root: Path, task_glob: str, *, stats_path: Path | None = Non
         action_dim=14,
         max_horizon=48,
         eval_horizons=(12, 24, 48),
+        discount=DISCOUNT,
+        reward_non_goal=REWARD_NON_GOAL,
+        reward_goal=REWARD_GOAL,
+        q_target_mode=Q_TARGET_MODE,
     )
 
 
@@ -163,7 +171,8 @@ config = dict(
         params=KLEIN4B_MODEL_PARAMS,
         action_dim=14,
         state_dim=14,
-        value_dim=1,
+        reward_dim=1,
+        q_dim=1,
         max_horizon=48,
         pred_action_bidirectional=PRED_ACTION_BIDIRECTIONAL,
         train_mode=TRAIN_MODE,
@@ -206,11 +215,16 @@ config = dict(
         num_inference_steps=NUM_INFERENCE_STEPS,
         max_grad_norm=1.0,
         memory_limit_gib=MEMORY_LIMIT_GIB,
+        discount=DISCOUNT,
+        reward_non_goal=REWARD_NON_GOAL,
+        reward_goal=REWARD_GOAL,
+        q_target_mode=Q_TARGET_MODE,
         loss_weights=dict(
             image_loss=1.0,
             action_loss=10.0,
             future_state_loss=0.4,
-            value_loss=0.4,
+            reward_loss=0.01,
+            q_loss=0.001,
         ),
     ),
 )

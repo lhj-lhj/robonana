@@ -92,7 +92,8 @@ def validate_response(response: dict[str, Any], *, action_chunk: int = 48) -> No
     expected = {
         "action": (action_chunk, 14),
         "future_states": (action_chunk, 14),
-        "values": (action_chunk,),
+        "rewards": (action_chunk,),
+        "qs": (action_chunk,),
         "future_latents": (action_chunk, 288, 128),
         "images": (1, 3, action_chunk, 192, 384),
     }
@@ -121,7 +122,7 @@ def run_trajectory(
     observation = first_observation(dataset, record)
     instruction = str(observation["instruction"])
     rounds = []
-    video_path = trajectory_dir / "rollout_5x48_value_overlay.mp4"
+    video_path = trajectory_dir / "rollout_5x48_return_overlay.mp4"
     writer = imageio.get_writer(video_path, fps=args.fps, codec="libx264", quality=8)
     started = time.perf_counter()
     try:
@@ -140,7 +141,8 @@ def run_trajectory(
             }
             world_response = policy.inference(world_observation)
             validate_response(world_response)
-            values = torch.as_tensor(world_response["values"]).float().cpu()
+            rewards = torch.as_tensor(world_response["rewards"]).float().cpu()
+            qs = torch.as_tensor(world_response["qs"]).float().cpu()
             states = torch.as_tensor(world_response["future_states"]).float().cpu()
             latents = torch.as_tensor(world_response["future_latents"]).to(dtype=torch.bfloat16)
             decoded = torch.as_tensor(world_response["images"])[0].cpu()
@@ -157,7 +159,8 @@ def run_trajectory(
                     rollout_index=rollout_index,
                     rollout_count=args.rollout_rounds,
                     horizon=horizon,
-                    value=float(values[horizon - 1].item()),
+                    reward=float(rewards[horizon - 1].item()),
+                    q=float(qs[horizon - 1].item()),
                 )
                 raw_image = Image.fromarray(
                     frame_uint8.permute(1, 2, 0).contiguous().numpy(),
@@ -170,7 +173,8 @@ def run_trajectory(
                 {
                     "action": action,
                     "future_states": states,
-                    "values": values,
+                    "rewards": rewards,
+                    "qs": qs,
                     "future_latents": latents,
                 },
                 round_dir / "predictions.pt",
@@ -180,7 +184,8 @@ def run_trajectory(
                     "round": rollout_index,
                     "action_sampling_seed": round_seed,
                     "world_sampling_seed": round_seed + 1,
-                    "values": values.tolist(),
+                    "rewards": rewards.tolist(),
+                    "qs": qs.tolist(),
                     "action": action.tolist(),
                     "final_state": states[-1].tolist(),
                     "timing_ms": {
@@ -198,7 +203,8 @@ def run_trajectory(
             }
             print(
                 f"[trajectory {trajectory_index:02d}] round={rollout_index + 1}/"
-                f"{args.rollout_rounds} final_value={float(values[-1]):.5f}",
+                f"{args.rollout_rounds} final_reward={float(rewards[-1]):.5f} "
+                f"final_q={float(qs[-1]):.5f}",
                 flush=True,
             )
     finally:

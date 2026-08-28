@@ -1,5 +1,4 @@
 from concurrent.futures import ThreadPoolExecutor
-import inspect
 import threading
 
 import pytest
@@ -173,17 +172,13 @@ def test_stage1_sampler_executes_one_true_model_batch():
     policy.grid_width = 2
     policy.state_dim = 3
     policy.action_dim = 4
-    model_head_kwargs = (
-        {"reward_dim": 1, "q_dim": 1}
-        if "reward_dim" in inspect.signature(Flux2FACTModel).parameters
-        else {"value_dim": 1}
-    )
     policy.model = Flux2FACTModel(
         params,
         action_dim=4,
         state_dim=3,
+        reward_dim=1,
+        q_dim=1,
         max_horizon=4,
-        **model_head_kwargs,
     ).eval()
     policy.schedule = flow_euler_schedule(1, flow_shift=1.0, device="cpu")
 

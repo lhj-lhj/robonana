@@ -25,6 +25,13 @@ def test_training_config_logically_mixes_separate_rollout_root(monkeypatch, tmp_
             "dataset_weights": [1.0, 2.5],
         }
         assert module.config["models"]["params"]["hidden_size"] == 3072
-        assert module.config["models"]["value_dim"] == 1
+        assert module.config["models"]["reward_dim"] == 1
+        assert module.config["models"]["q_dim"] == 1
+        assert module.config["train"]["discount"] == 0.999
+        assert module.config["train"]["reward_non_goal"] == -1.0
+        assert module.config["train"]["reward_goal"] == 0.0
+        assert module.config["train"]["q_target_mode"] == "mc_success"
+        assert module.config["train"]["loss_weights"]["reward_loss"] == 0.01
+        assert module.config["train"]["loss_weights"]["q_loss"] == 0.001
     finally:
         sys.modules.pop(module_name, None)

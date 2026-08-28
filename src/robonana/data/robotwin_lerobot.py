@@ -155,10 +155,9 @@ class RoboTwinLeRobotDataset(RoboTwinHDF5Dataset):
     def _ensure_index(self) -> None:
         if self.records:
             return
-        self.records = load_lerobot_episode_records(self.data_path, self.task_globs, self.index_path)
-        lengths = np.asarray([record.length for record in self.records], dtype=np.int64)
-        self.episode_stops = np.cumsum(lengths)
-        self.episode_starts = self.episode_stops - lengths
+        self._set_records(
+            load_lerobot_episode_records(self.data_path, self.task_globs, self.index_path)
+        )
 
     def _episode_state_action(self, record: EpisodeRecord) -> tuple[np.ndarray, np.ndarray]:
         def load(path: Path) -> tuple[np.ndarray, np.ndarray]:

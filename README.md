@@ -10,14 +10,15 @@ experiment.
 
 The supported training target is `robonana.configs.robotwin_flux2_800m_dino.config`:
 
-- scratch FLUX.2-shaped DiT: 800,776,704 parameters;
+- scratch FLUX.2-shaped DiT: 800,781,312 parameters;
 - hidden size 1536, 12 attention heads, 4 double-stream blocks, and 16
   single-stream blocks;
 - ordinary BF16 DDP on eight GPUs, without ZeRO-2 or gradient checkpointing;
 - 120,000 optimizer steps at global batch size 256 (`32 x 8`);
 - FACT RoboTwin-v2: 2,500 Clean episodes plus 25,000 Randomized episodes;
 - language, robot state, three-view current image, action, horizon, future state,
-  scalar value, future FLUX-AE image, and a training-only future DINOv3 target;
+  cumulative reward, MC Q, future FLUX-AE image, and a training-only future
+  DINOv3 target;
 - fixed-horizon W&B visualization at `h = 12, 24, 48` every 1,000 steps.
 
 Training samples `idx_h` uniformly from `1..48`. A target beyond an episode uses
@@ -30,11 +31,11 @@ The exact token order is:
 
 ```text
 [language | state | current_image | pred_action | gt_action_full_clean |
- idx_h | future_state | value | future_image_vae | future_image_dino]
+ idx_h | future_state | reward | Q | future_image_vae | future_image_dino]
 ```
 
 All segments pass through the same FLUX.2 double-stream and single-stream
-blocks. Image, action, future-state, value, and DINO predictions use separate
+blocks. Image, action, future-state, reward, Q, and DINO predictions use separate
 output projections; they are not separate transformer backbones. The DINO
 branch adds only two projections whose middle dimension follows the selected
 shared DiT hidden size:
@@ -53,14 +54,15 @@ The attention policy is prefix-structured:
 | full-clean GT action token `G_t` | clean prefix + `G_1..G_t` |
 | horizon | clean prefix + `G_1..G_idx_h` + horizon |
 | future state | previous world prefix + future state |
-| value | previous world prefix + value |
+| cumulative reward | previous world prefix + cumulative reward |
+| MC Q | previous world prefix + MC Q |
 | future FLUX latent | previous world prefix + future FLUX latent |
 | future DINO | complete world prefix + future DINO |
 
 The noisy predicted-action track A is bidirectional inside its 48-token chunk,
 so diffusion denoises the complete action trajectory jointly. The full-clean
 conditioning track G is causal: token `t` cannot read token `t+1`. For every
-sample, horizon, future state, value, future FLUX latent, and future DINO can
+sample, horizon, future state, reward, Q, future FLUX latent, and future DINO can
 read only the first `idx_h` full-clean action tokens.
 The mask is constructed dynamically from the batch's `idx_h` tensor. The
 predicted-action track remains a sink and is never visible to the GT/world path.
@@ -68,10 +70,14 @@ DINO is a final one-way auxiliary sink, so earlier tokens cannot depend on it.
 Inference omits the DINO suffix and uses the unchanged action and future-image
 samplers.
 
-Let `t_h = min(t + idx_h, T - 1)`. `future_state` is exactly the single robot
-state at `t_h`; it is not the last state of the 48-action chunk. The value target
-is the normalized time-to-go evaluated at the same `t_h`, so two unclipped
-horizons have different value targets.
+Let `t_h = min(t + idx_h, T - 1)` and `delta = t_h - t`. `future_state` is
+exactly the single robot state at `t_h`; it is not the last state of the
+48-action chunk. Successful demonstrations use `gamma=0.999`, reward `-1` at
+each non-terminal frame, and reward `0` at the successful terminal frame. The
+reward token targets `sum(k=0..delta-1) gamma^k r_(t+k)`. The Q token targets
+the full Monte Carlo return from `t`, `sum(k=0..T-1-t) gamma^k r_(t+k)`, so Q is
+independent of the sampled horizon for a fixed `t`. Neither target is min-max
+normalized or interpreted as time-to-go.
 
 See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact upstream reuse
 boundary.
@@ -210,9 +216,9 @@ bash scripts/run_robotwin_train.sh \
 ```
 
 The joint flow loss weights are image `1.0`, action `10.0`, future state `0.4`,
-value `0.4`, and DINO `0.1`. Periodic training visualization performs only
+reward `0.01`, Q `0.001`, and DINO `0.1`. Periodic training visualization performs only
 Stage 2: it conditions on the batch's full-clean GT action and samples future
-image/state/value from pure noise with 20-step Flow-Euler. It does not run
+image/state/reward/Q from pure noise with 20-step Flow-Euler. It does not run
 Stage-1 action diffusion. The standalone inference modes below are unchanged.
 
 Checkpoint loading is strict. Evaluation must find a complete FACT `config.json`
@@ -227,15 +233,15 @@ strict graphs:
 | mode | action source | Stage-2 horizons | future image |
 |---|---|---|---|
 | `action` | Stage-1 diffusion | none | none |
-| `action_values` | Stage-1 diffusion | all `1..T` in one packed pass | omitted |
+| `action_reward_q` | Stage-1 diffusion | all `1..T` in one packed pass | omitted |
 | `world_all` | request `action_chunk` | all `1..T` in packed horizon batches | FLUX latent + decoded pixels |
 | `world_horizon` | request `action_chunk` | request scalar `horizon` | FLUX latent + decoded pixels |
 
 `action_chunk` is the absolute robot-space `[T, action_dim]` chunk; the policy
 applies the same delta conversion and z-score normalization used in training.
 Packed Stage-2 uses one shared clean causal action track followed by isolated
-`[idx_h | future_state_h | value_h | future_image_h]` blocks. A block sees only
-`G_1..G_h` and itself, never another horizon block. State/value-only inference
+`[idx_h | future_state_h | reward_h | Q_h | future_image_h]` blocks. A block sees only
+`G_1..G_h` and itself, never another horizon block. State/reward/Q-only inference
 creates zero future-image tokens and never invokes the VAE decoder. DINO is a
 training-only branch and is absent from every inference mode. Image horizons
 default to four isolated blocks per forward because packing 48 full FLUX image
@@ -266,17 +272,17 @@ ROBONANA_SERVER=(
 # 1. Stage-1 only: fastest action inference.
 "${ROBONANA_SERVER[@]}" --inference-mode action --port 8094
 
-# 2. Stage-1 plus state/value for every h=1..48; no future VAE/DINO tokens.
-"${ROBONANA_SERVER[@]}" --inference-mode action_values --port 8094
+# 2. Stage-1 plus state/reward/Q for every h=1..48; no future VAE/DINO tokens.
+"${ROBONANA_SERVER[@]}" --inference-mode action_reward_q --port 8094
 
-# 3. Supplied action chunk plus all state/value/VAE/pixel horizons.
+# 3. Supplied action chunk plus all state/reward/Q/VAE/pixel horizons.
 "${ROBONANA_SERVER[@]}" \
   --inference-mode world_all \
   --stage2-image-horizon-batch-size 4 \
   --vae-decode-batch-size 4 \
   --port 8094
 
-# 4. Supplied action chunk and h plus one state/value/VAE/pixel prediction.
+# 4. Supplied action chunk and h plus one state/reward/Q/VAE/pixel prediction.
 "${ROBONANA_SERVER[@]}" --inference-mode world_horizon --port 8094
 ```
 
@@ -289,7 +295,7 @@ add `--model-config /path/to/model_config.json` to `ROBONANA_SERVER`.
 
 For closed-loop inspection from training-set first frames, the dataset rollout
 script alternates Stage-1 action sampling and `world_all`, decodes all 48 image
-horizons, overlays each horizon-specific value, and feeds the raw decoded
+horizons, overlays each horizon-specific reward and Q, and feeds the raw decoded
 `h=48` three-view pixels and predicted state into the next round:
 
 ```bash
@@ -306,8 +312,8 @@ python scripts/rollout_dataset_world_all.py \
 ## Full RoboTwin evaluation
 
 The eight-way launcher audits train/eval instructions, evaluates all 50 tasks,
-saves native MP4s, one value trace per episode, and the decoded Stage-2 future
-images. Each 48-action chunk uses one `h=24` value, which is overlaid on every
+saves native MP4s, one reward/Q trace per episode, and the decoded Stage-2 future
+images. Each 48-action chunk uses one `h=24` reward/Q prediction, which is overlaid on every
 executed frame in that chunk.
 
 ```bash
@@ -332,7 +338,7 @@ bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 
 Start with two jobs per GPU. Increase to four only after a two-worker smoke
 passes without OIDN/SAPIEN renderer errors. `ROBONANA_EVAL_AUX_OUTPUTS=1`
-retains the original value/Stage-2 artifact workflow and deliberately requires
+retains the reward/Q Stage-2 artifact workflow and deliberately requires
 `ROBONANA_EVAL_JOBS_PER_GPU=1`.
 
 The server-side RoboTwin 2.0 checkout used for the new official scheduler is
@@ -373,7 +379,7 @@ bash scripts/collect_prepare_robotwin_rollouts.sh \
   beat_block_hammer demo_clean step1000_failures 0
 ```
 
-Failed episodes have `action_loss_mask=0` while retaining their world/value
+Failed episodes have `action_loss_mask=0` while retaining their world/reward/Q
 supervision. The separate rollout format and collection path are maintained, but
 the current 800M+DINO config does not yet mix these episodes into training: the
 800M config must first add an explicit LeRobot+HDF5 mixture. The HDF5 loader can

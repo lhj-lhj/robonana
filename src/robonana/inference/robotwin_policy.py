@@ -34,7 +34,6 @@ from world_action_model.pipeline.utils import (
     add_state_to_action,
     denormalize_action,
     denormalize_state,
-    denormalize_value,
     extract_normalization_tensors,
     load_stats,
     normalize_state,
@@ -45,7 +44,7 @@ class InferenceMode(str, Enum):
     """The four supported RoboNana inference graphs."""
 
     ACTION = "action"
-    ACTION_VALUES = "action_values"
+    ACTION_REWARD_Q = "action_reward_q"
     WORLD_ALL = "world_all"
     WORLD_HORIZON = "world_horizon"
 
@@ -188,7 +187,7 @@ class RoboNanaRobotWinPolicy:
         inference_mode: str | InferenceMode = InferenceMode.ACTION,
         stage2_image_horizon_batch_size: int = 4,
         vae_decode_batch_size: int = 4,
-        return_chunk_value: bool = False,
+        return_chunk_q: bool = False,
         return_stage2_image: bool = False,
     ) -> None:
         self.flux_checkpoint_dir = Path(flux_checkpoint_dir).expanduser().resolve()
@@ -206,15 +205,15 @@ class RoboNanaRobotWinPolicy:
         self.inference_mode = _parse_inference_mode(inference_mode)
         self.stage2_image_horizon_batch_size = int(stage2_image_horizon_batch_size)
         self.vae_decode_batch_size = int(vae_decode_batch_size)
-        self.return_chunk_value = bool(return_chunk_value)
+        self.return_chunk_q = bool(return_chunk_q)
         self.return_stage2_image = bool(return_stage2_image)
-        if self.return_stage2_image and not self.return_chunk_value:
-            raise ValueError("return_stage2_image requires return_chunk_value Stage-2 sampling")
+        if self.return_stage2_image and not self.return_chunk_q:
+            raise ValueError("return_stage2_image requires return_chunk_q Stage-2 sampling")
         if self.inference_mode is not InferenceMode.ACTION and (
-            self.return_chunk_value or self.return_stage2_image
+            self.return_chunk_q or self.return_stage2_image
         ):
             raise ValueError(
-                "legacy return_chunk_value/return_stage2_image flags cannot be combined "
+                "legacy return_chunk_q/return_stage2_image flags cannot be combined "
                 "with an explicit non-action inference_mode"
             )
         if (
@@ -338,7 +337,8 @@ class RoboNanaRobotWinPolicy:
         empty_ids = torch.zeros(batch_size, 0, 4, device=self.model_device, dtype=torch.long)
         empty_image = torch.zeros(batch_size, 0, 128, device=self.model_device, dtype=self.dtype)
         empty_state = torch.zeros(batch_size, 0, self.state_dim, device=self.model_device, dtype=self.dtype)
-        empty_value = torch.zeros(batch_size, 0, 1, device=self.model_device, dtype=self.dtype)
+        empty_reward = torch.zeros(batch_size, 0, 1, device=self.model_device, dtype=self.dtype)
+        empty_q = torch.zeros(batch_size, 0, 1, device=self.model_device, dtype=self.dtype)
         clean_gt_action = torch.zeros(
             batch_size,
             self.action_chunk,
@@ -368,7 +368,8 @@ class RoboNanaRobotWinPolicy:
                 gt_action_cond=clean_gt_action,
                 horizon_idx=horizon,
                 noisy_future_state=empty_state,
-                noisy_value=empty_value,
+                noisy_reward=empty_reward,
+                noisy_q=empty_q,
                 action_timestep=sigma.expand(batch_size),
                 wm_timestep=clean_wm_time,
                 context_mask=context_mask,
@@ -455,10 +456,17 @@ class RoboNanaRobotWinPolicy:
             device=self.model_device,
             dtype=self.dtype,
         )
-        value_template = torch.zeros(
+        reward_template = torch.zeros(
             batch_size,
             horizon_count,
-            self.model.value_dim,
+            self.model.reward_dim,
+            device=self.model_device,
+            dtype=self.dtype,
+        )
+        q_template = torch.zeros(
+            batch_size,
+            horizon_count,
+            self.model.q_dim,
             device=self.model_device,
             dtype=self.dtype,
         )
@@ -468,7 +476,8 @@ class RoboNanaRobotWinPolicy:
 
         future_noise = seeded_randn_like(future_template, stream_seed(1))
         future_state_noise = seeded_randn_like(future_state_template, stream_seed(2))
-        value_noise = seeded_randn_like(value_template, stream_seed(3))
+        reward_noise = seeded_randn_like(reward_template, stream_seed(3))
+        q_noise = seeded_randn_like(q_template, stream_seed(4))
         clean_action_time = torch.zeros(
             batch_size,
             device=self.model_device,
@@ -485,10 +494,11 @@ class RoboNanaRobotWinPolicy:
         def predict_world(
             sampled_future: Tensor,
             sampled_future_state: Tensor,
-            sampled_value: Tensor,
+            sampled_reward: Tensor,
+            sampled_q: Tensor,
             sampled_action: Tensor,
             sigma: Tensor,
-        ) -> tuple[Tensor, Tensor, Tensor]:
+        ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
             output = self.model(
                 context=context,
                 context_ids=context_ids,
@@ -501,18 +511,20 @@ class RoboNanaRobotWinPolicy:
                 gt_action_cond=sampled_action,
                 horizon_idx=horizon_matrix,
                 noisy_future_state=sampled_future_state,
-                noisy_value=sampled_value,
+                noisy_reward=sampled_reward,
+                noisy_q=sampled_q,
                 action_timestep=clean_action_time,
                 wm_timestep=sigma.expand(batch_size),
                 context_mask=context_mask,
             )
-            return output.image, output.future_state, output.value
+            return output.image, output.future_state, output.reward, output.q
 
         return sample_world_flow(
             clean_action=clean_action,
             future_noise=future_noise,
             future_state_noise=future_state_noise,
-            value_noise=value_noise,
+            reward_noise=reward_noise,
+            q_noise=q_noise,
             schedule=self.schedule,
             predict_world=predict_world,
         )
@@ -561,7 +573,8 @@ class RoboNanaRobotWinPolicy:
         return WorldFlowSample(
             future=torch.cat([chunk.future for chunk in chunks], dim=1),
             future_state=torch.cat([chunk.future_state for chunk in chunks], dim=1),
-            value=torch.cat([chunk.value for chunk in chunks], dim=1),
+            reward=torch.cat([chunk.reward for chunk in chunks], dim=1),
+            q=torch.cat([chunk.q for chunk in chunks], dim=1),
         )
 
     @torch.inference_mode()
@@ -588,7 +601,8 @@ class RoboNanaRobotWinPolicy:
         return WorldFlowSample(
             future=packed.future[:, 0],
             future_state=packed.future_state[:, 0, None],
-            value=packed.value[:, 0, None],
+            reward=packed.reward[:, 0, None],
+            q=packed.q[:, 0, None],
         )
 
     @torch.inference_mode()
@@ -707,7 +721,7 @@ class RoboNanaRobotWinPolicy:
         world_sample: WorldFlowSample | None = None
         horizons: Tensor | None = None
         include_image = False
-        if self.inference_mode is InferenceMode.ACTION_VALUES:
+        if self.inference_mode is InferenceMode.ACTION_REWARD_Q:
             horizons = torch.arange(1, self.action_chunk + 1, device=self.model_device)
         elif self.inference_mode is InferenceMode.WORLD_ALL:
             horizons = torch.arange(1, self.action_chunk + 1, device=self.model_device)
@@ -744,7 +758,7 @@ class RoboNanaRobotWinPolicy:
         # scripts. New callers should select one of the four explicit modes.
         legacy_world: WorldFlowSample | None = None
         legacy_stage2_image: Tensor | None = None
-        if self.return_chunk_value:
+        if self.return_chunk_q:
             start = time.perf_counter()
             legacy_world = self._sample_world(
                 context=context,
@@ -780,22 +794,22 @@ class RoboNanaRobotWinPolicy:
             future_states = denormalize_state(
                 world_sample.future_state[0].float(), self.normalization, mode="zscore"
             ).cpu()
-            values = denormalize_value(
-                world_sample.value[0].float(), self.normalization
-            ).reshape(-1).cpu()
+            rewards = world_sample.reward[0].float().reshape(-1).cpu()
+            qs = world_sample.q[0].float().reshape(-1).cpu()
             response.update(
                 horizons=horizons.detach().cpu(),
                 future_states=future_states,
-                values=values,
-                values_per_sample=values,
+                rewards=rewards,
+                qs=qs,
             )
             if self.horizon in horizons.tolist():
                 selected_index = horizons.tolist().index(self.horizon)
             else:
                 selected_index = 0
             response.update(
-                chunk_value=float(values[selected_index].item()),
-                value_horizon=int(horizons[selected_index].item()),
+                chunk_reward=float(rewards[selected_index].item()),
+                chunk_q=float(qs[selected_index].item()),
+                return_horizon=int(horizons[selected_index].item()),
                 selected_index=selected_index,
             )
             if include_image:
@@ -805,15 +819,14 @@ class RoboNanaRobotWinPolicy:
                 self._sync(self.vae_device)
                 timing["stage2_image_decode_ms"] = (time.perf_counter() - start) * 1000.0
         if legacy_world is not None:
-            chunk_value = float(
-                denormalize_value(legacy_world.value[0, 0].float(), self.normalization)
-                .reshape(-1)[0]
-                .item()
-            )
+            chunk_reward = float(legacy_world.reward[0, 0].float().reshape(-1)[0].item())
+            chunk_q = float(legacy_world.q[0, 0].float().reshape(-1)[0].item())
             response.update(
-                chunk_value=chunk_value,
-                value_horizon=self.horizon,
-                values_per_sample=torch.tensor([chunk_value], dtype=torch.float32),
+                chunk_reward=chunk_reward,
+                chunk_q=chunk_q,
+                return_horizon=self.horizon,
+                rewards=torch.tensor([chunk_reward], dtype=torch.float32),
+                qs=torch.tensor([chunk_q], dtype=torch.float32),
                 selected_index=0,
             )
         if legacy_stage2_image is not None:

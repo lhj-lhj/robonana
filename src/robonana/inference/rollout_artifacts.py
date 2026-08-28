@@ -49,9 +49,10 @@ def annotate_rollout_frame(
     rollout_index: int,
     rollout_count: int,
     horizon: int,
-    value: float,
+    reward: float,
+    q: float,
 ) -> Image.Image:
-    """Overlay the horizon-specific value without modifying the feedback frame."""
+    """Overlay horizon reward/Q without modifying the feedback frame."""
 
     if frame_uint8.dtype != torch.uint8:
         raise TypeError("annotate_rollout_frame expects uint8 input")
@@ -60,7 +61,7 @@ def annotate_rollout_frame(
     draw = ImageDraw.Draw(image)
     label = (
         f"trajectory={trajectory_index:02d} rollout={rollout_index + 1}/{rollout_count} "
-        f"h={horizon:02d} value={float(value):.5f}"
+        f"h={horizon:02d} reward={float(reward):.5f} Q={float(q):.5f}"
     )
     draw.rectangle((0, 0, image.width, 22), fill=(0, 0, 0))
     draw.text((6, 5), label, fill=(255, 255, 255))

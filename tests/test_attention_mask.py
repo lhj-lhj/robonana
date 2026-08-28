@@ -12,7 +12,8 @@ def test_pred_action_is_bidirectional_gt_action_is_causal_and_targets_see_prefix
         gt_action=4,
         horizon=1,
         future_state=1,
-        value=1,
+        reward=1,
+        q=1,
         future_image=3,
     )
     bias = build_attention_bias(
@@ -49,7 +50,8 @@ def test_legacy_mask_default_keeps_both_action_tracks_causal():
         gt_action=3,
         horizon=1,
         future_state=1,
-        value=1,
+        reward=1,
+        q=1,
         future_image=1,
     )
     bias = build_attention_bias(
@@ -76,7 +78,8 @@ def test_padded_context_keys_are_blocked_without_all_masked_rows():
         gt_action=1,
         horizon=1,
         future_state=1,
-        value=1,
+        reward=1,
+        q=1,
         future_image=1,
     )
     context_mask = torch.tensor([[True, True, False]])
@@ -104,7 +107,8 @@ def test_dino_is_trailing_one_way_auxiliary_sink():
         gt_action=2,
         horizon=1,
         future_state=1,
-        value=1,
+        reward=1,
+        q=1,
         future_image=3,
         future_dino=4,
     )
@@ -136,7 +140,8 @@ def test_packed_horizon_blocks_see_their_action_prefix_but_not_each_other():
         block_count=2,
         horizon=1,
         future_state=1,
-        value=1,
+        reward=1,
+        q=1,
         future_image=0,
     )
     bias = build_attention_bias(
@@ -148,10 +153,10 @@ def test_packed_horizon_blocks_see_their_action_prefix_but_not_each_other():
     )[0, 0]
     first, second = seg.world_blocks
 
-    for query in (first.horizon, first.future_state, first.value):
+    for query in (first.horizon, first.future_state, first.reward, first.q):
         assert torch.isfinite(bias[query, seg.gt_action.start]).all()
         assert torch.isneginf(bias[query, seg.gt_action.start + 1 : seg.gt_action.stop]).all()
-    for query in (second.horizon, second.future_state, second.value):
+    for query in (second.horizon, second.future_state, second.reward, second.q):
         assert torch.isfinite(bias[query, seg.gt_action.start : seg.gt_action.start + 3]).all()
         assert torch.isneginf(bias[query, seg.gt_action.start + 3 : seg.gt_action.stop]).all()
 
@@ -159,3 +164,36 @@ def test_packed_horizon_blocks_see_their_action_prefix_but_not_each_other():
     second_span = slice(second.horizon.start, second.future_dino.stop)
     assert torch.isneginf(bias[first_span, second_span]).all()
     assert torch.isneginf(bias[second_span, first_span]).all()
+
+
+def test_reward_q_follow_world_block_order_and_never_read_pred_action():
+    seg = SegmentMap.from_lengths(
+        language=1,
+        state=1,
+        ref_image=1,
+        pred_action=3,
+        gt_action=3,
+        horizon=1,
+        future_state=1,
+        reward=1,
+        q=1,
+        future_image=1,
+        future_dino=1,
+    )
+    bias = build_attention_bias(
+        seg,
+        batch_size=1,
+        dtype=torch.float32,
+        device="cpu",
+        horizon_idx=torch.tensor([2]),
+        pred_action_bidirectional=True,
+    )[0, 0]
+
+    assert torch.isfinite(bias[seg.reward, seg.future_state]).all()
+    assert torch.isneginf(bias[seg.reward, seg.q]).all()
+    assert torch.isfinite(bias[seg.q, seg.reward]).all()
+    assert torch.isneginf(bias[seg.q, seg.future_image]).all()
+    for query in (seg.reward, seg.q):
+        assert torch.isneginf(bias[query, seg.pred_action]).all()
+        assert torch.isfinite(bias[query, seg.gt_action.start : seg.gt_action.start + 2]).all()
+        assert torch.isneginf(bias[query, seg.gt_action.start + 2 : seg.gt_action.stop]).all()

@@ -55,8 +55,8 @@ def main() -> int:
         choices=tuple(mode.value for mode in InferenceMode),
         default=InferenceMode.ACTION.value,
         help=(
-            "action: Stage-1 only; action_values: Stage-1 plus all horizon state/value; "
-            "world_all: supplied action_chunk plus all horizon state/value/image; "
+            "action: Stage-1 only; action_reward_q: Stage-1 plus all horizon state/reward/Q; "
+            "world_all: supplied action_chunk plus all horizon state/reward/Q/image; "
             "world_horizon: supplied action_chunk and horizon plus one world image."
         ),
     )
@@ -73,14 +73,14 @@ def main() -> int:
         help="Number of generated horizon latents decoded by the VAE at once.",
     )
     parser.add_argument(
-        "--return-chunk-value",
+        "--return-chunk-q",
         action="store_true",
-        help="Legacy compatibility: return one h=--horizon value after Stage-1.",
+        help="Compatibility path: return one h=--horizon reward and Q after Stage-1.",
     )
     parser.add_argument(
         "--return-stage2-image",
         action="store_true",
-        help="Legacy compatibility: decode that one Stage-2 image (requires --return-chunk-value).",
+        help="Compatibility path: decode that one Stage-2 image (requires --return-chunk-q).",
     )
     args = parser.parse_args()
     dtype = {
@@ -103,7 +103,7 @@ def main() -> int:
         inference_mode=args.inference_mode,
         stage2_image_horizon_batch_size=args.stage2_image_horizon_batch_size,
         vae_decode_batch_size=args.vae_decode_batch_size,
-        return_chunk_value=args.return_chunk_value,
+        return_chunk_q=args.return_chunk_q,
         return_stage2_image=args.return_stage2_image,
     )
     resolved = policy.load_report.model_config

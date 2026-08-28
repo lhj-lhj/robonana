@@ -25,7 +25,8 @@ def test_pretrained_backbone_and_new_modules_use_distinct_learning_rates():
         _tiny_params(),
         action_dim=6,
         state_dim=5,
-        value_dim=1,
+        reward_dim=1,
+        q_dim=1,
         max_horizon=8,
         dino_dim=12,
     )

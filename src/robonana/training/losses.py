@@ -22,7 +22,8 @@ def joint_flow_loss(
     image_target: Tensor,
     action_target: Tensor,
     future_state_target: Tensor,
-    value_target: Tensor,
+    reward_target: Tensor,
+    q_target: Tensor,
     dino_target: Tensor | None = None,
     action_loss_mask: Tensor | None = None,
 ) -> dict[str, Tensor]:
@@ -30,7 +31,8 @@ def joint_flow_loss(
         "image_loss": masked_mse(output.image, image_target),
         "action_loss": masked_mse(output.action, action_target, action_loss_mask),
         "future_state_loss": masked_mse(output.future_state, future_state_target),
-        "value_loss": masked_mse(output.value, value_target),
+        "reward_loss": masked_mse(output.reward, reward_target),
+        "q_loss": masked_mse(output.q, q_target),
     }
     if dino_target is not None:
         if output.dino is None:

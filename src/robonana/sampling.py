@@ -14,14 +14,16 @@ class TwoStageFlowSample:
     action: Tensor
     future: Tensor
     future_state: Tensor
-    value: Tensor
+    reward: Tensor
+    q: Tensor
 
 
 @dataclass(frozen=True)
 class WorldFlowSample:
     future: Tensor
     future_state: Tensor
-    value: Tensor
+    reward: Tensor
+    q: Tensor
 
 
 def sample_action_flow(
@@ -77,9 +79,13 @@ def sample_world_flow(
     clean_action: Tensor,
     future_noise: Tensor,
     future_state_noise: Tensor,
-    value_noise: Tensor,
+    reward_noise: Tensor,
+    q_noise: Tensor,
     schedule: Tensor,
-    predict_world: Callable[[Tensor, Tensor, Tensor, Tensor, Tensor], tuple[Tensor, Tensor, Tensor]],
+    predict_world: Callable[
+        [Tensor, Tensor, Tensor, Tensor, Tensor, Tensor],
+        tuple[Tensor, Tensor, Tensor, Tensor],
+    ],
 ) -> WorldFlowSample:
     """Denoise world targets from pure noise under a fixed clean action chunk."""
 
@@ -94,12 +100,14 @@ def sample_world_flow(
 
     sampled_future = future_noise
     sampled_future_state = future_state_noise
-    sampled_value = value_noise
+    sampled_reward = reward_noise
+    sampled_q = q_noise
     for sigma, sigma_next in zip(schedule[:-1], schedule[1:]):
-        image_velocity, state_velocity, value_velocity = predict_world(
+        image_velocity, state_velocity, reward_velocity, q_velocity = predict_world(
             sampled_future,
             sampled_future_state,
-            sampled_value,
+            sampled_reward,
+            sampled_q,
             clean_action,
             sigma,
         )
@@ -107,12 +115,16 @@ def sample_world_flow(
         sampled_future_state = flow_euler_step(
             sampled_future_state, state_velocity, sigma, sigma_next
         )
-        sampled_value = flow_euler_step(sampled_value, value_velocity, sigma, sigma_next)
+        sampled_reward = flow_euler_step(
+            sampled_reward, reward_velocity, sigma, sigma_next
+        )
+        sampled_q = flow_euler_step(sampled_q, q_velocity, sigma, sigma_next)
 
     return WorldFlowSample(
         future=sampled_future,
         future_state=sampled_future_state,
-        value=sampled_value,
+        reward=sampled_reward,
+        q=sampled_q,
     )
 
 
@@ -121,10 +133,14 @@ def sample_two_stage_flow(
     action_noise: Tensor,
     future_noise: Tensor,
     future_state_noise: Tensor,
-    value_noise: Tensor,
+    reward_noise: Tensor,
+    q_noise: Tensor,
     schedule: Tensor,
     predict_action: Callable[[Tensor, Tensor], Tensor],
-    predict_world: Callable[[Tensor, Tensor, Tensor, Tensor, Tensor], tuple[Tensor, Tensor, Tensor]],
+    predict_world: Callable[
+        [Tensor, Tensor, Tensor, Tensor, Tensor, Tensor],
+        tuple[Tensor, Tensor, Tensor, Tensor],
+    ],
 ) -> TwoStageFlowSample:
     """Run FACT-style action-first, world-second inference from pure noise."""
 
@@ -146,7 +162,8 @@ def sample_two_stage_flow(
         clean_action=sampled_action,
         future_noise=future_noise,
         future_state_noise=future_state_noise,
-        value_noise=value_noise,
+        reward_noise=reward_noise,
+        q_noise=q_noise,
         schedule=schedule,
         predict_world=predict_world,
     )
@@ -155,5 +172,6 @@ def sample_two_stage_flow(
         action=sampled_action,
         future=world.future,
         future_state=world.future_state,
-        value=world.value,
+        reward=world.reward,
+        q=world.q,
     )

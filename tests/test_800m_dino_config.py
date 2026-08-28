@@ -29,4 +29,4 @@ def test_800m_dino_heads_add_expected_parameters():
     assert model.dino_in.out_features == 1536
     assert model.dino_out.in_features == 1536
     assert model.dino_out.out_features == 3072
-    assert sum(parameter.numel() for parameter in model.parameters()) == 800_776_704
+    assert sum(parameter.numel() for parameter in model.parameters()) == 800_781_312

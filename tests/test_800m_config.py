@@ -20,7 +20,8 @@ def test_800m_full_dataset_config():
     assert config["train"]["pixel_eval_interval"] == 1000
     assert config["launch"]["distributed_type"] == "MULTI_GPU"
     assert config["models"]["gradient_checkpointing"] is False
-    assert config["models"]["value_dim"] == 1
+    assert config["models"]["reward_dim"] == 1
+    assert config["models"]["q_dim"] == 1
     assert config["models"]["pred_action_bidirectional"] is True
 
 
@@ -29,7 +30,7 @@ def test_800m_parameter_count():
     with init_empty_weights():
         model = Flux2FACTModel(params, action_dim=14, state_dim=14, max_horizon=48)
     count = sum(parameter.numel() for parameter in model.parameters())
-    assert count == 791_333_376
+    assert count == 791_337_984
 
 
 def test_existing_legacy_experiment_preserves_causal_pred_action(tmp_path, monkeypatch):

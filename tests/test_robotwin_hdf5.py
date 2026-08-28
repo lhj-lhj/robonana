@@ -2,6 +2,7 @@ import json
 
 import h5py
 import numpy as np
+import pytest
 import torch
 
 from fact_datasets.datasets import ConcatDataset
@@ -9,6 +10,7 @@ from robonana.data.robotwin_hdf5 import (
     RoboTwinEpisodeSampler,
     RoboTwinHDF5Dataset,
     RoboTwinMixtureSampler,
+    mac_success_targets,
 )
 
 
@@ -19,7 +21,6 @@ def _stats(dim=14):
         "norm_stats": {
             "observation.state": {"mean": zeros, "std": ones},
             "action": {"mean": zeros, "std": ones},
-            "value": {"min": [-1.0], "max": [2.0]},
         }
     }
 
@@ -127,7 +128,7 @@ def _write_minimal_dataset(root, task, variant, *, success=True, policy_value=No
     )
 
 
-def test_failure_rollout_uses_policy_action_and_disables_action_loss(tmp_path):
+def test_mc_success_pretraining_rejects_failure_only_dataset(tmp_path):
     dataset = _write_minimal_dataset(
         tmp_path / "rollout",
         "task",
@@ -135,10 +136,8 @@ def test_failure_rollout_uses_policy_action_and_disables_action_loss(tmp_path):
         success=False,
         policy_value=2.0,
     )
-    sample = dataset[0]
-    torch.testing.assert_close(sample["action"], torch.full((48, 14), 2.0))
-    assert sample["action_loss_mask"].item() == 0.0
-    assert sample["failure_episode_mask"].item() == 1.0
+    with pytest.raises(FileNotFoundError, match="successful episode"):
+        len(dataset)
 
 
 def test_mixture_sampler_keeps_roots_separate_and_respects_weights(tmp_path):
@@ -157,7 +156,7 @@ def test_mixture_sampler_keeps_roots_separate_and_respects_weights(tmp_path):
     assert all(index >= len(initial) for index in indices)
 
 
-def test_future_state_and_value_follow_the_sampled_horizon_not_chunk_end(tmp_path):
+def test_future_state_reward_and_mc_q_follow_mac_targets(tmp_path):
     root = tmp_path / "hf_dataset"
     task_dir = root / "task" / "aloha-agilex_clean_50"
     (task_dir / "data").mkdir(parents=True)
@@ -185,8 +184,30 @@ def test_future_state_and_value_follow_the_sampled_horizon_not_chunk_end(tmp_pat
     assert [sample["future_index"].item() for sample in samples] == [1, 3]
     torch.testing.assert_close(samples[0]["future_state"], torch.from_numpy(vectors[1]))
     torch.testing.assert_close(samples[1]["future_state"], torch.from_numpy(vectors[3]))
-    expected_raw_time_to_go = (0.75, 0.25)
-    expected_normalized = [((value + 1.0) / 3.0) * 2.0 - 1.0 for value in expected_raw_time_to_go]
-    torch.testing.assert_close(samples[0]["value"], torch.tensor([expected_normalized[0]]))
-    torch.testing.assert_close(samples[1]["value"], torch.tensor([expected_normalized[1]]))
-    assert not torch.equal(samples[0]["value"], samples[1]["value"])
+    torch.testing.assert_close(samples[0]["reward"], torch.tensor([-1.0]))
+    torch.testing.assert_close(samples[1]["reward"], torch.tensor([-2.997001]))
+    expected_q = -sum(0.999**offset for offset in range(4))
+    torch.testing.assert_close(samples[0]["q"], torch.tensor([expected_q]))
+    torch.testing.assert_close(samples[1]["q"], torch.tensor([expected_q]))
+    assert samples[0]["delta"].item() == 1
+    assert samples[1]["delta"].item() == 3
+
+
+def test_mac_targets_clip_tail_and_terminal_has_zero_reward_and_q():
+    future_index, delta, reward, q = mac_success_targets(
+        frame_index=3,
+        horizon_idx=48,
+        episode_length=5,
+    )
+    assert (future_index, delta) == (4, 1)
+    assert reward == pytest.approx(-1.0)
+    assert q == pytest.approx(-1.0)
+
+    future_index, delta, reward, q = mac_success_targets(
+        frame_index=4,
+        horizon_idx=48,
+        episode_length=5,
+    )
+    assert (future_index, delta) == (4, 0)
+    assert reward == 0.0
+    assert q == 0.0

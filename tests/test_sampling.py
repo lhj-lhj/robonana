@@ -41,25 +41,33 @@ def test_two_stage_sampler_feeds_clean_action_into_world_stage():
     clean_action = torch.tensor([[1.0, 2.0]])
     clean_future = torch.tensor([[3.0, 4.0]])
     clean_state = torch.tensor([[5.0]])
-    clean_value = torch.tensor([[6.0]])
+    clean_reward = torch.tensor([[6.0]])
+    clean_q = torch.tensor([[7.0]])
     action_noise = torch.tensor([[7.0, 8.0]])
     future_noise = torch.tensor([[9.0, 10.0]])
     state_noise = torch.tensor([[11.0]])
-    value_noise = torch.tensor([[12.0]])
+    reward_noise = torch.tensor([[12.0]])
+    q_noise = torch.tensor([[13.0]])
     world_actions = []
 
     def predict_action(sample, sigma):
         return action_noise - clean_action
 
-    def predict_world(future, state, value, action, sigma):
+    def predict_world(future, state, reward, q, action, sigma):
         world_actions.append(action.clone())
-        return future_noise - clean_future, state_noise - clean_state, value_noise - clean_value
+        return (
+            future_noise - clean_future,
+            state_noise - clean_state,
+            reward_noise - clean_reward,
+            q_noise - clean_q,
+        )
 
     result = sample_two_stage_flow(
         action_noise=action_noise,
         future_noise=future_noise,
         future_state_noise=state_noise,
-        value_noise=value_noise,
+        reward_noise=reward_noise,
+        q_noise=q_noise,
         schedule=schedule,
         predict_action=predict_action,
         predict_world=predict_world,
@@ -67,7 +75,8 @@ def test_two_stage_sampler_feeds_clean_action_into_world_stage():
     torch.testing.assert_close(result.action, clean_action)
     torch.testing.assert_close(result.future, clean_future)
     torch.testing.assert_close(result.future_state, clean_state)
-    torch.testing.assert_close(result.value, clean_value)
+    torch.testing.assert_close(result.reward, clean_reward)
+    torch.testing.assert_close(result.q, clean_q)
     assert len(world_actions) == 4
     assert all(torch.equal(action, clean_action) for action in world_actions)
 
@@ -77,26 +86,35 @@ def test_world_sampler_uses_supplied_gt_action_without_action_sampling():
     clean_action = torch.tensor([[1.0, 2.0]])
     clean_future = torch.tensor([[3.0, 4.0]])
     clean_state = torch.tensor([[5.0]])
-    clean_value = torch.tensor([[6.0]])
+    clean_reward = torch.tensor([[6.0]])
+    clean_q = torch.tensor([[7.0]])
     future_noise = torch.tensor([[9.0, 10.0]])
     state_noise = torch.tensor([[11.0]])
-    value_noise = torch.tensor([[12.0]])
+    reward_noise = torch.tensor([[12.0]])
+    q_noise = torch.tensor([[13.0]])
     world_actions = []
 
-    def predict_world(future, state, value, action, sigma):
+    def predict_world(future, state, reward, q, action, sigma):
         world_actions.append(action.clone())
-        return future_noise - clean_future, state_noise - clean_state, value_noise - clean_value
+        return (
+            future_noise - clean_future,
+            state_noise - clean_state,
+            reward_noise - clean_reward,
+            q_noise - clean_q,
+        )
 
     result = sample_world_flow(
         clean_action=clean_action,
         future_noise=future_noise,
         future_state_noise=state_noise,
-        value_noise=value_noise,
+        reward_noise=reward_noise,
+        q_noise=q_noise,
         schedule=schedule,
         predict_world=predict_world,
     )
     torch.testing.assert_close(result.future, clean_future)
     torch.testing.assert_close(result.future_state, clean_state)
-    torch.testing.assert_close(result.value, clean_value)
+    torch.testing.assert_close(result.reward, clean_reward)
+    torch.testing.assert_close(result.q, clean_q)
     assert len(world_actions) == 4
     assert all(torch.equal(action, clean_action) for action in world_actions)

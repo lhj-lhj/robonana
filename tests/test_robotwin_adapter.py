@@ -8,9 +8,9 @@ import numpy as np
 
 import robonana_robotwin_client
 from robonana_robotwin_client import (
-    _ChunkValueOverlayStream,
+    _ChunkReturnOverlayStream,
     _align_eval_instruction_with_training,
-    _install_chunk_value_hook,
+    _install_chunk_return_hook,
     _install_sampling_seed_hook,
     _save_pending_stage2_image,
     _seed_python_random,
@@ -66,23 +66,25 @@ def test_fact_request_hook_forwards_sampling_seed() -> None:
     assert model._build_request({"value": 7}) == {"value": 7, "sampling_seed": 1234}
 
 
-def test_fact_response_hook_retains_one_value_for_the_action_chunk() -> None:
+def test_fact_response_hook_retains_reward_and_q_for_the_action_chunk() -> None:
     class FakeClient:
         @staticmethod
         def inference(request):
             return {
                 "action": np.zeros((3, 2), dtype=np.float32),
-                "chunk_value": 0.625,
-                "value_horizon": 24,
+                "chunk_reward": -3.0,
+                "chunk_q": -7.0,
+                "return_horizon": 24,
                 "images": np.zeros((1, 3, 1, 4, 8), dtype=np.float32),
             }
 
     model = SimpleNamespace(client=FakeClient())
-    _install_chunk_value_hook(model)
+    _install_chunk_return_hook(model)
 
     model.client.inference({"observation": 1})
-    assert model._robonana_chunk_value == 0.625
-    assert model._robonana_value_horizon == 24
+    assert model._robonana_chunk_reward == -3.0
+    assert model._robonana_chunk_q == -7.0
+    assert model._robonana_return_horizon == 24
     assert model._robonana_chunk_index == 0
     assert model._robonana_pending_stage2_image.shape == (1, 3, 1, 4, 8)
 
@@ -93,7 +95,7 @@ def test_stage2_image_is_saved_once_per_new_chunk(tmp_path, monkeypatch) -> None
     model = SimpleNamespace(
         _robonana_pending_stage2_image=np.zeros((1, 3, 1, 4, 8), dtype=np.float32),
         _robonana_chunk_index=2,
-        _robonana_value_horizon=24,
+        _robonana_return_horizon=24,
     )
 
     output = _save_pending_stage2_image(task, model)
@@ -103,14 +105,14 @@ def test_stage2_image_is_saved_once_per_new_chunk(tmp_path, monkeypatch) -> None
     assert _save_pending_stage2_image(task, model) is None
 
 
-def test_video_overlay_reuses_chunk_value_for_every_raw_frame(monkeypatch) -> None:
+def test_video_overlay_reuses_chunk_return_for_every_raw_frame(monkeypatch) -> None:
     labels = []
 
     def fake_overlay(frame, label):
         labels.append(label)
         return frame
 
-    monkeypatch.setattr(robonana_robotwin_client, "_overlay_value", fake_overlay)
+    monkeypatch.setattr(robonana_robotwin_client, "_overlay_return", fake_overlay)
     task = SimpleNamespace(
         now_obs={
             "observation": {
@@ -119,20 +121,21 @@ def test_video_overlay_reuses_chunk_value_for_every_raw_frame(monkeypatch) -> No
         }
     )
     model = SimpleNamespace(
-        _robonana_chunk_value=0.75,
-        _robonana_value_horizon=24,
+        _robonana_chunk_reward=-3.0,
+        _robonana_chunk_q=-7.0,
+        _robonana_return_horizon=24,
         _robonana_chunk_index=2,
     )
     output = io.BytesIO()
-    stream = _ChunkValueOverlayStream(output, task, model)
+    stream = _ChunkReturnOverlayStream(output, task, model)
     frame = np.zeros((3, 4, 3), dtype=np.uint8).tobytes()
 
     stream.write(frame + frame)
 
     assert output.getvalue() == frame + frame
     assert labels == [
-        "chunk=002  h=24  value=0.7500",
-        "chunk=002  h=24  value=0.7500",
+        "chunk=002  h=24  reward=-3.0000  Q=-7.0000",
+        "chunk=002  h=24  reward=-3.0000  Q=-7.0000",
     ]
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import warnings
 
 import torch
 from safetensors.torch import load_file
@@ -17,12 +18,22 @@ from .flux2_fact import Flux2FACTModel
 ROBOT_MODULE_NAMES = (
     "action_in",
     "state_in",
-    "value_in",
+    "reward_in",
+    "q_in",
     "horizon_embed",
     "segment_embed",
+    "q_segment_embed",
     "action_out",
     "state_out",
-    "value_out",
+    "reward_out",
+    "q_out",
+)
+REWARD_Q_MODULE_NAMES = (
+    "reward_in",
+    "q_in",
+    "q_segment_embed",
+    "reward_out",
+    "q_out",
 )
 OPTIONAL_DINO_MODULE_NAMES = (
     "dino_in",
@@ -65,7 +76,8 @@ def initialize_flux2_fact_model(
     *,
     action_dim: int,
     state_dim: int,
-    value_dim: int = 1,
+    reward_dim: int = 1,
+    q_dim: int = 1,
     max_horizon: int = 64,
     dino_dim: int | None = None,
     pred_action_bidirectional: bool = False,
@@ -79,7 +91,8 @@ def initialize_flux2_fact_model(
         params,
         action_dim=action_dim,
         state_dim=state_dim,
-        value_dim=value_dim,
+        reward_dim=reward_dim,
+        q_dim=q_dim,
         max_horizon=max_horizon,
         dino_dim=dino_dim,
         pred_action_bidirectional=pred_action_bidirectional,
@@ -92,7 +105,8 @@ def load_flux2_fact_checkpoint(
     *,
     action_dim: int,
     state_dim: int,
-    value_dim: int = 1,
+    reward_dim: int = 1,
+    q_dim: int = 1,
     max_horizon: int = 64,
     dino_dim: int | None = None,
     pred_action_bidirectional: bool = False,
@@ -113,7 +127,8 @@ def load_flux2_fact_checkpoint(
             params,
             action_dim=action_dim,
             state_dim=state_dim,
-            value_dim=value_dim,
+            reward_dim=reward_dim,
+            q_dim=q_dim,
             max_horizon=max_horizon,
             dino_dim=dino_dim,
             pred_action_bidirectional=pred_action_bidirectional,
@@ -152,7 +167,8 @@ def load_flux2_fact_trained_checkpoint(
     *,
     action_dim: int | None = None,
     state_dim: int | None = None,
-    value_dim: int | None = None,
+    reward_dim: int | None = None,
+    q_dim: int | None = None,
     max_horizon: int | None = None,
     dino_dim: int | None = None,
     pred_action_bidirectional: bool | None = None,
@@ -173,7 +189,8 @@ def load_flux2_fact_trained_checkpoint(
         params=params,
         action_dim=action_dim,
         state_dim=state_dim,
-        value_dim=value_dim,
+        reward_dim=reward_dim,
+        q_dim=q_dim,
         max_horizon=max_horizon,
         dino_dim=dino_dim,
         pred_action_bidirectional=pred_action_bidirectional,
@@ -185,19 +202,56 @@ def load_flux2_fact_trained_checkpoint(
             model_config.params,
             action_dim=model_config.action_dim,
             state_dim=model_config.state_dim,
-            value_dim=model_config.value_dim,
+            reward_dim=model_config.reward_dim,
+            q_dim=model_config.q_dim,
             max_horizon=model_config.max_horizon,
             dino_dim=model_config.dino_dim,
             pred_action_bidirectional=model_config.pred_action_bidirectional,
         ).to(dtype=dtype)
 
     checkpoint_parameters = sum(tensor.numel() for tensor in state_dict.values())
-    incompatible = model.load_state_dict(state_dict, strict=True, assign=True)
-    if incompatible.missing_keys or incompatible.unexpected_keys:
-        raise RuntimeError(
-            "trained checkpoint does not exactly match RoboNana: "
-            f"missing={incompatible.missing_keys}, unexpected={incompatible.unexpected_keys}"
+    legacy_value_keys = tuple(
+        name
+        for name in state_dict
+        if name.startswith("value_in.") or name.startswith("value_out.")
+    )
+    initialized_robot_parameters: tuple[str, ...] = ()
+    if legacy_value_keys:
+        warnings.warn(
+            "Legacy RoboNana value_in/value_out weights are intentionally skipped; "
+            "reward_in/reward_out and q_in/q_out are newly initialized and no "
+            "time-to-go weights are mapped to Q.",
+            UserWarning,
+            stacklevel=2,
         )
+        filtered_state_dict = {
+            name: tensor for name, tensor in state_dict.items() if name not in legacy_value_keys
+        }
+        incompatible = model.load_state_dict(filtered_state_dict, strict=False, assign=True)
+        expected_missing = {
+            name
+            for name, _ in model.named_parameters()
+            if name.split(".", 1)[0] in REWARD_Q_MODULE_NAMES
+        }
+        actual_missing = set(incompatible.missing_keys)
+        if incompatible.unexpected_keys or actual_missing != expected_missing:
+            raise RuntimeError(
+                "legacy trained checkpoint does not match RoboNana outside value heads: "
+                f"missing={sorted(actual_missing)}, "
+                f"unexpected={sorted(incompatible.unexpected_keys)}"
+            )
+        for module_name in REWARD_Q_MODULE_NAMES:
+            module = getattr(model, module_name)
+            module.to_empty(device=device)
+            module.reset_parameters()
+        initialized_robot_parameters = tuple(sorted(expected_missing))
+    else:
+        incompatible = model.load_state_dict(state_dict, strict=True, assign=True)
+        if incompatible.missing_keys or incompatible.unexpected_keys:
+            raise RuntimeError(
+                "trained checkpoint does not exactly match RoboNana: "
+                f"missing={incompatible.missing_keys}, unexpected={incompatible.unexpected_keys}"
+            )
     model.to(device=device, dtype=dtype)
     meta_parameters = [name for name, parameter in model.named_parameters() if parameter.is_meta]
     if meta_parameters:
@@ -205,6 +259,6 @@ def load_flux2_fact_trained_checkpoint(
     return model, PretrainedLoadReport(
         checkpoint=str(path),
         checkpoint_parameters=checkpoint_parameters,
-        initialized_robot_parameters=(),
+        initialized_robot_parameters=initialized_robot_parameters,
         model_config=model_config,
     )

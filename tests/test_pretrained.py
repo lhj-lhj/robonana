@@ -30,6 +30,17 @@ def _tiny_params():
     )
 
 
+def _legacy_value_state_dict(model: Flux2FACTModel):
+    state = dict(model.state_dict())
+    state["value_in.weight"] = state.pop("reward_in.weight")
+    state["value_out.weight"] = state.pop("reward_out.weight")
+    for prefix in ("q_in.", "q_out.", "q_segment_embed."):
+        for name in tuple(state):
+            if name.startswith(prefix):
+                state.pop(name)
+    return state
+
+
 def test_official_flux_checkpoint_loads_and_only_robot_modules_are_new(tmp_path):
     torch.manual_seed(0)
     base = Flux2(_tiny_params())
@@ -62,7 +73,6 @@ def test_full_trained_checkpoint_loads_exactly_from_fact_export(tmp_path):
         _tiny_params(),
         action_dim=6,
         state_dim=6,
-        value_dim=1,
         max_horizon=8,
     )
     checkpoint = tmp_path / "diffusion_pytorch_model.bin"
@@ -72,7 +82,8 @@ def test_full_trained_checkpoint_loads_exactly_from_fact_export(tmp_path):
         checkpoint,
         action_dim=6,
         state_dim=6,
-        value_dim=1,
+        reward_dim=1,
+        q_dim=1,
         max_horizon=8,
         device="cpu",
         dtype=torch.float32,
@@ -90,7 +101,6 @@ def test_standalone_trained_checkpoint_requires_exact_model_config(tmp_path):
         _tiny_params(),
         action_dim=6,
         state_dim=5,
-        value_dim=2,
         max_horizon=8,
     )
     checkpoint = tmp_path / "standalone.bin"
@@ -113,7 +123,6 @@ def test_trained_checkpoint_discovers_fact_project_config(tmp_path):
         _tiny_params(),
         action_dim=6,
         state_dim=5,
-        value_dim=2,
         max_horizon=8,
         pred_action_bidirectional=True,
     )
@@ -126,7 +135,8 @@ def test_trained_checkpoint_discovers_fact_project_config(tmp_path):
                     "params": asdict(_tiny_params()),
                     "action_dim": 6,
                     "state_dim": 5,
-                    "value_dim": 2,
+                    "reward_dim": 1,
+                    "q_dim": 1,
                     "max_horizon": 8,
                     "pred_action_bidirectional": True,
                 }
@@ -156,10 +166,9 @@ def test_legacy_project_config_defaults_to_causal_pred_action(tmp_path):
         _tiny_params(),
         action_dim=6,
         state_dim=5,
-        value_dim=1,
         max_horizon=8,
     )
-    torch.save(expected.state_dict(), checkpoint)
+    torch.save(_legacy_value_state_dict(expected), checkpoint)
     config_path = project / "config.json"
     config_path.write_text(
         json.dumps(
@@ -176,14 +185,22 @@ def test_legacy_project_config_defaults_to_causal_pred_action(tmp_path):
         encoding="utf-8",
     )
 
-    actual, report = load_flux2_fact_trained_checkpoint(
-        checkpoint,
-        device="cpu",
-        dtype=torch.float32,
-    )
+    with pytest.warns(UserWarning, match="value_in/value_out"):
+        actual, report = load_flux2_fact_trained_checkpoint(
+            checkpoint,
+            device="cpu",
+            dtype=torch.float32,
+        )
 
     assert actual.pred_action_bidirectional is False
     assert report.model_config.pred_action_bidirectional is False
+    assert report.model_config.legacy_value_dim == 1
+    assert any(name.startswith("reward_in.") for name in report.initialized_robot_parameters)
+    assert any(name.startswith("q_in.") for name in report.initialized_robot_parameters)
+    new_return_prefixes = ("reward_in.", "reward_out.", "q_in.", "q_out.", "q_segment_embed.")
+    for name, expected_tensor in expected.state_dict().items():
+        if not name.startswith(new_return_prefixes):
+            torch.testing.assert_close(actual.state_dict()[name], expected_tensor)
 
 
 def test_incomplete_project_config_fails_before_loading_checkpoint(tmp_path):
@@ -205,7 +222,7 @@ def test_incomplete_project_config_fails_before_loading_checkpoint(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="value_dim"):
+    with pytest.raises(ValueError, match="reward_dim and q_dim"):
         load_flux2_fact_trained_checkpoint(
             checkpoint,
             device="cpu",
@@ -222,7 +239,6 @@ def test_dino_checkpoint_architecture_is_recorded_not_shape_inferred(tmp_path):
         _tiny_params(),
         action_dim=6,
         state_dim=5,
-        value_dim=1,
         max_horizon=8,
         dino_dim=12,
     )
@@ -234,7 +250,8 @@ def test_dino_checkpoint_architecture_is_recorded_not_shape_inferred(tmp_path):
                     "params": asdict(_tiny_params()),
                     "action_dim": 6,
                     "state_dim": 5,
-                    "value_dim": 1,
+                    "reward_dim": 1,
+                    "q_dim": 1,
                     "max_horizon": 8,
                     "dino_dim": 12,
                 }

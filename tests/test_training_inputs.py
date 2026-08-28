@@ -1,3 +1,4 @@
+import inspect
 from types import SimpleNamespace
 
 import torch
@@ -15,6 +16,7 @@ from robonana.models.flux2_fact import Flux2FACTModel
 from robonana.sampling import flow_euler_schedule
 from robonana.models.position_ids import dino_position_ids
 from robonana.training.robotwin_trainer import flow_noise, image_position_ids, text_position_ids
+from robonana.training.robotwin_trainer import RoboNanaTrainer
 from world_action_model.pipeline.utils import NormalizationTensors
 
 
@@ -25,6 +27,13 @@ def test_flow_noise_target_reconstructs_clean_sample():
     noisy, target = flow_noise(clean, timestep)
     restored = noisy - target * timestep[:, None, None]
     torch.testing.assert_close(restored, clean)
+
+
+def test_trainer_batch_contract_uses_reward_and_q_not_legacy_value():
+    source = inspect.getsource(RoboNanaTrainer.forward_step)
+    assert 'batch_dict["reward"]' in source
+    assert 'batch_dict["q"]' in source
+    assert 'batch_dict["value"]' not in source
 
 
 def test_flux_position_ids_encode_language_space_and_horizon_time():
@@ -151,7 +160,7 @@ def test_observation_digest_tracks_inputs_not_dictionary_identity():
     )
 
 
-def test_online_policy_returns_denormalized_chunk_value_contract(monkeypatch):
+def test_online_policy_returns_raw_chunk_reward_q_contract(monkeypatch):
     from robonana.inference.robotwin_policy import RoboNanaRobotWinPolicy
 
     zeros = torch.zeros(2)
@@ -163,10 +172,10 @@ def test_online_policy_returns_denormalized_chunk_value_contract(monkeypatch):
     policy.state_dim = 2
     policy.horizon = 24
     policy.inference_mode = InferenceMode.ACTION
-    policy.return_chunk_value = True
+    policy.return_chunk_q = True
     policy.return_stage2_image = True
     policy.delta_mask = torch.tensor([False, False])
-    policy.model = SimpleNamespace(value_dim=1)
+    policy.model = SimpleNamespace(reward_dim=1, q_dim=1)
     policy.normalization = NormalizationTensors(
         state_mean=zeros,
         state_std=ones,
@@ -197,7 +206,8 @@ def test_online_policy_returns_denormalized_chunk_value_contract(monkeypatch):
         lambda **kwargs: SimpleNamespace(
             future=torch.zeros(1, 6, 8),
             future_state=torch.zeros(1, 1, 2),
-            value=torch.zeros(1, 1, 1),
+            reward=torch.tensor([[[-3.0]]]),
+            q=torch.tensor([[[-7.0]]]),
         ),
     )
     monkeypatch.setattr(
@@ -214,14 +224,16 @@ def test_online_policy_returns_denormalized_chunk_value_contract(monkeypatch):
     )
 
     assert response["action"].shape == (3, 2)
-    assert response["chunk_value"] == 0.5
-    assert response["value_horizon"] == 24
-    torch.testing.assert_close(response["values_per_sample"], torch.tensor([0.5]))
+    assert response["chunk_reward"] == -3.0
+    assert response["chunk_q"] == -7.0
+    assert response["return_horizon"] == 24
+    torch.testing.assert_close(response["rewards"], torch.tensor([-3.0]))
+    torch.testing.assert_close(response["qs"], torch.tensor([-7.0]))
     assert response["selected_index"] == 0
     assert response["images"].shape == (1, 3, 1, 4, 8)
 
 
-def test_online_value_sampler_runs_full_world_path_reproducibly():
+def test_online_reward_q_sampler_runs_full_world_path_reproducibly():
     from robonana.inference.robotwin_policy import RoboNanaRobotWinPolicy
 
     params = Flux2Params(
@@ -249,7 +261,8 @@ def test_online_value_sampler_runs_full_world_path_reproducibly():
         params,
         action_dim=4,
         state_dim=3,
-        value_dim=1,
+        reward_dim=1,
+        q_dim=1,
         max_horizon=4,
     ).eval()
     policy.schedule = flow_euler_schedule(1, flow_shift=1.0, device="cpu")
@@ -265,14 +278,17 @@ def test_online_value_sampler_runs_full_world_path_reproducibly():
     second = policy._sample_world(**kwargs)
 
     assert first.future.shape == (1, 2, 8)
-    assert first.value.shape == (1, 1, 1)
+    assert first.reward.shape == (1, 1, 1)
+    assert first.q.shape == (1, 1, 1)
     assert torch.isfinite(first.future).all()
-    assert torch.isfinite(first.value).all()
+    assert torch.isfinite(first.reward).all()
+    assert torch.isfinite(first.q).all()
     torch.testing.assert_close(first.future, second.future)
-    torch.testing.assert_close(first.value, second.value)
+    torch.testing.assert_close(first.reward, second.reward)
+    torch.testing.assert_close(first.q, second.q)
 
 
-def test_packed_stage2_samples_all_values_without_future_image_tokens():
+def test_packed_stage2_samples_all_rewards_and_qs_without_future_image_tokens():
     from robonana.inference.robotwin_policy import RoboNanaRobotWinPolicy
 
     params = Flux2Params(
@@ -298,7 +314,8 @@ def test_packed_stage2_samples_all_values_without_future_image_tokens():
         params,
         action_dim=4,
         state_dim=3,
-        value_dim=1,
+        reward_dim=1,
+        q_dim=1,
         max_horizon=4,
     ).eval()
     policy.schedule = flow_euler_schedule(1, flow_shift=1.0, device="cpu")
@@ -314,9 +331,11 @@ def test_packed_stage2_samples_all_values_without_future_image_tokens():
 
     assert result.future.shape == (1, 4, 0, 8)
     assert result.future_state.shape == (1, 4, 3)
-    assert result.value.shape == (1, 4, 1)
+    assert result.reward.shape == (1, 4, 1)
+    assert result.q.shape == (1, 4, 1)
     assert torch.isfinite(result.future_state).all()
-    assert torch.isfinite(result.value).all()
+    assert torch.isfinite(result.reward).all()
+    assert torch.isfinite(result.q).all()
 
 
 def test_image_stage2_chunks_horizons_and_restores_order():
@@ -334,7 +353,8 @@ def test_image_stage2_chunks_horizons_and_restores_order():
         return SimpleNamespace(
             future=horizons.float().reshape(1, count, 1, 1),
             future_state=horizons.float().reshape(1, count, 1),
-            value=horizons.float().reshape(1, count, 1),
+            reward=horizons.float().reshape(1, count, 1),
+            q=-horizons.float().reshape(1, count, 1),
         )
 
     policy._sample_stage2_chunk = sample_chunk
@@ -349,7 +369,8 @@ def test_image_stage2_chunks_horizons_and_restores_order():
     )
 
     assert calls == [[1, 2], [3, 4], [5]]
-    assert result.value.reshape(-1).tolist() == [1, 2, 3, 4, 5]
+    assert result.reward.reshape(-1).tolist() == [1, 2, 3, 4, 5]
+    assert result.q.reshape(-1).tolist() == [-1, -2, -3, -4, -5]
 
 
 def _mock_policy(mode: InferenceMode):
@@ -365,10 +386,10 @@ def _mock_policy(mode: InferenceMode):
     policy.max_horizon = 3
     policy.horizon = 2
     policy.inference_mode = mode
-    policy.return_chunk_value = False
+    policy.return_chunk_q = False
     policy.return_stage2_image = False
     policy.delta_mask = torch.tensor([False, False])
-    policy.model = SimpleNamespace(value_dim=1)
+    policy.model = SimpleNamespace(reward_dim=1, q_dim=1)
     zeros = torch.zeros(2)
     ones = torch.ones(2)
     policy.normalization = NormalizationTensors(
@@ -389,8 +410,8 @@ def _mock_policy(mode: InferenceMode):
     return policy
 
 
-def test_action_values_mode_runs_stage1_then_all_horizons(monkeypatch):
-    policy = _mock_policy(InferenceMode.ACTION_VALUES)
+def test_action_reward_q_mode_runs_stage1_then_all_horizons(monkeypatch):
+    policy = _mock_policy(InferenceMode.ACTION_REWARD_Q)
     policy._sample_action = lambda **kwargs: torch.zeros(1, 3, 2)
     captured = {}
 
@@ -399,7 +420,8 @@ def test_action_values_mode_runs_stage1_then_all_horizons(monkeypatch):
         return SimpleNamespace(
             future=torch.empty(1, 3, 0, 8),
             future_state=torch.zeros(1, 3, 2),
-            value=torch.tensor([[[-1.0], [0.0], [1.0]]]),
+            reward=torch.tensor([[[-1.0], [-2.0], [-3.0]]]),
+            q=torch.tensor([[[-4.0], [-4.0], [-4.0]]]),
         )
 
     policy._sample_stage2 = sample_stage2
@@ -410,8 +432,10 @@ def test_action_values_mode_runs_stage1_then_all_horizons(monkeypatch):
     assert captured["include_image"] is False
     assert captured["horizons"].tolist() == [1, 2, 3]
     assert response["horizons"].tolist() == [1, 2, 3]
-    torch.testing.assert_close(response["values"], torch.tensor([-1.0, 0.5, 2.0]))
-    assert response["chunk_value"] == 0.5
+    torch.testing.assert_close(response["rewards"], torch.tensor([-1.0, -2.0, -3.0]))
+    torch.testing.assert_close(response["qs"], torch.tensor([-4.0, -4.0, -4.0]))
+    assert response["chunk_reward"] == -2.0
+    assert response["chunk_q"] == -4.0
     assert "future_latents" not in response
     assert "images" not in response
 
@@ -428,7 +452,8 @@ def test_world_horizon_mode_requires_and_uses_external_action_and_horizon():
         return SimpleNamespace(
             future=torch.zeros(1, 1, 2, 8),
             future_state=torch.zeros(1, 1, 2),
-            value=torch.zeros(1, 1, 1),
+            reward=torch.zeros(1, 1, 1),
+            q=torch.zeros(1, 1, 1),
         )
 
     policy._sample_stage2 = sample_stage2

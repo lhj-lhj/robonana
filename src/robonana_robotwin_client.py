@@ -111,18 +111,19 @@ def _response_scalar(value) -> float:
     return float(np.asarray(value).reshape(-1)[0])
 
 
-def _install_chunk_value_hook(model) -> None:
+def _install_chunk_return_hook(model) -> None:
     """Retain server Stage-2 outputs for the full environment action chunk."""
 
-    if getattr(model, "_robonana_chunk_value_hook", False):
+    if getattr(model, "_robonana_chunk_return_hook", False):
         return
     original_inference = model.client.inference
 
-    def inference_with_chunk_value(request):
+    def inference_with_chunk_return(request):
         response = original_inference(request)
-        if isinstance(response, dict) and response.get("chunk_value") is not None:
-            model._robonana_chunk_value = _response_scalar(response["chunk_value"])
-            model._robonana_value_horizon = int(response.get("value_horizon", 0))
+        if isinstance(response, dict) and response.get("chunk_q") is not None:
+            model._robonana_chunk_reward = _response_scalar(response["chunk_reward"])
+            model._robonana_chunk_q = _response_scalar(response["chunk_q"])
+            model._robonana_return_horizon = int(response.get("return_horizon", 0))
             model._robonana_chunk_index = int(
                 getattr(model, "_robonana_chunk_index", -1)
             ) + 1
@@ -131,12 +132,13 @@ def _install_chunk_value_hook(model) -> None:
                 model._robonana_pending_stage2_image = image
         return response
 
-    model.client.inference = inference_with_chunk_value
-    model._robonana_chunk_value = None
-    model._robonana_value_horizon = 0
+    model.client.inference = inference_with_chunk_return
+    model._robonana_chunk_reward = None
+    model._robonana_chunk_q = None
+    model._robonana_return_horizon = 0
     model._robonana_chunk_index = -1
     model._robonana_pending_stage2_image = None
-    model._robonana_chunk_value_hook = True
+    model._robonana_chunk_return_hook = True
 
 
 def _save_pending_stage2_image(task_env, model) -> Path | None:
@@ -161,7 +163,7 @@ def _save_pending_stage2_image(task_env, model) -> Path | None:
     task_name = str(getattr(task_env, "task_name", "unknown_task"))
     episode_index = int(getattr(task_env, "test_num", 0))
     chunk_index = int(getattr(model, "_robonana_chunk_index", 0))
-    horizon = int(getattr(model, "_robonana_value_horizon", 0))
+    horizon = int(getattr(model, "_robonana_return_horizon", 0))
     task_dir = Path(output_root).expanduser().resolve() / task_name / f"episode_{episode_index:06d}"
     task_dir.mkdir(parents=True, exist_ok=True)
     output = task_dir / f"chunk_{chunk_index:03d}_h_{horizon:03d}.png"
@@ -171,7 +173,7 @@ def _save_pending_stage2_image(task_env, model) -> Path | None:
     return output
 
 
-def _overlay_value(frame: np.ndarray, label: str) -> np.ndarray:
+def _overlay_return(frame: np.ndarray, label: str) -> np.ndarray:
     import cv2
 
     output = np.ascontiguousarray(frame).copy()
@@ -205,7 +207,7 @@ def _overlay_value(frame: np.ndarray, label: str) -> np.ndarray:
     return output
 
 
-class _ChunkValueOverlayStream:
+class _ChunkReturnOverlayStream:
     """Annotate each raw RoboTwin RGB frame before it reaches ffmpeg."""
 
     def __init__(self, stream, task_env, model) -> None:
@@ -214,8 +216,9 @@ class _ChunkValueOverlayStream:
         self._model = model
 
     def write(self, data):
-        value = getattr(self._model, "_robonana_chunk_value", None)
-        if value is None:
+        reward = getattr(self._model, "_robonana_chunk_reward", None)
+        q = getattr(self._model, "_robonana_chunk_q", None)
+        if reward is None or q is None:
             return self._stream.write(data)
         try:
             reference = np.asarray(
@@ -227,20 +230,23 @@ class _ChunkValueOverlayStream:
             raw = bytes(data)
             if not raw or len(raw) % frame_bytes:
                 return self._stream.write(data)
-            horizon = int(getattr(self._model, "_robonana_value_horizon", 0))
+            horizon = int(getattr(self._model, "_robonana_return_horizon", 0))
             chunk_index = int(getattr(self._model, "_robonana_chunk_index", 0))
-            label = f"chunk={chunk_index:03d}  h={horizon}  value={float(value):.4f}"
+            label = (
+                f"chunk={chunk_index:03d}  h={horizon}  "
+                f"reward={float(reward):.4f}  Q={float(q):.4f}"
+            )
             annotated = []
             for offset in range(0, len(raw), frame_bytes):
                 frame = np.frombuffer(
                     raw[offset : offset + frame_bytes],
                     dtype=np.uint8,
                 ).reshape(reference.shape)
-                annotated.append(_overlay_value(frame, label).tobytes())
+                annotated.append(_overlay_return(frame, label).tobytes())
             return self._stream.write(b"".join(annotated))
         except Exception as error:
             if not getattr(self, "_warned", False):
-                print(f"[RoboNana video] value overlay disabled for frame: {error}", flush=True)
+                print(f"[RoboNana video] return overlay disabled for frame: {error}", flush=True)
                 self._warned = True
             return self._stream.write(data)
 
@@ -248,13 +254,13 @@ class _ChunkValueOverlayStream:
         return getattr(self._stream, name)
 
 
-def _install_video_value_overlay(task_env, model) -> None:
-    if not _env_bool("ROBONANA_OVERLAY_CHUNK_VALUE", False):
+def _install_video_return_overlay(task_env, model) -> None:
+    if not _env_bool("ROBONANA_OVERLAY_CHUNK_RETURN", False):
         return
     ffmpeg = getattr(task_env, "eval_video_ffmpeg", None)
-    if ffmpeg is None or isinstance(ffmpeg.stdin, _ChunkValueOverlayStream):
+    if ffmpeg is None or isinstance(ffmpeg.stdin, _ChunkReturnOverlayStream):
         return
-    ffmpeg.stdin = _ChunkValueOverlayStream(ffmpeg.stdin, task_env, model)
+    ffmpeg.stdin = _ChunkReturnOverlayStream(ffmpeg.stdin, task_env, model)
 
 
 def _rollout_writer(usr_args) -> RoboTwinRolloutWriter | None:
@@ -296,7 +302,7 @@ def get_model(usr_args):
         fact_args["skip_action_render_sync"] = False
     model = _fact_get_model(fact_args)
     _install_sampling_seed_hook(model)
-    _install_chunk_value_hook(model)
+    _install_chunk_return_hook(model)
     model._robonana_rollout_writer = writer
     if writer is not None:
         atexit.register(_finish_pending_rollout, model)
@@ -307,8 +313,9 @@ def get_model(usr_args):
 def reset_model(model) -> None:
     _finish_pending_rollout(model)
     _fact_reset_model(model)
-    model._robonana_chunk_value = None
-    model._robonana_value_horizon = 0
+    model._robonana_chunk_reward = None
+    model._robonana_chunk_q = None
+    model._robonana_return_horizon = 0
     model._robonana_chunk_index = -1
     model._robonana_pending_stage2_image = None
 
@@ -322,7 +329,7 @@ def _episode_seed(task_env) -> int | None:
 
 def eval(TASK_ENV, model, observation):  # noqa: A001,N803
     _align_eval_instruction_with_training(TASK_ENV)
-    _install_video_value_overlay(TASK_ENV, model)
+    _install_video_return_overlay(TASK_ENV, model)
     step = int(getattr(TASK_ENV, "take_action_cnt", 0))
     episode_seed = _episode_seed(TASK_ENV)
     if episode_seed is not None and model.needs_new_plan(step):

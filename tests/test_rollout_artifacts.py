@@ -27,7 +27,7 @@ def test_decoded_frame_roundtrip_and_composite_split():
     torch.testing.assert_close(split[ROBOTWIN_VIEW_KEYS[2]], right)
 
 
-def test_value_annotation_does_not_modify_feedback_frame():
+def test_return_annotation_does_not_modify_feedback_frame():
     frame = torch.zeros(3, 192, 384, dtype=torch.uint8)
     original = frame.clone()
 
@@ -37,7 +37,8 @@ def test_value_annotation_does_not_modify_feedback_frame():
         rollout_index=3,
         rollout_count=5,
         horizon=48,
-        value=0.625,
+        reward=-3.0,
+        q=-7.0,
     )
 
     assert annotated.size == (384, 192)

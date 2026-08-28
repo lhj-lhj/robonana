@@ -21,7 +21,8 @@ def test_joint_loss_adds_dino_only_when_target_is_present():
         image=zeros,
         action=zeros,
         future_state=zeros,
-        value=zeros,
+        reward=zeros,
+        q=zeros,
         dino=torch.ones(2, 3, 4),
     )
     losses = joint_flow_loss(
@@ -29,7 +30,16 @@ def test_joint_loss_adds_dino_only_when_target_is_present():
         image_target=zeros,
         action_target=zeros,
         future_state_target=zeros,
-        value_target=zeros,
+        reward_target=zeros,
+        q_target=zeros,
         dino_target=torch.zeros(2, 3, 4),
     )
     assert losses["dino_loss"].item() == 1.0
+    assert set(losses) == {
+        "image_loss",
+        "action_loss",
+        "future_state_loss",
+        "reward_loss",
+        "q_loss",
+        "dino_loss",
+    }

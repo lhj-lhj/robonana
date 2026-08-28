@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -39,9 +38,7 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
     def _validate_action_only_batch(self) -> None:
         if self.inference_mode is not InferenceMode.ACTION:
             raise ValueError("batched RoboTwin eval currently requires inference_mode='action'")
-        if bool(getattr(self, "return_chunk_value", False)) or bool(
-            getattr(self, "return_chunk_q", False)
-        ) or self.return_stage2_image:
+        if bool(getattr(self, "return_chunk_q", False)) or self.return_stage2_image:
             raise ValueError(
                 "batched RoboTwin eval is Stage-1-only; disable auxiliary Stage-2 returns"
             )
@@ -180,26 +177,7 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
             ],
             dim=0,
         )
-        forward_parameters = inspect.signature(self.model.forward).parameters
-        uses_reward_q = "noisy_reward" in forward_parameters
-
         def predict_action(sampled_action: Tensor, sigma: Tensor) -> Tensor:
-            head_inputs: dict[str, Tensor]
-            if uses_reward_q:
-                head_inputs = {
-                    "noisy_reward": torch.zeros(
-                        batch_size, 0, 1, device=self.model_device, dtype=self.dtype
-                    ),
-                    "noisy_q": torch.zeros(
-                        batch_size, 0, 1, device=self.model_device, dtype=self.dtype
-                    ),
-                }
-            else:
-                head_inputs = {
-                    "noisy_value": torch.zeros(
-                        batch_size, 0, 1, device=self.model_device, dtype=self.dtype
-                    )
-                }
             output = self.model(
                 context=context,
                 context_ids=context_ids,
@@ -212,10 +190,15 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
                 gt_action_cond=clean_gt_action,
                 horizon_idx=horizon,
                 noisy_future_state=empty_state,
+                noisy_reward=torch.zeros(
+                    batch_size, 0, 1, device=self.model_device, dtype=self.dtype
+                ),
+                noisy_q=torch.zeros(
+                    batch_size, 0, 1, device=self.model_device, dtype=self.dtype
+                ),
                 action_timestep=sigma.expand(batch_size),
                 wm_timestep=clean_wm_time,
                 context_mask=context_mask,
-                **head_inputs,
             )
             return output.action
 
