@@ -65,6 +65,9 @@ def test_fact_tcp_server_batches_two_persistent_clients():
             self.batch_sizes.append(len(observations))
             return [{"action": observation["id"]} for observation in observations]
 
+        def inference(self, observation):
+            raise AssertionError("multi-client test must use inference_batch")
+
     policy = FakePolicy()
     server = DynamicBatchRobotInferenceServer(
         policy,
