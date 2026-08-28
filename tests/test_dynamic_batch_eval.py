@@ -1,10 +1,14 @@
 from concurrent.futures import ThreadPoolExecutor
+import inspect
 import pytest
 import torch
+from flux2.model import Flux2Params
 
 from robonana.inference.batched_policy import BatchedRoboNanaRobotWinPolicy
 from robonana.inference.dynamic_batch_server import DynamicInferenceBatcher
 from robonana.inference.robotwin_policy import InferenceMode
+from robonana.models.flux2_fact import Flux2FACTModel
+from robonana.sampling import flow_euler_schedule
 from world_action_model.pipeline.utils import NormalizationTensors
 
 
@@ -91,3 +95,50 @@ def test_batched_policy_returns_one_action_chunk_per_observation():
     assert len(responses) == 2
     assert all(response["action"].shape == (3, 2) for response in responses)
     assert responses[0]["_policy_timing_ms"]["batch_size"] == 2
+
+
+def test_stage1_sampler_executes_one_true_model_batch():
+    params = Flux2Params(
+        in_channels=8,
+        context_in_dim=16,
+        hidden_size=32,
+        num_heads=4,
+        depth=1,
+        depth_single_blocks=1,
+        axes_dim=[2, 2, 2, 2],
+        mlp_ratio=2.0,
+        use_guidance_embed=False,
+    )
+    policy = object.__new__(BatchedRoboNanaRobotWinPolicy)
+    policy.model_device = torch.device("cpu")
+    policy.dtype = torch.float32
+    policy.horizon = 2
+    policy.action_chunk = 3
+    policy.grid_height = 1
+    policy.grid_width = 2
+    policy.state_dim = 3
+    policy.action_dim = 4
+    model_head_kwargs = (
+        {"reward_dim": 1, "q_dim": 1}
+        if "reward_dim" in inspect.signature(Flux2FACTModel).parameters
+        else {"value_dim": 1}
+    )
+    policy.model = Flux2FACTModel(
+        params,
+        action_dim=4,
+        state_dim=3,
+        max_horizon=4,
+        **model_head_kwargs,
+    ).eval()
+    policy.schedule = flow_euler_schedule(1, flow_shift=1.0, device="cpu")
+
+    action = policy._sample_action_batch(
+        context=torch.randn(2, 3, 16),
+        context_mask=torch.tensor([[True, True, True], [True, True, False]]),
+        current=torch.randn(2, 2, 8),
+        state=torch.randn(2, 1, 3),
+        sampling_seeds=[17, 23],
+    )
+
+    assert action.shape == (2, 3, 4)
+    assert torch.isfinite(action).all()

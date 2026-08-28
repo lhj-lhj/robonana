@@ -93,6 +93,8 @@ class DynamicInferenceBatcher:
             else:
                 for item, result in zip(batch, results, strict=True):
                     item.future.set_result(result)
+            if self._closed:
+                break
 
 
 class DynamicBatchRobotInferenceServer(RobotInferenceServer):
@@ -149,4 +151,3 @@ class DynamicBatchRobotInferenceServer(RobotInferenceServer):
             self._batcher.close()
             for thread in list(self._connection_threads):
                 thread.join(timeout=5.0)
-
