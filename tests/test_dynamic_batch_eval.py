@@ -1,15 +1,21 @@
 from concurrent.futures import ThreadPoolExecutor
 import inspect
+import threading
+
 import pytest
 import torch
 from flux2.model import Flux2Params
 
 from robonana.inference.batched_policy import BatchedRoboNanaRobotWinPolicy
-from robonana.inference.dynamic_batch_server import DynamicInferenceBatcher
+from robonana.inference.dynamic_batch_server import (
+    DynamicBatchRobotInferenceServer,
+    DynamicInferenceBatcher,
+)
 from robonana.inference.robotwin_policy import InferenceMode
 from robonana.models.flux2_fact import Flux2FACTModel
 from robonana.sampling import flow_euler_schedule
 from world_action_model.pipeline.utils import NormalizationTensors
+from world_action_model.sockets import RobotInferenceClient
 
 
 def test_dynamic_batcher_coalesces_concurrent_requests():
@@ -50,9 +56,55 @@ def test_dynamic_batcher_propagates_policy_errors_to_every_request():
         batcher.close()
 
 
+def test_fact_tcp_server_batches_two_persistent_clients():
+    class FakePolicy:
+        def __init__(self):
+            self.batch_sizes = []
+
+        def inference_batch(self, observations):
+            self.batch_sizes.append(len(observations))
+            return [{"action": observation["id"]} for observation in observations]
+
+    policy = FakePolicy()
+    server = DynamicBatchRobotInferenceServer(
+        policy,
+        host="127.0.0.1",
+        port=0,
+        max_batch_size=2,
+        max_wait_ms=100,
+        max_clients=4,
+    )
+    port = server.server_socket.getsockname()[1]
+    server_thread = threading.Thread(target=server.run, daemon=True)
+    server_thread.start()
+
+    def infer(request_id):
+        client = RobotInferenceClient(host="127.0.0.1", port=port, timeout_ms=2000)
+        try:
+            return client.inference({"id": request_id})
+        finally:
+            client.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(infer, index) for index in range(2)]
+        results = [future.result(timeout=3) for future in futures]
+
+    stop_client = RobotInferenceClient(host="127.0.0.1", port=port, timeout_ms=2000)
+    try:
+        stop_client.kill_server()
+    finally:
+        stop_client.close()
+    server_thread.join(timeout=3)
+
+    assert not server_thread.is_alive()
+    assert sorted(result["action"] for result in results) == [0, 1]
+    assert policy.batch_sizes == [2]
+
+
 def test_batched_policy_returns_one_action_chunk_per_observation():
     policy = object.__new__(BatchedRoboNanaRobotWinPolicy)
     policy.inference_mode = InferenceMode.ACTION
+    policy.return_chunk_q = False
     policy.return_stage2_image = False
     policy.model_device = torch.device("cpu")
     policy.vae_device = torch.device("cpu")
