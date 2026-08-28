@@ -60,11 +60,42 @@ if (( jobs_per_gpu > 1 )) && [[ "${aux_outputs}" != "0" ]]; then
 fi
 
 step_limits="${robotwin_path}/task_config/_eval_step_limit.yml"
-mapfile -t tasks < <(grep -oE '^[a-z0-9_]+:' "${step_limits}" | tr -d ':')
-if [[ ${#tasks[@]} -ne 50 ]]; then
-  echo "Expected exactly 50 RoboTwin eval tasks, found ${#tasks[@]}" >&2
+mapfile -t all_tasks < <(grep -oE '^[a-z0-9_]+:' "${step_limits}" | tr -d ':')
+if [[ ${#all_tasks[@]} -ne 50 ]]; then
+  echo "Expected exactly 50 RoboTwin eval tasks, found ${#all_tasks[@]}" >&2
   exit 2
 fi
+tasks=("${all_tasks[@]}")
+if [[ -n "${ROBONANA_EVAL_TASKS:-}" ]]; then
+  declare -A known_tasks=()
+  declare -A selected_tasks=()
+  for task_name in "${all_tasks[@]}"; do
+    known_tasks["${task_name}"]=1
+  done
+  IFS=',' read -r -a requested_tasks <<< "${ROBONANA_EVAL_TASKS}"
+  tasks=()
+  for task_name in "${requested_tasks[@]}"; do
+    task_name=${task_name//[[:space:]]/}
+    if [[ -z "${task_name}" ]]; then
+      continue
+    fi
+    if [[ -z "${known_tasks[${task_name}]:-}" ]]; then
+      echo "Unknown RoboTwin task in ROBONANA_EVAL_TASKS: ${task_name}" >&2
+      exit 2
+    fi
+    if [[ -n "${selected_tasks[${task_name}]:-}" ]]; then
+      echo "Duplicate RoboTwin task in ROBONANA_EVAL_TASKS: ${task_name}" >&2
+      exit 2
+    fi
+    selected_tasks["${task_name}"]=1
+    tasks+=("${task_name}")
+  done
+  if [[ ${#tasks[@]} -eq 0 ]]; then
+    echo "ROBONANA_EVAL_TASKS did not contain any task names" >&2
+    exit 2
+  fi
+fi
+expected_task_count=${#tasks[@]}
 
 mkdir -p "${run_dir}/workers" "${run_dir}/value_traces" "${run_dir}/stage2_images"
 [[ -e "${run_dir}/.started" ]] || touch "${run_dir}/.started"
@@ -327,10 +358,10 @@ result_tasks=$(awk 'END {print NR-1}' "${results_csv}")
 mp4_count=$(wc -l < "${run_dir}/mp4_manifest.txt")
 value_trace_count=$(wc -l < "${run_dir}/value_trace_manifest.txt")
 stage2_image_count=$(wc -l < "${run_dir}/stage2_image_manifest.txt")
-expected_episodes=$((50 * test_num))
+expected_episodes=$((expected_task_count * test_num))
 {
   echo "jobs_per_gpu=${jobs_per_gpu} dynamic_batch=$((jobs_per_gpu > 1)) batch_wait_ms=${batch_wait_ms}"
-  echo "result_tasks=${result_tasks}/50"
+  echo "result_tasks=${result_tasks}/${expected_task_count}"
   echo "mp4=${mp4_count}/${expected_episodes}"
   if [[ "${aux_outputs}" == "1" ]]; then
     echo "value_traces=${value_trace_count}/${expected_episodes}"
@@ -348,7 +379,7 @@ if [[ "${aux_outputs}" == "1" ]] \
 fi
 if [[ ${worker_status} -ne 0 ]] \
   || grep -q ',ERROR$' "${results_csv}" \
-  || [[ ${result_tasks} -ne 50 ]] \
+  || [[ ${result_tasks} -ne ${expected_task_count} ]] \
   || [[ ${mp4_count} -lt ${expected_episodes} ]] \
   || [[ ${artifact_status} -ne 0 ]]; then
   echo "One or more eval workers/tasks failed; inspect ${run_dir}/workers" >&2
