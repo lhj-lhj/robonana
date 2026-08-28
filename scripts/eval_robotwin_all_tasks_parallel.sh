@@ -24,6 +24,24 @@ batch_wait_ms=${ROBONANA_EVAL_BATCH_WAIT_MS:-100}
 aux_outputs=${ROBONANA_EVAL_AUX_OUTPUTS:-1}
 client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
 
+terminate_process_tree() {
+  local root_pid=$1
+  local -a child_pids=()
+  local child_pid
+  if ! kill -0 "${root_pid}" 2>/dev/null; then
+    return 0
+  fi
+  # Freeze the parent before enumerating descendants so it cannot create a
+  # new nested timeout/process group between discovery and termination.
+  kill -STOP "${root_pid}" 2>/dev/null || true
+  mapfile -t child_pids < <(pgrep -P "${root_pid}" 2>/dev/null || true)
+  for child_pid in "${child_pids[@]}"; do
+    terminate_process_tree "${child_pid}"
+  done
+  kill -CONT "${root_pid}" 2>/dev/null || true
+  kill -TERM "${root_pid}" 2>/dev/null || true
+}
+
 IFS=',' read -r -a gpu_ids <<< "${gpu_csv}"
 if [[ ${#gpu_ids[@]} -eq 0 ]]; then
   echo "ROBONANA_EVAL_GPUS resolved to an empty GPU list" >&2
@@ -162,9 +180,14 @@ run_worker() {
   fi
 
   local server_pid=""
+  local -a task_slot_pids=()
   cleanup_worker() {
+    local task_slot_pid
+    for task_slot_pid in "${task_slot_pids[@]}"; do
+      terminate_process_tree "${task_slot_pid}"
+    done
     if [[ -n "${server_pid}" ]] && kill -0 "${server_pid}" 2>/dev/null; then
-      kill "${server_pid}"
+      terminate_process_tree "${server_pid}"
       wait "${server_pid}" 2>/dev/null || true
     fi
     rmdir "${runtime_dir}" 2>/dev/null || true
@@ -286,7 +309,6 @@ run_worker() {
   }
 
   local client_status=0
-  local -a task_slot_pids=()
   local slot slot_pid
   for ((slot = 0; slot < jobs_per_gpu; slot++)); do
     run_task_slot "${slot}" &
@@ -306,9 +328,7 @@ declare -a worker_pids=()
 cleanup_all_workers() {
   local pid
   for pid in "${worker_pids[@]}"; do
-    if kill -0 "${pid}" 2>/dev/null; then
-      kill "${pid}" 2>/dev/null || true
-    fi
+    terminate_process_tree "${pid}"
   done
   for pid in "${worker_pids[@]}"; do
     wait "${pid}" 2>/dev/null || true
