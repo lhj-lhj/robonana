@@ -44,7 +44,7 @@ def main() -> int:
     parser.add_argument("--horizon", type=int, default=24)
     parser.add_argument("--num-inference-steps", type=int, default=20)
     parser.add_argument("--max-batch-size", type=int, default=2)
-    parser.add_argument("--max-batch-wait-ms", type=float, default=6.0)
+    parser.add_argument("--max-batch-wait-ms", type=float, default=100.0)
     parser.add_argument("--max-clients", type=int, default=16)
     args = parser.parse_args()
     dtype = {
@@ -87,4 +87,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

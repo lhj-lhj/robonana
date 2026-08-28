@@ -330,14 +330,18 @@ still saves the episode MP4s:
 
 ```bash
 export ROBONANA_EVAL_JOBS_PER_GPU=2
-export ROBONANA_EVAL_BATCH_WAIT_MS=6
+export ROBONANA_EVAL_BATCH_WAIT_MS=100
 export ROBONANA_EVAL_AUX_OUTPUTS=0
-export ROBONANA_SAPIEN_DENOISER=oidn
+export ROBONANA_SAPIEN_DENOISER=optix
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
 
-Start with two jobs per GPU. Increase to four only after a two-worker smoke
-passes without OIDN/SAPIEN renderer errors. `ROBONANA_EVAL_AUX_OUTPUTS=1`
+The 100 ms queue window is intentional: real three-view TCP requests fragmented
+into 3+5 or 4+4 batches at 6-20 ms, while 100 ms consistently formed full
+batches. Start with two jobs per GPU. Increase to four only after a two-worker
+OptiX smoke passes without SAPIEN renderer errors. OIDN is process-global in
+this runtime and the launcher therefore rejects every multi-process OIDN
+configuration. `ROBONANA_EVAL_AUX_OUTPUTS=1`
 retains the reward/Q Stage-2 artifact workflow and deliberately requires
 `ROBONANA_EVAL_JOBS_PER_GPU=1`.
 

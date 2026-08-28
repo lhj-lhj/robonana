@@ -20,7 +20,7 @@ deploy_policy=${ROBONANA_DEPLOY_POLICY_PATH:-${repo_root}/src/robonana/configs/r
 task_timeout_seconds=${ROBONANA_TASK_TIMEOUT_SECONDS:-21600}
 task_max_attempts=${ROBONANA_TASK_MAX_ATTEMPTS:-3}
 jobs_per_gpu=${ROBONANA_EVAL_JOBS_PER_GPU:-1}
-batch_wait_ms=${ROBONANA_EVAL_BATCH_WAIT_MS:-6}
+batch_wait_ms=${ROBONANA_EVAL_BATCH_WAIT_MS:-100}
 aux_outputs=${ROBONANA_EVAL_AUX_OUTPUTS:-1}
 client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
 
@@ -56,6 +56,12 @@ if [[ "${aux_outputs}" != "0" && "${aux_outputs}" != "1" ]]; then
 fi
 if (( jobs_per_gpu > 1 )) && [[ "${aux_outputs}" != "0" ]]; then
   echo "Dynamic batching is Stage-1-only; set ROBONANA_EVAL_AUX_OUTPUTS=0" >&2
+  exit 2
+fi
+if [[ "${sapien_denoiser}" == "oidn" ]] \
+  && { (( jobs_per_gpu != 1 )) || (( ${#gpu_ids[@]} != 1 )); }; then
+  echo "OIDN is process-global on this RoboTwin/SAPIEN runtime; use exactly one GPU " \
+    "and ROBONANA_EVAL_JOBS_PER_GPU=1, or select optix/none for parallel eval" >&2
   exit 2
 fi
 
