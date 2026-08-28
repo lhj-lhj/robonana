@@ -10,7 +10,7 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from robonana.encoding import encode_flux2_image_tokens
+from robonana.encoding import LocalQwen3Embedder, encode_flux2_image_tokens
 from robonana.inference.robotwin_policy import (
     InferenceMode,
     RoboNanaRobotWinPolicy,
@@ -49,9 +49,39 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
     def _batched_context(
         self, observations: Sequence[dict[str, Any]]
     ) -> tuple[Tensor, Tensor]:
+        instructions = [
+            str(observation.get("instruction", observation.get("prompt", ""))).strip()
+            for observation in observations
+        ]
+        if any(not instruction for instruction in instructions):
+            raise ValueError("instruction is empty")
+        missing = list(
+            dict.fromkeys(
+                instruction
+                for instruction in instructions
+                if instruction not in self._context_cache
+            )
+        )
+        if missing:
+            if self._text_embedder is None:
+                self._text_embedder = LocalQwen3Embedder(
+                    self.flux_checkpoint_dir,
+                    self.text_encoder_device,
+                )
+            encoded = self._text_embedder(missing)
+            if encoded.shape[0] != len(missing):
+                raise RuntimeError(
+                    "Qwen3 context encoder returned a mismatched batch: "
+                    f"{encoded.shape[0]} != {len(missing)}"
+                )
+            for instruction, context in zip(missing, encoded, strict=True):
+                self._context_cache[instruction] = context.detach().cpu().contiguous()
         contexts = [
-            self._context(str(obs.get("instruction", obs.get("prompt", ""))))[0]
-            for obs in observations
+            self._context_cache[instruction].to(
+                device=self.model_device,
+                dtype=self.dtype,
+            )
+            for instruction in instructions
         ]
         max_tokens = max(context.shape[0] for context in contexts)
         hidden_dim = contexts[0].shape[-1]
