@@ -125,7 +125,13 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
             device=self.model_device,
         )
         empty_ids = torch.zeros(batch_size, 0, 4, device=self.model_device, dtype=torch.long)
-        empty_image = torch.zeros(batch_size, 0, 128, device=self.model_device, dtype=self.dtype)
+        empty_image = torch.zeros(
+            batch_size,
+            0,
+            current.shape[-1],
+            device=self.model_device,
+            dtype=self.dtype,
+        )
         empty_state = torch.zeros(
             batch_size, 0, self.state_dim, device=self.model_device, dtype=self.dtype
         )
@@ -274,4 +280,3 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
             }
             for index, action in enumerate(actions)
         ]
-
