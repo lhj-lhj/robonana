@@ -26,6 +26,9 @@ def test_many_persistent_clients_do_not_drop_or_cross_wire_requests() -> None:
                 for observation in observations
             ]
 
+        def inference(self, observation):
+            raise AssertionError("stress test must use inference_batch")
+
     policy = StressPolicy()
     server = DynamicBatchRobotInferenceServer(
         policy,
@@ -85,6 +88,9 @@ def test_incomplete_tail_batch_flushes_after_wait_window() -> None:
         def inference_batch(self, observations):
             self.batch_sizes.append(len(observations))
             return [{"request_id": item["request_id"]} for item in observations]
+
+        def inference(self, observation):
+            raise AssertionError("tail flush test must use inference_batch")
 
     policy = TailPolicy()
     server = DynamicBatchRobotInferenceServer(
