@@ -279,6 +279,11 @@ def _rollout_writer(usr_args) -> RoboTwinRolloutWriter | None:
             "ROBONANA_ROLLOUT_CHECKPOINT",
             str(usr_args.get("ckpt_setting", "")),
         ),
+        policy_version=os.environ.get(
+            "ROBONANA_POLICY_VERSION",
+            os.environ.get("ROBONANA_ROLLOUT_CHECKPOINT", str(usr_args.get("ckpt_setting", ""))),
+        ),
+        round_id=int(os.environ.get("ROBONANA_COLLECTION_ROUND", "0")),
         task_config=str(usr_args.get("task_config", "")),
     )
 
@@ -367,6 +372,20 @@ def eval(TASK_ENV, model, observation):  # noqa: A001,N803
         success=success,
         terminal=terminal,
     )
+    if terminal:
+        final_observation = getattr(TASK_ENV, "now_obs", None)
+        if final_observation is None:
+            raise RuntimeError("RoboTwin terminal transition did not expose the final observation")
+        if final_observation.get("_fact_light_obs", False):
+            final_observation = TASK_ENV._fact_force_full_obs()
+        final_state = np.asarray(
+            final_observation["joint_action"]["vector"], dtype=np.float32
+        ).copy()
+        final_images = {
+            camera: np.asarray(final_observation["observation"][camera]["rgb"]).copy()
+            for camera in CAMERAS
+        }
+        writer.append_final_observation(images=final_images, state=final_state)
     return result
 
 __all__ = ["eval", "get_model", "reset_model"]

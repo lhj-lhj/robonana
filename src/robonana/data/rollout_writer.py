@@ -16,7 +16,7 @@ from PIL import Image
 
 CAMERAS = ("head_camera", "left_camera", "right_camera")
 ROLLOUT_VARIANT = "robonana_rollout"
-ROLLOUT_SCHEMA_VERSION = 1
+ROLLOUT_SCHEMA_VERSION = 2
 
 
 def _atomic_json(payload: Mapping[str, Any], path: Path) -> None:
@@ -69,6 +69,8 @@ class RoboTwinRolloutWriter:
         jpeg_quality: int = 95,
         policy_name: str = "robonana",
         checkpoint: str = "",
+        policy_version: str = "",
+        round_id: int = 0,
         task_config: str = "",
     ) -> None:
         self.dataset_root = Path(dataset_root).expanduser().resolve()
@@ -82,13 +84,17 @@ class RoboTwinRolloutWriter:
         self.jpeg_quality = int(jpeg_quality)
         self.policy_name = str(policy_name)
         self.checkpoint = str(checkpoint)
+        self.policy_version = str(policy_version or checkpoint)
+        self.round_id = int(round_id)
         self.task_config = str(task_config)
         self._frames: dict[str, list[bytes]] = {camera: [] for camera in CAMERAS}
         self._states: list[np.ndarray] = []
         self._actions: list[np.ndarray] = []
+        self._transition_valid: list[bool] = []
         self._metadata: dict[str, Any] | None = None
         self._success = False
         self._terminal = False
+        self._final_observation_appended = False
         self.dataset_root.mkdir(parents=True, exist_ok=True)
         _atomic_json(
             {
@@ -138,8 +144,39 @@ class RoboTwinRolloutWriter:
             self._frames[camera].append(_jpeg_bytes(images[camera], self.jpeg_quality))
         self._states.append(state_value.copy())
         self._actions.append(action_value.copy())
+        self._transition_valid.append(True)
         self._success = self._success or bool(success)
         self._terminal = self._terminal or bool(terminal)
+
+    def append_final_observation(
+        self,
+        *,
+        images: Mapping[str, np.ndarray],
+        state: np.ndarray,
+    ) -> None:
+        """Append the reset-pre observation reached by the last real action."""
+
+        if not self._terminal or not self._actions:
+            raise RuntimeError("final observation requires a terminal episode with a real action")
+        if self._final_observation_appended:
+            raise RuntimeError("final observation was already appended")
+        missing = [camera for camera in CAMERAS if camera not in images]
+        if missing:
+            raise KeyError(f"final rollout observation is missing cameras: {missing}")
+        state_value = np.asarray(state, dtype=np.float32).reshape(-1)
+        if state_value.shape != self._states[-1].shape:
+            raise ValueError(
+                f"final state shape changed: {state_value.shape} != {self._states[-1].shape}"
+            )
+        for camera in CAMERAS:
+            self._frames[camera].append(_jpeg_bytes(images[camera], self.jpeg_quality))
+        self._states.append(state_value.copy())
+        # The final source row has no outgoing transition. Repeating the last
+        # behavior action keeps the fixed HDF5 row shape, while
+        # transition_valid=False prevents it from entering any TD target.
+        self._actions.append(self._actions[-1].copy())
+        self._transition_valid.append(False)
+        self._final_observation_appended = True
 
     def _reserve_episode_index(self, task_dir: Path) -> tuple[int, Path]:
         lock_dir = task_dir / ".episode_locks"
@@ -164,6 +201,10 @@ class RoboTwinRolloutWriter:
             return None
         if not self._terminal and not force:
             return None
+        if not self._final_observation_appended:
+            raise RuntimeError(
+                "refusing to publish rollout without the reset-pre final observation"
+            )
         assert self._metadata is not None
         task_dir = self.dataset_root / self._metadata["task_name"] / self.variant
         (task_dir / "data").mkdir(parents=True, exist_ok=True)
@@ -181,17 +222,26 @@ class RoboTwinRolloutWriter:
                         "source": "robonana_policy_rollout",
                         "success": bool(self._success),
                         "failure_episode": not bool(self._success),
+                        "time_limit_truncated": not bool(self._success),
+                        "has_final_observation": True,
                         "task_name": self._metadata["task_name"],
                         "instruction": self._metadata["instruction"],
                         "seed": -1 if self._metadata["seed"] is None else self._metadata["seed"],
                         "policy_name": self.policy_name,
                         "checkpoint": self.checkpoint,
+                        "policy_checkpoint": self.checkpoint,
+                        "policy_version": self.policy_version,
+                        "round_id": self.round_id,
                         "task_config": self.task_config,
                         "created_at": created_at,
                     }
                 )
                 handle.create_dataset("joint_action/vector", data=states)
                 handle.create_dataset("policy_action/vector", data=actions)
+                handle.create_dataset(
+                    "transition_valid",
+                    data=np.asarray(self._transition_valid, dtype=np.bool_),
+                )
                 image_dtype = h5py.vlen_dtype(np.dtype("uint8"))
                 for camera in CAMERAS:
                     dataset = handle.create_dataset(
@@ -216,9 +266,14 @@ class RoboTwinRolloutWriter:
                     "length": len(states),
                     "success": bool(self._success),
                     "failure_episode": not bool(self._success),
+                    "time_limit_truncated": not bool(self._success),
+                    "has_final_observation": True,
                     **self._metadata,
                     "policy_name": self.policy_name,
                     "checkpoint": self.checkpoint,
+                    "policy_checkpoint": self.checkpoint,
+                    "policy_version": self.policy_version,
+                    "round_id": self.round_id,
                     "task_config": self.task_config,
                     "created_at": created_at,
                     "source": str(output.relative_to(self.dataset_root)),
@@ -240,6 +295,8 @@ class RoboTwinRolloutWriter:
         self._frames = {camera: [] for camera in CAMERAS}
         self._states = []
         self._actions = []
+        self._transition_valid = []
         self._metadata = None
         self._success = False
         self._terminal = False
+        self._final_observation_appended = False

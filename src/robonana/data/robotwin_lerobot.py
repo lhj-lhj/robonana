@@ -89,6 +89,7 @@ def discover_lerobot_episode_records(
                     episode_index=episode_index,
                     length=length,
                     success=True,
+                    has_final_observation=True,
                 )
             )
     if not records:
@@ -118,6 +119,17 @@ def load_lerobot_episode_records(
             episode_index=int(row["episode_index"]),
             length=int(row["length"]),
             success=bool(row.get("success", True)),
+            round_id=int(row.get("round_id", -1)),
+            policy_checkpoint=str(
+                row.get("policy_checkpoint", row.get("checkpoint", ""))
+            ),
+            policy_version=str(row.get("policy_version", "")),
+            has_final_observation=bool(
+                row.get("has_final_observation", row.get("success", True))
+            ),
+            time_limit_truncated=bool(
+                row.get("time_limit_truncated", not row.get("success", True))
+            ),
         )
         for row in payload["episodes"]
     ]
@@ -172,6 +184,13 @@ class RoboTwinLeRobotDataset(RoboTwinHDF5Dataset):
             return state[:, : self.action_dim], action[:, : self.action_dim]
 
         return self._lru_get(self._hdf5_cache, record.source, load, self.hdf5_cache_size)
+
+    def _episode_transition_valid(self, record: EpisodeRecord) -> np.ndarray:
+        """LeRobot success demonstrations contain a terminal observation row."""
+
+        valid = np.ones(record.length, dtype=bool)
+        valid[-1] = False
+        return valid
 
     def _episode_timestamps(self, record: EpisodeRecord) -> np.ndarray:
         cache_key = (record.source, "timestamps")

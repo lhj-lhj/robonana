@@ -144,6 +144,17 @@ def main() -> int:
                 missing.append(
                     f"vector-shape:{record.source}:state={state_shape}:action={action_shape}"
                 )
+            if not bool(handle.attrs.get("has_final_observation", False)):
+                missing.append(f"reset-pre-final-observation:{record.source}")
+            if "transition_valid" not in handle:
+                missing.append(f"transition-valid:{record.source}")
+            else:
+                transition_valid = handle["transition_valid"][:].astype(bool, copy=False)
+                if transition_valid.shape != (record.length,) or bool(transition_valid[-1]):
+                    missing.append(
+                        f"transition-valid-shape-or-tail:{record.source}:"
+                        f"shape={transition_valid.shape}:last={bool(transition_valid[-1])}"
+                    )
             for camera in HDF5_CAMERAS:
                 frames = handle[f"observation/{camera}/rgb"]
                 if len(frames) != record.length:
@@ -163,6 +174,10 @@ def main() -> int:
             index_path=str(index_path),
             fixed_horizon=1,
             eval_horizons=(1,),
+            q_target_mode="td_posttrain",
+            episode_filter="all",
+            pool_name="latest_failure",
+            require_final_observation=True,
         )
         sample = dataset[0]
         sample_validation = {

@@ -16,13 +16,12 @@ from torch import Tensor
 
 from robonana.data.robotwin_hdf5 import ALOHA_DELTA_MASK
 from robonana.encoding import LocalQwen3Embedder, encode_flux2_image_tokens
-from robonana.models.position_ids import image_position_ids, text_position_ids
 from robonana.models.pretrained import load_flux2_fact_trained_checkpoint
 from robonana.sampling import (
     WorldFlowSample,
     flow_euler_schedule,
-    sample_action_flow,
-    sample_world_flow,
+    sample_flux2_action,
+    sample_flux2_world,
 )
 from robonana.training.visualization import decode_flux2_tokens
 from world_action_model.image_layouts import (
@@ -324,62 +323,30 @@ class RoboNanaRobotWinPolicy:
         state: Tensor,
         sampling_seed: int | None = None,
     ) -> Tensor:
-        batch_size = 1
-        horizon = torch.tensor([self.horizon], device=self.model_device, dtype=torch.long)
-        context_ids = text_position_ids(batch_size, context.shape[1], self.model_device)
-        current_ids = image_position_ids(
-            batch_size,
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-            time_coord=torch.zeros_like(horizon),
-            device=self.model_device,
-        )
-        empty_ids = torch.zeros(batch_size, 0, 4, device=self.model_device, dtype=torch.long)
-        empty_image = torch.zeros(batch_size, 0, 128, device=self.model_device, dtype=self.dtype)
-        empty_state = torch.zeros(batch_size, 0, self.state_dim, device=self.model_device, dtype=self.dtype)
-        empty_reward = torch.zeros(batch_size, 0, 1, device=self.model_device, dtype=self.dtype)
-        empty_q = torch.zeros(batch_size, 0, 1, device=self.model_device, dtype=self.dtype)
-        clean_gt_action = torch.zeros(
-            batch_size,
+        action_template = torch.zeros(
+            context.shape[0],
             self.action_chunk,
             self.action_dim,
             device=self.model_device,
             dtype=self.dtype,
         )
-        clean_wm_time = torch.zeros(batch_size, device=self.model_device, dtype=torch.float32)
         context_mask = torch.ones(
-            batch_size,
+            context.shape[0],
             context.shape[1],
             device=self.model_device,
             dtype=torch.bool,
         )
-        action_noise = seeded_randn_like(clean_gt_action, sampling_seed)
-
-        def predict_action(sampled_action: Tensor, sigma: Tensor) -> Tensor:
-            output = self.model(
-                context=context,
-                context_ids=context_ids,
-                current_latents=current,
-                current_ids=current_ids,
-                noisy_future_latents=empty_image,
-                future_ids=empty_ids,
-                state=state,
-                noisy_pred_action=sampled_action,
-                gt_action_cond=clean_gt_action,
-                horizon_idx=horizon,
-                noisy_future_state=empty_state,
-                noisy_reward=empty_reward,
-                noisy_q=empty_q,
-                action_timestep=sigma.expand(batch_size),
-                wm_timestep=clean_wm_time,
-                context_mask=context_mask,
-            )
-            return output.action
-
-        return sample_action_flow(
-            action_noise=action_noise,
+        return sample_flux2_action(
+            model=self.model,
+            context=context,
+            current_latents=current,
+            state=state,
+            context_mask=context_mask,
+            action_noise=seeded_randn_like(action_template, sampling_seed),
+            horizon_idx=self.horizon,
             schedule=self.schedule,
-            predict_action=predict_action,
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
         )
 
     @torch.inference_mode()
@@ -408,33 +375,10 @@ class RoboNanaRobotWinPolicy:
             raise ValueError(f"Stage-2 horizons must lie in [1, {self.max_horizon}]")
         horizon_count = int(horizons.numel())
         horizon_matrix = horizons[None]
-        context_ids = text_position_ids(batch_size, context.shape[1], self.model_device)
-        current_ids = image_position_ids(
-            batch_size,
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-            time_coord=torch.zeros(batch_size, device=self.model_device, dtype=torch.long),
-            device=self.model_device,
-        )
         if include_image:
             image_tokens = self.grid_height * self.grid_width
-            future_ids = image_position_ids(
-                horizon_count,
-                grid_height=self.grid_height,
-                grid_width=self.grid_width,
-                time_coord=horizons,
-                device=self.model_device,
-            )[None]
         else:
             image_tokens = 0
-            future_ids = torch.empty(
-                batch_size,
-                horizon_count,
-                0,
-                4,
-                device=self.model_device,
-                dtype=torch.long,
-            )
         context_mask = torch.ones(
             batch_size,
             context.shape[1],
@@ -478,55 +422,21 @@ class RoboNanaRobotWinPolicy:
         future_state_noise = seeded_randn_like(future_state_template, stream_seed(2))
         reward_noise = seeded_randn_like(reward_template, stream_seed(3))
         q_noise = seeded_randn_like(q_template, stream_seed(4))
-        clean_action_time = torch.zeros(
-            batch_size,
-            device=self.model_device,
-            dtype=torch.float32,
-        )
-        empty_pred_action = torch.empty(
-            batch_size,
-            0,
-            self.action_dim,
-            device=self.model_device,
-            dtype=self.dtype,
-        )
-
-        def predict_world(
-            sampled_future: Tensor,
-            sampled_future_state: Tensor,
-            sampled_reward: Tensor,
-            sampled_q: Tensor,
-            sampled_action: Tensor,
-            sigma: Tensor,
-        ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-            output = self.model(
-                context=context,
-                context_ids=context_ids,
-                current_latents=current,
-                current_ids=current_ids,
-                noisy_future_latents=sampled_future,
-                future_ids=future_ids,
-                state=state,
-                noisy_pred_action=empty_pred_action,
-                gt_action_cond=sampled_action,
-                horizon_idx=horizon_matrix,
-                noisy_future_state=sampled_future_state,
-                noisy_reward=sampled_reward,
-                noisy_q=sampled_q,
-                action_timestep=clean_action_time,
-                wm_timestep=sigma.expand(batch_size),
-                context_mask=context_mask,
-            )
-            return output.image, output.future_state, output.reward, output.q
-
-        return sample_world_flow(
+        return sample_flux2_world(
+            model=self.model,
+            context=context,
+            current_latents=current,
+            state=state,
+            context_mask=context_mask,
             clean_action=clean_action,
+            horizon_idx=horizon_matrix,
             future_noise=future_noise,
             future_state_noise=future_state_noise,
             reward_noise=reward_noise,
             q_noise=q_noise,
             schedule=self.schedule,
-            predict_world=predict_world,
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
         )
 
     @torch.inference_mode()

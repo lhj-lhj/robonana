@@ -43,3 +43,25 @@ def test_joint_loss_adds_dino_only_when_target_is_present():
         "q_loss",
         "dino_loss",
     }
+
+
+def test_joint_loss_masks_zero_length_td_q_samples():
+    zeros = torch.zeros(2, 1, 1)
+    output = SimpleNamespace(
+        image=zeros,
+        action=zeros,
+        future_state=zeros,
+        reward=zeros,
+        q=torch.tensor([[[2.0]], [[100.0]]]),
+        dino=None,
+    )
+    losses = joint_flow_loss(
+        output,
+        image_target=zeros,
+        action_target=zeros,
+        future_state_target=zeros,
+        reward_target=zeros,
+        q_target=zeros,
+        q_loss_mask=torch.tensor([1.0, 0.0]),
+    )
+    assert losses["q_loss"].item() == 4.0

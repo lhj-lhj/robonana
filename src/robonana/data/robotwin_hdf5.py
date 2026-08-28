@@ -33,6 +33,29 @@ ALOHA_DELTA_MASK = np.asarray(
     dtype=bool,
 )
 
+POSTTRAIN_POOL_IDS = {
+    "original_success": 0,
+    "collected_success_replay": 1,
+    "historical_failure_replay": 2,
+    "latest_failure": 3,
+}
+
+
+def discounted_chunk_reward(
+    delta_steps: int,
+    *,
+    discount: float = 0.999,
+    reward_non_goal: float = -1.0,
+) -> float:
+    """Return the real-trajectory discounted reward for ``delta_steps``."""
+
+    delta_steps = int(delta_steps)
+    if delta_steps < 0:
+        raise ValueError("delta_steps cannot be negative")
+    return float(
+        sum(float(discount) ** offset * float(reward_non_goal) for offset in range(delta_steps))
+    )
+
 
 def mac_success_targets(
     *,
@@ -66,9 +89,8 @@ def mac_success_targets(
     final_index = episode_length - 1
     future_index = min(frame_index + horizon_idx, final_index)
     delta = future_index - frame_index
-    reward_h = sum(
-        discount**offset * float(reward_non_goal)
-        for offset in range(delta)
+    reward_h = discounted_chunk_reward(
+        delta, discount=discount, reward_non_goal=reward_non_goal
     )
     remaining_non_goal = final_index - frame_index
     q_mc = sum(
@@ -87,6 +109,19 @@ class EpisodeRecord:
     episode_index: int
     length: int
     success: bool = True
+    round_id: int = -1
+    policy_checkpoint: str = ""
+    policy_version: str = ""
+    has_final_observation: bool = True
+    time_limit_truncated: bool = False
+
+
+def _attr_text(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
 
 
 def _episode_index(path: Path) -> int:
@@ -104,6 +139,17 @@ def discover_episode_records(dataset_root: str | Path, task_glob: str) -> list[E
             with h5py.File(source, "r") as handle:
                 length = int(handle["joint_action/vector"].shape[0])
                 success = bool(handle.attrs.get("success", True))
+                round_id = int(handle.attrs.get("round_id", -1))
+                policy_checkpoint = _attr_text(
+                    handle.attrs.get("policy_checkpoint", handle.attrs.get("checkpoint", ""))
+                )
+                policy_version = _attr_text(handle.attrs.get("policy_version", ""))
+                has_final_observation = bool(
+                    handle.attrs.get("has_final_observation", success)
+                )
+                time_limit_truncated = bool(
+                    handle.attrs.get("time_limit_truncated", not success)
+                )
             if length <= 0:
                 continue
             records.append(
@@ -114,6 +160,11 @@ def discover_episode_records(dataset_root: str | Path, task_glob: str) -> list[E
                     episode_index=_episode_index(source),
                     length=length,
                     success=success,
+                    round_id=round_id,
+                    policy_checkpoint=policy_checkpoint,
+                    policy_version=policy_version,
+                    has_final_observation=has_final_observation,
+                    time_limit_truncated=time_limit_truncated,
                 )
             )
     if not records:
@@ -138,6 +189,17 @@ def load_episode_records(dataset_root: str | Path, task_glob: str, index_path: s
                 episode_index=int(row["episode_index"]),
                 length=int(row["length"]),
                 success=bool(row.get("success", True)),
+                round_id=int(row.get("round_id", -1)),
+                policy_checkpoint=str(
+                    row.get("policy_checkpoint", row.get("checkpoint", ""))
+                ),
+                policy_version=str(row.get("policy_version", "")),
+                has_final_observation=bool(
+                    row.get("has_final_observation", row.get("success", True))
+                ),
+                time_limit_truncated=bool(
+                    row.get("time_limit_truncated", not row.get("success", True))
+                ),
             )
         )
     return records
@@ -174,6 +236,13 @@ class RoboTwinHDF5Dataset(BaseDataset):
         reward_non_goal: float = -1.0,
         reward_goal: float = 0.0,
         q_target_mode: str = "mc_success",
+        episode_filter: str | None = None,
+        pool_name: str = "original_success",
+        round_min: int | None = None,
+        round_max: int | None = None,
+        round_id: int | None = None,
+        allow_empty: bool = False,
+        require_final_observation: bool = False,
     ) -> None:
         super().__init__(data_path=data_path)
         self.stats_path = str(stats_path)
@@ -192,6 +261,16 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self.reward_non_goal = float(reward_non_goal)
         self.reward_goal = float(reward_goal)
         self.q_target_mode = str(q_target_mode)
+        self.episode_filter = str(
+            episode_filter
+            or ("success" if self.q_target_mode == "mc_success" else "all")
+        )
+        self.pool_name = str(pool_name)
+        self.round_min = None if round_min is None else int(round_min)
+        self.round_max = None if round_max is None else int(round_max)
+        self.selected_round_id = None if round_id is None else int(round_id)
+        self.allow_empty = bool(allow_empty)
+        self.require_final_observation = bool(require_final_observation)
         if self.action_chunk <= 0 or self.max_horizon <= 0:
             raise ValueError("action_chunk and max_horizon must be positive")
         if self.action_dim <= 0 or self.action_dim > ALOHA_DELTA_MASK.size:
@@ -204,10 +283,20 @@ class RoboTwinHDF5Dataset(BaseDataset):
             raise ValueError("all cache sizes must be at least one")
         if not 0.0 < self.discount <= 1.0:
             raise ValueError("discount must lie in (0, 1]")
-        if self.q_target_mode != "mc_success":
+        if self.q_target_mode not in {"mc_success", "td_posttrain"}:
             raise ValueError(
-                "this pretraining dataset currently supports only q_target_mode='mc_success'"
+                "q_target_mode must be 'mc_success' or 'td_posttrain'"
             )
+        if self.episode_filter not in {"all", "success", "failure"}:
+            raise ValueError("episode_filter must be all, success, or failure")
+        if self.pool_name not in POSTTRAIN_POOL_IDS:
+            raise ValueError(f"unknown posttrain pool_name: {self.pool_name}")
+        if self.q_target_mode == "mc_success" and self.episode_filter != "success":
+            raise ValueError("mc_success pretraining only accepts successful episodes")
+        if self.selected_round_id is not None and (
+            self.round_min is not None or self.round_max is not None
+        ):
+            raise ValueError("round_id cannot be combined with round_min/round_max")
 
         self.records: list[EpisodeRecord] = []
         self.episode_starts = np.empty((0,), dtype=np.int64)
@@ -231,13 +320,37 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self._set_records(load_episode_records(self.data_path, self.task_glob, self.index_path))
 
     def _set_records(self, records: list[EpisodeRecord]) -> None:
-        """Keep only complete successful demonstrations for MC pretraining."""
+        """Build one physical-pool view without merging source directories."""
 
-        self.records = [record for record in records if record.success]
-        if not self.records:
-            raise FileNotFoundError(
-                "q_target_mode='mc_success' requires at least one successful episode"
+        if self.episode_filter == "success":
+            records = [record for record in records if record.success]
+        elif self.episode_filter == "failure":
+            records = [record for record in records if not record.success]
+        if self.selected_round_id is not None:
+            records = [record for record in records if record.round_id == self.selected_round_id]
+        if self.round_min is not None:
+            records = [record for record in records if record.round_id >= self.round_min]
+        if self.round_max is not None:
+            records = [record for record in records if record.round_id <= self.round_max]
+        missing_final = [
+            record.source for record in records if not record.has_final_observation
+        ]
+        if self.require_final_observation and missing_final:
+            raise RuntimeError(
+                "posttraining replay requires reset-pre final observations; recollect these episodes: "
+                + ", ".join(str(path) for path in missing_final[:5])
             )
+        self.records = records
+        if not self.records:
+            if self.allow_empty:
+                self.episode_starts = np.empty((0,), dtype=np.int64)
+                self.episode_stops = np.empty((0,), dtype=np.int64)
+                return
+            if self.q_target_mode == "mc_success":
+                raise FileNotFoundError(
+                    "q_target_mode='mc_success' requires at least one successful episode"
+                )
+            raise FileNotFoundError(f"posttrain pool {self.pool_name!r} contains no episodes")
         lengths = np.asarray([record.length for record in self.records], dtype=np.int64)
         self.episode_stops = np.cumsum(lengths)
         self.episode_starts = self.episode_stops - lengths
@@ -258,7 +371,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
 
     def __len__(self) -> int:
         self._ensure_index()
-        return int(self.episode_stops[-1])
+        return 0 if not self.records else int(self.episode_stops[-1])
 
     @staticmethod
     def _lru_get(cache: OrderedDict, key, loader, capacity: int):
@@ -289,6 +402,23 @@ class RoboTwinHDF5Dataset(BaseDataset):
         action_key = "policy_action/vector" if "policy_action/vector" in handle else "joint_action/vector"
         action = np.asarray(handle[action_key][:, : self.action_dim], dtype=np.float32)
         return state, action
+
+    def _episode_transition_valid(self, record: EpisodeRecord) -> np.ndarray:
+        """Return which rows execute a real transition to the next observation."""
+
+        handle = self._handle(record.source)
+        if isinstance(handle, h5py.File) and "transition_valid" in handle:
+            valid = np.asarray(handle["transition_valid"], dtype=bool).reshape(-1)
+            if valid.shape != (record.length,):
+                raise RuntimeError(
+                    f"transition_valid has shape {valid.shape}, expected {(record.length,)}"
+                )
+            return valid
+        # Released success demonstrations end on a terminal observation. Old
+        # failure rollouts are rejected when require_final_observation=True.
+        valid = np.ones(record.length, dtype=bool)
+        valid[-1] = False
+        return valid
 
     def _latents(self, record: EpisodeRecord) -> torch.Tensor:
         path = episode_cache_path(record.task_dir, record.episode_index)
@@ -362,14 +492,26 @@ class RoboTwinHDF5Dataset(BaseDataset):
     def _get_data(self, index: int) -> dict[str, Any]:
         record, frame_index = self._locate(int(index))
         horizon_idx = self._sample_horizon()
-        future_index, horizon_delta, reward_h, q_mc = mac_success_targets(
-            frame_index=frame_index,
-            horizon_idx=horizon_idx,
-            episode_length=record.length,
+        future_index = min(frame_index + horizon_idx, record.length - 1)
+        transition_valid = self._episode_transition_valid(record)
+        delta_steps = int(transition_valid[frame_index:future_index].sum())
+        reward_h = discounted_chunk_reward(
+            delta_steps,
             discount=self.discount,
             reward_non_goal=self.reward_non_goal,
-            reward_goal=self.reward_goal,
         )
+        if self.q_target_mode == "mc_success":
+            _, _, _, q_clean = mac_success_targets(
+                frame_index=frame_index,
+                horizon_idx=horizon_idx,
+                episode_length=record.length,
+                discount=self.discount,
+                reward_non_goal=self.reward_non_goal,
+                reward_goal=self.reward_goal,
+            )
+        else:
+            # The trainer replaces this placeholder with a stop-gradient EMA TD target.
+            q_clean = 0.0
         action_indices = np.clip(
             frame_index + np.arange(self.action_chunk, dtype=np.int64),
             0,
@@ -418,6 +560,13 @@ class RoboTwinHDF5Dataset(BaseDataset):
         )
         current_latent, future_latent = select_current_future_latents(frame_latents, frame_index, horizon_idx)
         context = self._context(record)
+        success_terminal_h = bool(record.success and future_index == record.length - 1)
+        time_limit_truncated_h = bool(
+            not record.success
+            and record.time_limit_truncated
+            and future_index == record.length - 1
+        )
+        task_names = sorted({item.task_name for item in self.records})
         sample = {
             "context": context,
             "context_mask": torch.ones(context.shape[0], dtype=torch.bool),
@@ -425,16 +574,35 @@ class RoboTwinHDF5Dataset(BaseDataset):
             "future_latents": future_latent,
             "state": torch.from_numpy(norm_state.copy()),
             "action": torch.from_numpy(norm_action.copy()),
+            "behavior_action": torch.from_numpy(norm_action.copy()),
             "future_state": torch.from_numpy(norm_future_state.copy()),
             "reward": torch.tensor([reward_h], dtype=torch.float32),
-            "q": torch.tensor([q_mc], dtype=torch.float32),
+            "reward_h": torch.tensor([reward_h], dtype=torch.float32),
+            "q": torch.tensor([q_clean], dtype=torch.float32),
             "horizon_idx": torch.tensor(horizon_idx, dtype=torch.long),
-            "delta": torch.tensor(horizon_delta, dtype=torch.long),
-            "terminal_h": torch.tensor(
-                float(future_index == record.length - 1), dtype=torch.float32
+            "delta": torch.tensor(delta_steps, dtype=torch.long),
+            "delta_steps": torch.tensor(delta_steps, dtype=torch.long),
+            "terminal_h": torch.tensor(float(success_terminal_h), dtype=torch.float32),
+            "success_terminal_h": torch.tensor(float(success_terminal_h), dtype=torch.float32),
+            "time_limit_truncated_h": torch.tensor(
+                float(time_limit_truncated_h), dtype=torch.float32
             ),
-            "action_loss_mask": torch.tensor(float(record.success), dtype=torch.float32),
+            "episode_success": torch.tensor(float(record.success), dtype=torch.float32),
+            "action_loss_mask": torch.tensor(
+                1.0 if self.q_target_mode == "td_posttrain" else float(record.success),
+                dtype=torch.float32,
+            ),
+            "q_loss_mask": torch.tensor(float(delta_steps > 0), dtype=torch.float32),
             "failure_episode_mask": torch.tensor(float(not record.success), dtype=torch.float32),
+            "pool_id": torch.tensor(POSTTRAIN_POOL_IDS[self.pool_name], dtype=torch.long),
+            "task_id": torch.tensor(task_names.index(record.task_name), dtype=torch.long),
+            "episode_id": torch.tensor(record.episode_index, dtype=torch.long),
+            "round_id": torch.tensor(record.round_id, dtype=torch.long),
+            "policy_version": record.policy_version,
+            "policy_checkpoint": record.policy_checkpoint,
+            "observation_id": (
+                f"{record.task_name}/episode{record.episode_index}/frame{frame_index}"
+            ),
             "sample_index": torch.tensor(index, dtype=torch.long),
             "frame_index": torch.tensor(frame_index, dtype=torch.long),
             "future_index": torch.tensor(future_index, dtype=torch.long),
@@ -560,5 +728,130 @@ class RoboTwinMixtureSampler(torch.utils.data.Sampler[int]):
             if self.shuffle:
                 rng.shuffle(indices)
             yield from indices.tolist()
+            if not self.infinite:
+                return
+
+
+@SAMPLERS.register
+class RoboTwinPosttrainSampler(torch.utils.data.Sampler[int]):
+    """Four-pool sampler: pool -> uniform task -> uniform episode -> frame."""
+
+    POOL_ORDER = tuple(POSTTRAIN_POOL_IDS)
+
+    def __init__(
+        self,
+        dataset,
+        batch_size: int,
+        shuffle: bool = True,
+        infinite: bool = True,
+        seed: int = 6666,
+        sample_epoch_size: int | None = None,
+        pool_weights: dict[str, float] | None = None,
+        redistribute_empty_historical_failure_to_latest: bool = True,
+        redistribute_empty_collected_success_to_original: bool = True,
+    ) -> None:
+        children = getattr(dataset, "datasets", None)
+        if children is None or len(children) != 4:
+            raise TypeError("RoboTwinPosttrainSampler requires four ConcatDataset children")
+        self.dataset = dataset
+        self.children = list(children)
+        for child in self.children:
+            if not isinstance(child, RoboTwinHDF5Dataset):
+                raise TypeError("all posttrain pools must reuse RoboTwinHDF5Dataset")
+            child._ensure_index()
+        names = tuple(child.pool_name for child in self.children)
+        if names != self.POOL_ORDER:
+            raise ValueError(f"posttrain pool order must be {self.POOL_ORDER}, got {names}")
+        self.batch_size = int(batch_size)
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        configured = pool_weights or {name: 0.25 for name in self.POOL_ORDER}
+        if set(configured) != set(self.POOL_ORDER):
+            raise ValueError(f"pool_weights must define exactly {self.POOL_ORDER}")
+        weights = np.asarray([float(configured[name]) for name in self.POOL_ORDER])
+        if np.any(weights < 0) or not np.isclose(weights.sum(), 1.0):
+            raise ValueError("posttrain pool weights must be non-negative and sum to one")
+        sizes = np.asarray([len(child.records) for child in self.children])
+        if sizes[0] == 0:
+            raise ValueError("D_original_success cannot be empty")
+        if sizes[1] == 0 and redistribute_empty_collected_success_to_original:
+            weights[0] += weights[1]
+            weights[1] = 0.0
+        if sizes[2] == 0 and redistribute_empty_historical_failure_to_latest:
+            weights[3] += weights[2]
+            weights[2] = 0.0
+        nonempty_weighted = (sizes > 0) | np.isclose(weights, 0.0)
+        if not bool(nonempty_weighted.all()):
+            missing = [self.POOL_ORDER[index] for index in np.where(~nonempty_weighted)[0]]
+            raise ValueError(f"weighted posttrain pools are empty: {missing}")
+        self.pool_probabilities = weights / weights.sum()
+        self.offsets = np.cumsum(
+            [0] + [len(child) for child in self.children[:-1]], dtype=np.int64
+        )
+        self.task_episode_positions: list[dict[str, np.ndarray]] = []
+        for child in self.children:
+            grouped: dict[str, list[int]] = {}
+            for episode_position, record in enumerate(child.records):
+                grouped.setdefault(record.task_name, []).append(episode_position)
+            self.task_episode_positions.append(
+                {
+                    task: np.asarray(positions, dtype=np.int64)
+                    for task, positions in sorted(grouped.items())
+                }
+            )
+        self.shuffle = bool(shuffle)
+        self.infinite = bool(infinite)
+        self.seed = int(seed)
+        self.epoch = 0
+        size = int(sample_epoch_size or max(sum(len(child) for child in self.children), self.batch_size))
+        self.total_size = int(np.ceil(size / self.batch_size) * self.batch_size)
+
+    def __len__(self) -> int:
+        return self.total_size
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def _batch_pool_counts(self) -> np.ndarray:
+        exact = self.pool_probabilities * self.batch_size
+        counts = np.floor(exact).astype(np.int64)
+        remainder = self.batch_size - int(counts.sum())
+        if remainder:
+            order = np.argsort(-(exact - counts), kind="stable")
+            counts[order[:remainder]] += 1
+        return counts
+
+    def _sample_pool(self, rng: np.random.Generator, pool_index: int, count: int) -> list[int]:
+        if count == 0:
+            return []
+        child = self.children[pool_index]
+        grouped = self.task_episode_positions[pool_index]
+        tasks = tuple(grouped)
+        selected = []
+        for _ in range(count):
+            task = tasks[int(rng.integers(0, len(tasks)))]
+            positions = grouped[task]
+            episode_position = int(positions[int(rng.integers(0, len(positions)))])
+            length = int(
+                child.episode_stops[episode_position] - child.episode_starts[episode_position]
+            )
+            frame_offset = int(rng.integers(0, length))
+            selected.append(
+                int(self.offsets[pool_index] + child.episode_starts[episode_position] + frame_offset)
+            )
+        return selected
+
+    def __iter__(self) -> Iterator[int]:
+        counts = self._batch_pool_counts()
+        while True:
+            rng = np.random.default_rng(self.seed + self.epoch)
+            self.epoch += 1
+            for _ in range(self.total_size // self.batch_size):
+                batch = []
+                for pool_index, count in enumerate(counts.tolist()):
+                    batch.extend(self._sample_pool(rng, pool_index, count))
+                if self.shuffle:
+                    rng.shuffle(batch)
+                yield from batch
             if not self.infinite:
                 return

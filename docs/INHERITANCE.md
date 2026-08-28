@@ -93,3 +93,30 @@ the first `delta` transitions, while Q is the full successful-demonstration MC
 return from `t`. For the same `t`, changing `idx_h` changes reward but not Q.
 Both are raw scalar flow targets; neither uses the removed time-to-go
 normalization.
+
+## Iterative-posttraining reuse
+
+Posttraining does not add a policy, target-Q network class, action expert, or a
+second world backbone. `FullModelEMA` is an FP32, eval-only deep copy of the
+same trainable `Flux2FACTModel`; the frozen Qwen, FLUX AE, and DINO encoder live
+outside that model and therefore are not copied. Candidate action generation
+and EMA action/Q evaluation call the same `sample_flux2_action` and
+`sample_flux2_world` helpers used by inference.
+
+```text
+four separate dataset views
+  -> RoboTwinPosttrainSampler (pool -> task -> episode -> frame)
+  -> online shared FLUX: best-of-8 candidate actions
+  -> EMA shared FLUX: future-state/reward/Q flow and argmax Q
+  -> online shared FLUX training:
+       pred_action target = behavior on success, EMA-ranked pseudo on failure
+       clean G/world/reward/current-Q condition = behavior action everywhere
+  -> optimizer + scheduler
+  -> FP32 full-model EMA Polyak update
+```
+
+Posttraining Q targets are computed outside the online graph from the real
+future observation and EMA policy/Q. Only successful terminals stop bootstrap;
+RoboTwin failure endings are time-limit truncations. The reset-pre final row is
+kept in HDF5 with `transition_valid=false`, so it can be a bootstrap observation
+but can never create a zero-length TD transition or cross-episode reset edge.

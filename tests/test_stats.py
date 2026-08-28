@@ -31,11 +31,22 @@ def test_metadata_records_failure_and_uses_executed_policy_action(tmp_path):
     (task_dir / "data").mkdir(parents=True)
     with h5py.File(task_dir / "data" / "episode0.hdf5", "w") as handle:
         handle.attrs["success"] = False
+        handle.attrs["round_id"] = 3
+        handle.attrs["policy_checkpoint"] = "checkpoint-120000"
+        handle.attrs["policy_version"] = "round-3-policy"
+        handle.attrs["has_final_observation"] = True
+        handle.attrs["time_limit_truncated"] = True
         handle.create_dataset("joint_action/vector", data=np.zeros((2, 14), dtype=np.float32))
         handle.create_dataset("policy_action/vector", data=np.full((2, 14), 3.0, dtype=np.float32))
 
     records = discover_episode_records(root, "*/robonana_rollout")
     index, stats = compute_robotwin_metadata(records, dataset_root=root, action_chunk=1)
 
-    assert index["episodes"][0]["failure_episode"] is True
+    row = index["episodes"][0]
+    assert row["failure_episode"] is True
+    assert row["round_id"] == 3
+    assert row["policy_checkpoint"] == "checkpoint-120000"
+    assert row["policy_version"] == "round-3-policy"
+    assert row["has_final_observation"] is True
+    assert row["time_limit_truncated"] is True
     assert stats["norm_stats"]["action"]["mean"][0] == 3.0

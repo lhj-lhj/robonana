@@ -371,25 +371,82 @@ export ROBOTWIN_CONDA_ENV=/path/to/robotwin2-oidn233
 Rollouts are always written outside the initial dataset. The current collector
 saves aligned three-view RGB, observed state, actually executed action,
 success/failure metadata, Qwen3 context, and FLUX AE cache into a separate HDF5
-collection:
+collection. Every episode also stores the reset-pre final observation, a
+`transition_valid` vector, `round_id`, `policy_checkpoint`, and
+`policy_version`; a timeout is a truncation and never a reset observation:
 
 ```bash
 export ROBONANA_INITIAL_DATASET_ROOT="$ROBONANA_DATASET_ROOT"
 export ROBONANA_STATS_SOURCE="$ROBONANA_DATASET_ROOT/robonana_norm_stats.json"
 export ROBONANA_TRAINED_CHECKPOINT=$PWD/experiments/<run>/models/<checkpoint>/transformer/diffusion_pytorch_model.bin
+export ROBONANA_COLLECTION_ROUND=0
+export ROBONANA_POLICY_VERSION=theta_0
 
 TEST_NUM=1 PORT=8095 \
 bash scripts/collect_prepare_robotwin_rollouts.sh \
   beat_block_hammer demo_clean step1000_failures 0
 ```
 
-Failed episodes have `action_loss_mask=0` while retaining their world/reward/Q
-supervision. The separate rollout format and collection path are maintained, but
-the current 800M+DINO config does not yet mix these episodes into training: the
-800M config must first add an explicit LeRobot+HDF5 mixture. The HDF5 loader can
-already decode the horizon-selected three-view RGB online for DINO. Do not set
-rollout-mixture environment variables for the current DINO run until the
-mixture is configured explicitly.
+The metadata/index builder preserves all of those fields. Replay preprocessing
+must complete Qwen3/FLUX caches before posttraining; DINO remains online and is
+not cached.
+
+## Iterative posttraining
+
+Posttraining keeps four logical views without physically merging data:
+
+```text
+25% original success | 25% all collected success |
+25% historical failure | 25% latest-round failure
+```
+
+An empty collected-success share moves to original success; in round 0 an
+empty historical-failure share moves to latest failure. Sampling is uniform by
+pool, then task, then episode, then frame. Advancing
+`ROBONANA_COLLECTION_ROUND` automatically reclassifies the previous latest
+failures as historical while retaining every old rollout.
+
+For every historical/latest failure sample, the current online policy produces
+eight independent 48-action samples. A local full-model FP32 EMA RoboNana runs
+the existing no-image world/reward/Q path with common world noise, ranks the
+eight candidates by clean Q at `idx_h=48`, and always distills the argmax into
+the predicted-action flow. The clean GT-action track remains the actually
+executed behavior action, so future state/image/DINO/reward and current-Q
+training remain aligned with the real transition.
+
+All four pools use the detached target
+`reward_h + 0.999**delta_steps * (1-success_terminal_h) * next_q_ema`.
+The next action and next Q both come from EMA. Failure time limits continue to
+bootstrap from the stored reset-pre final observation; `delta_steps=0` has
+`q_loss_mask=0`. EMA updates once, after a successful real optimizer step, with
+decay `0.995`.
+
+Launch one round from the trained `theta_k` checkpoint:
+
+```bash
+export ROBONANA_REPLAY_ROOT=/path/to/separate/rollout-replay
+export ROBONANA_POSTTRAIN_CHECKPOINT=/path/to/theta_k/transformer/diffusion_pytorch_model.bin
+export ROBONANA_POSTTRAIN_MODEL_CONFIG=/path/to/theta_k/config.json
+export ROBONANA_COLLECTION_ROUND=0
+export ROBONANA_PROJECT_DIR=$PWD/experiments/robotwin_posttrain_round0
+
+# Pretrained Klein 4B + DINO lineage
+bash scripts/run_robotwin_train.sh \
+  --config robonana.configs.robotwin_flux2_4b_dino_posttrain.config
+
+# Or the 800M + DINO lineage
+bash scripts/run_robotwin_train.sh \
+  --config robonana.configs.robotwin_flux2_800m_dino_posttrain.config
+```
+
+Each checkpoint contains the normal online/optimizer/scheduler/trainer state
+plus `ema_model.safetensors`, `ema_state.json`, and `posttrain_config.json`.
+Resuming an old online-only checkpoint initializes EMA by an exact online copy.
+The bounded two-step GPU smoke is:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 python scripts/smoke_posttraining.py --device cuda:0
+```
 
 ## Verification
 

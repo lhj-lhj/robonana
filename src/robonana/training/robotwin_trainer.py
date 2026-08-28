@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import copy
 import gc
+import json
+import os
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import torch
+from safetensors.torch import load_file, save_file
 from torch import Tensor
 
 from fact_train import Trainer, build_optimizer
@@ -26,8 +30,14 @@ from robonana.models.pretrained import (
 )
 from robonana.models.position_ids import dino_position_ids, image_position_ids, text_position_ids
 from robonana.sampling import flow_euler_schedule, sample_world_flow
-from robonana.training.losses import joint_flow_loss
+from robonana.training.losses import joint_flow_loss, masked_mse
 from robonana.training.optimizer import build_optimizer_param_groups
+from robonana.training.posttraining import (
+    FullModelEMA,
+    TDTargetResult,
+    build_td_targets,
+    search_failure_candidates,
+)
 from robonana.training.visualization import (
     decode_flux2_tokens,
     log_pixel_eval,
@@ -113,11 +123,106 @@ class RoboNanaTrainer(Trainer):
             raise ValueError("num_inference_steps must be positive")
         self._pending_pixel_eval: dict[str, Tensor] | None = None
         self._optimizer_step_succeeded = False
+        self._accumulation_invalid = False
         self.vae_checkpoint_dir: str | None = None
         self.vae_dtype = torch.float32
         self.dino_dim: int | None = None
         self.dino_encoder: DinoV3FeatureEncoder | None = None
         self.dino_encoder_batch_size = 0
+        self.posttrain_config = dict(self.kwargs.get("posttrain", {}))
+        self.posttrain_enabled = bool(self.posttrain_config.get("enabled", False))
+        self.full_model_ema: FullModelEMA | None = None
+        self.ema_forward_autocast_dtype = torch.bfloat16
+        self.current_collection_round = int(
+            self.posttrain_config.get("current_collection_round", 0)
+        )
+        self._posttrain_metrics: dict[str, Tensor] = {}
+        self._last_candidate_search = None
+        self._last_td_target: TDTargetResult | None = None
+        self._last_failure_timeout_observation_ids: list[str] = []
+        if self.posttrain_enabled:
+            self._validate_posttrain_config()
+
+    def _validate_posttrain_config(self) -> None:
+        if str(self.kwargs.get("q_target_mode", "")) != "td_posttrain":
+            raise ValueError("iterative posttraining requires q_target_mode='td_posttrain'")
+        ema = dict(self.posttrain_config.get("ema", {}))
+        if ema.get("storage_dtype") != "float32":
+            raise ValueError("posttrain EMA storage_dtype must be float32")
+        if ema.get("forward_autocast_dtype") != "bfloat16":
+            raise ValueError("posttrain EMA forward dtype must be bfloat16")
+        failure = dict(self.posttrain_config.get("failure_policy_improvement", {}))
+        required = {
+            "candidate_policy": "online",
+            "candidate_count": 8,
+            "candidate_horizon": 48,
+            "candidate_selection": "argmax",
+            "use_behavior_candidate": False,
+            "use_advantage_gate": False,
+            "use_confidence_gate": False,
+            "use_uncertainty_gate": False,
+        }
+        for name, expected in required.items():
+            if failure.get(name) != expected:
+                raise ValueError(f"posttrain failure_policy_improvement.{name} must be {expected!r}")
+        td = dict(self.posttrain_config.get("td", {}))
+        if td.get("next_action_policy") != "ema" or td.get("target_q_model") != "ema":
+            raise ValueError("posttrain TD action and Q targets must both use EMA")
+        if td.get("bootstrap_success_terminal") is not False:
+            raise ValueError("success terminals must not bootstrap")
+        if td.get("bootstrap_failure_timeout") is not True:
+            raise ValueError("failure time limits must bootstrap")
+
+    def set_ema_models(self) -> None:
+        if not self.posttrain_enabled:
+            return super().set_ema_models()
+        if self.with_ema:
+            raise ValueError("disable FACT parameter-buffer EMA when full posttrain EMA is enabled")
+        if len(self.models) != 1:
+            raise ValueError("iterative posttraining requires one shared Flux2FACTModel")
+        ema = dict(self.posttrain_config["ema"])
+        self.full_model_ema = FullModelEMA(
+            self.models[0],
+            decay=float(ema["decay"]),
+            update_every_optimizer_steps=int(ema["update_every_optimizer_steps"]),
+            start_step=int(ema["start_step"]),
+            device=self.device,
+        )
+
+    def prepare(self, dataloaders: Any, models: Any, optimizers: Any, schedulers: Any) -> None:
+        super().prepare(dataloaders, models, optimizers, schedulers)
+        if self.full_model_ema is not None:
+            for optimizer in self.optimizers:
+                self.full_model_ema.assert_not_in_optimizer(optimizer)
+            if self.is_main_process:
+                self.logger.info(
+                    "Initialized full FP32 EMA: decay=%.6f updates=%d parameters=%d",
+                    self.full_model_ema.decay,
+                    self.full_model_ema.update_count,
+                    sum(parameter.numel() for parameter in self.full_model_ema.model.parameters()),
+                )
+
+    def state_dict(self) -> dict[str, Any]:
+        state = super().state_dict()
+        if self.posttrain_enabled:
+            state.update(
+                ema_update_count=(
+                    0 if self.full_model_ema is None else self.full_model_ema.update_count
+                ),
+                current_collection_round=self.current_collection_round,
+                posttrain_config=self.posttrain_config,
+            )
+        return state
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        super().load_state_dict(state_dict)
+        if not self.posttrain_enabled:
+            return
+        self.current_collection_round = int(
+            state_dict.get("current_collection_round", self.current_collection_round)
+        )
+        if self.full_model_ema is not None:
+            self.full_model_ema.update_count = int(state_dict.get("ema_update_count", 0))
 
     def get_models(self, model_config):
         action_dim = int(_config_value(model_config, "action_dim", 14))
@@ -291,6 +396,65 @@ class RoboNanaTrainer(Trainer):
                 )
         return [optimizer]
 
+    def save_model_hook(self, models, weights, output_dir: str) -> None:
+        super().save_model_hook(models, weights, output_dir)
+        if self.full_model_ema is None or not self.is_main_process:
+            return
+        output = Path(output_dir)
+        save_file(
+            self.full_model_ema.state_dict(),
+            str(output / "ema_model.safetensors"),
+        )
+        ema_state = {
+            "decay": self.full_model_ema.decay,
+            "update_every_optimizer_steps": self.full_model_ema.update_every_optimizer_steps,
+            "start_step": self.full_model_ema.start_step,
+            "update_count": self.full_model_ema.update_count,
+            "storage_dtype": "float32",
+            "forward_autocast_dtype": "bfloat16",
+            "current_collection_round": self.current_collection_round,
+        }
+        (output / "ema_state.json").write_text(
+            json.dumps(ema_state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        (output / "posttrain_config.json").write_text(
+            json.dumps(self.posttrain_config, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    def load_model_hook(self, models, input_dir: str) -> None:
+        super().load_model_hook(models, input_dir)
+        if self.full_model_ema is None:
+            return
+        ema_path = Path(input_dir) / "ema_model.safetensors"
+        state_path = Path(input_dir) / "ema_state.json"
+        if ema_path.is_file():
+            self.full_model_ema.load_state_dict(load_file(str(ema_path), device="cpu"))
+            if state_path.is_file():
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                self.full_model_ema.update_count = int(state.get("update_count", 0))
+                self.current_collection_round = int(
+                    state.get("current_collection_round", self.current_collection_round)
+                )
+            source = str(ema_path)
+        else:
+            online = self.accelerator.unwrap_model(
+                self.model, keep_torch_compile=False
+            )
+            self.full_model_ema.exact_copy_from(online)
+            self.full_model_ema.update_count = 0
+            source = "exact-copy online (legacy checkpoint has no EMA)"
+        for optimizer in self.optimizers:
+            self.full_model_ema.assert_not_in_optimizer(optimizer)
+        if self.is_main_process:
+            self.logger.info(
+                "Restored full EMA from %s: decay=%.6f updates=%d parameters=%d",
+                source,
+                self.full_model_ema.decay,
+                self.full_model_ema.update_count,
+                sum(parameter.numel() for parameter in self.full_model_ema.model.parameters()),
+            )
+
     def _sample_timestep(self, batch_size: int) -> Tensor:
         sigma = torch.rand(batch_size, device=self.device, dtype=torch.float32)
         if self.flow_shift != 1.0:
@@ -312,17 +476,85 @@ class RoboNanaTrainer(Trainer):
         super().save_checkpoint_step()
 
     def backward_step(self, loss: Tensor) -> None:
-        loss_is_finite = bool(torch.isfinite(loss.detach()).all().item())
+        finite_flag = torch.isfinite(loss.detach()).all().to(
+            device=loss.device, dtype=torch.int32
+        )
+        if int(getattr(self.accelerator, "num_processes", 1)) > 1:
+            finite_flag = self.accelerator.reduce(finite_flag, reduction="min")
+        loss_is_finite = bool(finite_flag.item())
+        if not loss_is_finite:
+            self._accumulation_invalid = True
+        if bool(getattr(self, "_accumulation_invalid", False)):
+            self._optimizer_step_succeeded = False
+            # One bad accumulation micro-step invalidates the whole optimizer
+            # step on every rank.  Clear partial gradients at the synchronization
+            # boundary and deliberately do not advance the scheduler or EMA.
+            if self.accelerator.sync_gradients:
+                for optimizer in self.optimizers:
+                    optimizer.zero_grad()
+                self._accumulation_invalid = False
+            if self.is_main_process:
+                self.logger.info(
+                    "loss is non-finite, cancel accumulated backward/optimizer/scheduler/EMA"
+                )
+            return
         super().backward_step(loss)
-        self._optimizer_step_succeeded = loss_is_finite and self.accelerator.sync_gradients
+        optimizer_skipped = any(
+            bool(getattr(optimizer, "step_was_skipped", False))
+            for optimizer in self.optimizers
+        )
+        self._optimizer_step_succeeded = (
+            loss_is_finite and self.accelerator.sync_gradients and not optimizer_skipped
+        )
+        if self.full_model_ema is not None:
+            online = self.accelerator.unwrap_model(
+                self.model, keep_torch_compile=False
+            )
+            self.full_model_ema.update(
+                online,
+                optimizer_step=self.cur_step,
+                optimizer_step_succeeded=self._optimizer_step_succeeded,
+            )
 
     def print_step(self) -> None:
         pending_eval = self._pending_pixel_eval
         self._pending_pixel_eval = None
         if self._optimizer_step_succeeded and pending_eval is not None:
             self._run_fixed_horizon_eval(pending_eval)
+        if (
+            self.full_model_ema is not None
+            and self.cur_step % self.log_interval == 0
+        ):
+            self._accumulate_metric(
+                "posttrain/ema_updates",
+                torch.tensor(
+                    float(self.full_model_ema.update_count), device=self.device
+                ),
+            )
+            self._accumulate_metric(
+                "posttrain/ema_online_l2",
+                torch.tensor(self.full_model_ema.last_online_l2, device=self.device),
+            )
         self._optimizer_step_succeeded = False
         super().print_step()
+
+    def _accumulate_metric(self, name: str, value: Tensor, *, total: bool = False) -> None:
+        scalar = value.detach().float().reshape(())
+        gathered = self.accelerator.gather(scalar[None]).reshape(-1)
+        reduced = gathered.sum() if total else gathered.mean()
+        if name not in self._outputs:
+            self._outputs[name] = {"sum": 0.0, "num": 0}
+        self._outputs[name]["sum"] += float(reduced.cpu().item())
+        self._outputs[name]["num"] += 1
+
+    def _record_posttrain_metrics(self) -> None:
+        for name, value in self._posttrain_metrics.items():
+            self._accumulate_metric(
+                name,
+                value,
+                total=name.endswith("_samples"),
+            )
+        self._posttrain_metrics = {}
 
     def print_after_train(self) -> None:
         if self.device.type == "cuda":
@@ -357,6 +589,9 @@ class RoboNanaTrainer(Trainer):
     ) -> None:
         self._pending_pixel_eval = {
             "sample_index": batch_dict["sample_index"][0].detach().cpu(),
+            "pool_id": batch_dict.get(
+                "pool_id", torch.zeros_like(batch_dict["sample_index"])
+            )[0].detach().cpu(),
             "context": context[:1].detach(),
             "context_mask": context_mask[:1].detach(),
             "current": current[:1].detach(),
@@ -364,18 +599,23 @@ class RoboNanaTrainer(Trainer):
             "action": action[:1].detach(),
         }
 
-    def _run_fixed_horizon_eval(self, payload: dict[str, Tensor]) -> None:
+    def _pixel_eval_dataset(self, pool_id: int):
         dataset = self.dataloader.dataset
-        while not hasattr(dataset, "load_eval_future_latents"):
-            if hasattr(dataset, "dataset"):
-                dataset = dataset.dataset
-            elif getattr(dataset, "datasets", None):
-                # Pixel monitoring always uses the clean initial-data child.
-                dataset = dataset.datasets[0]
-            else:
-                break
+        while hasattr(dataset, "dataset"):
+            dataset = dataset.dataset
+        children = getattr(dataset, "datasets", None)
+        if children is not None:
+            if not 0 <= int(pool_id) < len(children):
+                raise IndexError(f"pixel-eval pool_id {pool_id} is outside {len(children)} pools")
+            dataset = children[int(pool_id)]
+        while not hasattr(dataset, "load_eval_future_latents") and hasattr(dataset, "dataset"):
+            dataset = dataset.dataset
         if not hasattr(dataset, "load_eval_future_latents") or not hasattr(dataset, "eval_horizons"):
             raise TypeError("pixel eval requires RoboTwinHDF5Dataset eval accessors")
+        return dataset
+
+    def _run_fixed_horizon_eval(self, payload: dict[str, Tensor]) -> None:
+        dataset = self._pixel_eval_dataset(int(payload.get("pool_id", torch.tensor(0)).item()))
         horizons = torch.tensor(dataset.eval_horizons, device=self.device, dtype=torch.long)
         count = horizons.numel()
         if self.is_main_process:
@@ -568,6 +808,150 @@ class RoboNanaTrainer(Trainer):
         if self.is_main_process:
             self.logger.info("Removed FLUX.2 VAE from every rank GPU after pixel eval")
 
+    def _prepare_posttrain_targets(
+        self,
+        *,
+        batch_dict: dict[str, Any],
+        context: Tensor,
+        context_mask: Tensor,
+        current: Tensor,
+        future: Tensor,
+        state: Tensor,
+        future_state: Tensor,
+        behavior_action: Tensor,
+        reward: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        if self.full_model_ema is None:
+            raise RuntimeError("posttraining requires a callable full-model EMA")
+        failure_mask = batch_dict["failure_episode_mask"].to(
+            device=self.device, dtype=torch.bool
+        ).reshape(-1)
+        pool_id = batch_dict["pool_id"].to(device=self.device, dtype=torch.long).reshape(-1)
+        invalid_failure_pool = failure_mask & ~((pool_id == 2) | (pool_id == 3))
+        if bool(invalid_failure_pool.any()):
+            raise RuntimeError("failure samples must come from historical/latest failure pools")
+        pred_action_target = behavior_action.clone()
+        failure = dict(self.posttrain_config["failure_policy_improvement"])
+        self._last_candidate_search = None
+        if bool(failure_mask.any()):
+            result = search_failure_candidates(
+                online_model=self.model,
+                ema_model=self.full_model_ema.model,
+                context=context[failure_mask],
+                current_latents=current[failure_mask],
+                state=state[failure_mask],
+                context_mask=context_mask[failure_mask],
+                behavior_action=behavior_action[failure_mask],
+                candidate_count=int(failure["candidate_count"]),
+                candidate_horizon=int(failure["candidate_horizon"]),
+                action_sampling_steps=int(failure["candidate_action_sampling_steps"]),
+                q_sampling_steps=int(failure["candidate_q_sampling_steps"]),
+                flow_shift=float(failure["flow_shift"]),
+                microbatch_size=int(failure["candidate_microbatch_size"]),
+                grid_height=self.grid_height,
+                grid_width=self.grid_width,
+                ema_autocast_dtype=self.ema_forward_autocast_dtype,
+            )
+            pred_action_target[failure_mask] = result.pseudo_action
+            self._last_candidate_search = result
+            self._posttrain_metrics.update(
+                {
+                    "posttrain/failure_best_q_mean": result.best_q.mean(),
+                    "posttrain/failure_candidate_q_mean": result.candidate_q.mean(),
+                    "posttrain/failure_candidate_q_std": result.candidate_q.std(unbiased=False),
+                    "posttrain/failure_behavior_q_mean": result.behavior_q.mean(),
+                    "posttrain/failure_best_minus_behavior_q": (
+                        result.best_q - result.behavior_q
+                    ).mean(),
+                    "posttrain/candidate_search_ms": torch.tensor(
+                        result.elapsed_ms, device=self.device
+                    ),
+                    "posttrain/candidate_search_peak_gib": torch.tensor(
+                        result.peak_memory_bytes / 1024**3, device=self.device
+                    ),
+                }
+            )
+
+        td = dict(self.posttrain_config["td"])
+        td_result = build_td_targets(
+            ema_model=self.full_model_ema.model,
+            context=context,
+            next_current_latents=future,
+            next_state=future_state,
+            context_mask=context_mask,
+            reward_h=reward,
+            delta_steps=batch_dict["delta_steps"].to(self.device),
+            success_terminal_h=batch_dict["success_terminal_h"].to(self.device),
+            action_template=behavior_action,
+            discount=float(self.posttrain_config["discount"]),
+            target_action_horizon=int(td["target_action_horizon"]),
+            action_sampling_steps=int(td["action_sampling_steps"]),
+            q_sampling_steps=int(td["q_sampling_steps"]),
+            flow_shift=float(td["flow_shift"]),
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
+            microbatch_size=int(td.get("microbatch_size", 16)),
+            ema_autocast_dtype=self.ema_forward_autocast_dtype,
+        )
+        self._last_td_target = td_result
+        delta = batch_dict["delta_steps"].to(device=self.device).float().reshape(-1)
+        success_terminal = batch_dict["success_terminal_h"].to(
+            device=self.device
+        ).float().reshape(-1)
+        failure_timeout = batch_dict["time_limit_truncated_h"].to(
+            device=self.device
+        ).float().reshape(-1)
+        valid = td_result.q_loss_mask.reshape(-1) > 0
+        bootstrap = td_result.bootstrap_mask.reshape(-1) > 0
+        observation_ids = batch_dict.get("observation_id", [])
+        if isinstance(observation_ids, (list, tuple)):
+            self._last_failure_timeout_observation_ids = [
+                str(observation_ids[index])
+                for index in range(len(observation_ids))
+                if bool(failure_timeout[index] > 0)
+            ]
+        self._posttrain_metrics.update(
+            {
+                "posttrain/td_reward_mean": reward.float().mean(),
+                "posttrain/td_delta_mean": delta.mean(),
+                "posttrain/td_discount_mean": td_result.discount_factor.mean(),
+                "posttrain/td_next_q_mean": (
+                    td_result.next_q.reshape(-1)[bootstrap].mean()
+                    if bool(bootstrap.any())
+                    else reward.new_zeros(())
+                ),
+                "posttrain/td_target_mean": (
+                    td_result.q_target.reshape(-1)[valid].mean()
+                    if bool(valid.any())
+                    else reward.new_zeros(())
+                ),
+                "posttrain/td_success_terminal_fraction": success_terminal.mean(),
+                "posttrain/td_failure_timeout_fraction": failure_timeout.mean(),
+                "posttrain/td_bootstrap_fraction": td_result.bootstrap_mask.float().mean(),
+                "posttrain/td_target_ms": torch.tensor(td_result.elapsed_ms, device=self.device),
+                "posttrain/td_target_peak_gib": torch.tensor(
+                    td_result.peak_memory_bytes / 1024**3, device=self.device
+                ),
+                "posttrain/q_loss_mask_fraction": td_result.q_loss_mask.float().mean(),
+                "posttrain/pseudo_action_samples": failure_mask.float().sum(),
+                "posttrain/success_action_samples": (~failure_mask).float().sum(),
+            }
+        )
+        pool_metric_names = (
+            "original_success_samples",
+            "collected_success_samples",
+            "historical_failure_samples",
+            "latest_failure_samples",
+        )
+        for index, name in enumerate(pool_metric_names):
+            self._posttrain_metrics[f"posttrain/{name}"] = (pool_id == index).float().sum()
+        return (
+            pred_action_target.detach(),
+            td_result.q_target.to(dtype=self.dtype),
+            torch.ones_like(failure_mask, dtype=torch.float32),
+            td_result.q_loss_mask,
+        )
+
     def forward_step(self, batch_dict: dict[str, Any]):
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
         current = batch_dict["current_latents"].to(device=self.device, dtype=self.dtype)
@@ -586,7 +970,9 @@ class RoboNanaTrainer(Trainer):
                 inference_batch_size=self.dino_encoder_batch_size,
             ).to(dtype=self.dtype)
         state = batch_dict["state"].to(device=self.device, dtype=self.dtype).unsqueeze(1)
-        action = batch_dict["action"].to(device=self.device, dtype=self.dtype)
+        behavior_action = batch_dict.get("behavior_action", batch_dict["action"]).to(
+            device=self.device, dtype=self.dtype
+        )
         future_state = batch_dict["future_state"].to(device=self.device, dtype=self.dtype).unsqueeze(1)
         reward = batch_dict["reward"].to(device=self.device, dtype=self.dtype).reshape(
             context.shape[0], 1, 1
@@ -597,6 +983,25 @@ class RoboNanaTrainer(Trainer):
         horizon = batch_dict["horizon_idx"].to(device=self.device, dtype=torch.long).reshape(-1)
         context_mask = batch_dict["context_mask"].to(device=self.device, dtype=torch.bool)
         action_loss_mask = batch_dict["action_loss_mask"].to(device=self.device)
+        q_loss_mask = batch_dict.get("q_loss_mask")
+        if q_loss_mask is not None:
+            q_loss_mask = q_loss_mask.to(device=self.device)
+
+        pred_action_target = behavior_action
+        if self.posttrain_enabled:
+            pred_action_target, q, action_loss_mask, q_loss_mask = (
+                self._prepare_posttrain_targets(
+                    batch_dict=batch_dict,
+                    context=context,
+                    context_mask=context_mask,
+                    current=current,
+                    future=future,
+                    state=state,
+                    future_state=future_state,
+                    behavior_action=behavior_action,
+                    reward=reward,
+                )
+            )
 
         batch_size = context.shape[0]
         expected_tokens = self.grid_height * self.grid_width
@@ -606,7 +1011,7 @@ class RoboNanaTrainer(Trainer):
             )
         action_timestep = self._sample_timestep(batch_size)
         wm_timestep = self._sample_timestep(batch_size)
-        noisy_action, action_target = flow_noise(action, action_timestep)
+        noisy_action, action_target = flow_noise(pred_action_target, action_timestep)
         noisy_future, image_target = flow_noise(future, wm_timestep)
         noisy_future_state, future_state_target = flow_noise(future_state, wm_timestep)
         noisy_reward, reward_target = flow_noise(reward, wm_timestep)
@@ -656,7 +1061,7 @@ class RoboNanaTrainer(Trainer):
             future_ids=future_ids,
             state=state,
             noisy_pred_action=noisy_action,
-            gt_action_cond=action,
+            gt_action_cond=behavior_action,
             horizon_idx=horizon,
             noisy_future_state=noisy_future_state,
             noisy_reward=noisy_reward,
@@ -675,10 +1080,9 @@ class RoboNanaTrainer(Trainer):
                 context_mask=context_mask,
                 current=current,
                 state=state,
-                action=action,
+                action=behavior_action,
             )
-
-        return joint_flow_loss(
+        losses = joint_flow_loss(
             output,
             image_target=image_target,
             action_target=action_target,
@@ -687,7 +1091,18 @@ class RoboNanaTrainer(Trainer):
             q_target=q_target,
             dino_target=dino_target,
             action_loss_mask=action_loss_mask,
+            q_loss_mask=q_loss_mask,
         )
+        if self.posttrain_enabled:
+            failure_mask = batch_dict["failure_episode_mask"].to(
+                device=self.device, dtype=torch.float32
+            )
+            self._posttrain_metrics["posttrain/pseudo_action_loss"] = masked_mse(
+                output.action,
+                action_target,
+                failure_mask,
+            ).detach()
+        return losses
 
     def parse_losses(self, losses: dict[str, Tensor] | Tensor) -> Tensor:
         if not isinstance(losses, dict):
@@ -712,4 +1127,6 @@ class RoboNanaTrainer(Trainer):
                 self._outputs[key] = {"sum": 0.0, "num": 0}
             self._outputs[key]["sum"] += float(value.detach().item())
             self._outputs[key]["num"] += 1
+        if self.posttrain_enabled:
+            self._record_posttrain_metrics()
         return loss

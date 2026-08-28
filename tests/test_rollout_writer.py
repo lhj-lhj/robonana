@@ -18,6 +18,8 @@ def test_rollout_writer_saves_atomic_training_episode(tmp_path) -> None:
         rollout_root,
         initial_dataset_root=initial_root,
         checkpoint="checkpoint-100",
+        policy_version="policy-v2",
+        round_id=3,
         task_config="demo_clean",
     )
     for step in range(2):
@@ -35,6 +37,14 @@ def test_rollout_writer_saves_atomic_training_episode(tmp_path) -> None:
             success=False,
             terminal=step == 1,
         )
+    final_images = {
+        camera: np.full((8, 12, 3), 100 + index, dtype=np.uint8)
+        for index, camera in enumerate(CAMERAS)
+    }
+    writer.append_final_observation(
+        images=final_images,
+        state=np.arange(14, dtype=np.float32) + 2,
+    )
     output = writer.finish_episode()
     assert output is not None
     assert output.relative_to(rollout_root).as_posix() == (
@@ -43,15 +53,25 @@ def test_rollout_writer_saves_atomic_training_episode(tmp_path) -> None:
     with h5py.File(output, "r") as handle:
         assert handle.attrs["success"] == np.bool_(False)
         assert handle.attrs["failure_episode"] == np.bool_(True)
-        np.testing.assert_allclose(handle["joint_action/vector"][:], np.arange(14)[None] + [[0], [1]])
-        np.testing.assert_allclose(handle["policy_action/vector"][:], np.arange(14)[None] + [[0.5], [1.5]])
+        np.testing.assert_allclose(
+            handle["joint_action/vector"][:], np.arange(14)[None] + [[0], [1], [2]]
+        )
+        np.testing.assert_allclose(
+            handle["policy_action/vector"][:], np.arange(14)[None] + [[0.5], [1.5], [1.5]]
+        )
+        np.testing.assert_array_equal(handle["transition_valid"][:], [True, True, False])
+        assert handle.attrs["has_final_observation"] == np.bool_(True)
+        assert handle.attrs["time_limit_truncated"] == np.bool_(True)
+        assert handle.attrs["round_id"] == 3
+        assert handle.attrs["policy_version"] == "policy-v2"
         encoded = bytes(handle["observation/head_camera/rgb"][0])
         assert Image.open(BytesIO(encoded)).size == (12, 8)
     metadata = json.loads(
         (rollout_root / "beat_block_hammer/robonana_rollout/metadata/episode0.json").read_text()
     )
     assert metadata["failure_episode"] is True
-    assert metadata["length"] == 2
+    assert metadata["length"] == 3
+    assert metadata["round_id"] == 3
     assert not writer.has_pending_episode
 
 

@@ -13,6 +13,25 @@ from .robotwin_hdf5 import ALOHA_DELTA_MASK, EpisodeRecord, discover_episode_rec
 from .robotwin_lerobot import DEFAULT_TASK_GLOBS, discover_lerobot_episode_records
 
 
+def _episode_index_row(record: EpisodeRecord, root: Path) -> dict:
+    """Serialize all replay-selection metadata without merging physical pools."""
+
+    return {
+        "task_name": record.task_name,
+        "task_dir": str(record.task_dir.relative_to(root)),
+        "source": str(record.source.relative_to(root)),
+        "episode_index": record.episode_index,
+        "length": record.length,
+        "success": record.success,
+        "failure_episode": not record.success,
+        "round_id": record.round_id,
+        "policy_checkpoint": record.policy_checkpoint,
+        "policy_version": record.policy_version,
+        "has_final_observation": record.has_final_observation,
+        "time_limit_truncated": record.time_limit_truncated,
+    }
+
+
 class RunningMoments:
     def __init__(self, dim: int) -> None:
         self.count = 0
@@ -71,18 +90,7 @@ def compute_robotwin_metadata(
 
     index = {
         "schema_version": 1,
-        "episodes": [
-            {
-                "task_name": record.task_name,
-                "task_dir": str(record.task_dir.relative_to(root)),
-                "source": str(record.source.relative_to(root)),
-                "episode_index": record.episode_index,
-                "length": record.length,
-                "success": record.success,
-                "failure_episode": not record.success,
-            }
-            for record in records
-        ],
+        "episodes": [_episode_index_row(record, root) for record in records],
     }
     stats = {
         "schema_version": 1,
@@ -160,18 +168,7 @@ def compute_robotwin_lerobot_metadata(
         "schema_version": 2,
         "source_format": "lerobot-v2",
         "task_globs": list(DEFAULT_TASK_GLOBS),
-        "episodes": [
-            {
-                "task_name": record.task_name,
-                "task_dir": str(record.task_dir.relative_to(root)),
-                "source": str(record.source.relative_to(root)),
-                "episode_index": record.episode_index,
-                "length": record.length,
-                "success": record.success,
-                "failure_episode": not record.success,
-            }
-            for record in records
-        ],
+        "episodes": [_episode_index_row(record, root) for record in records],
     }
     stats = {
         "schema_version": 2,

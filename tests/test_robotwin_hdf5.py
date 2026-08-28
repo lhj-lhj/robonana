@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import h5py
 import numpy as np
@@ -10,6 +11,8 @@ from robonana.data.robotwin_hdf5 import (
     RoboTwinEpisodeSampler,
     RoboTwinHDF5Dataset,
     RoboTwinMixtureSampler,
+    RoboTwinPosttrainSampler,
+    discounted_chunk_reward,
     mac_success_targets,
 )
 
@@ -211,3 +214,145 @@ def test_mac_targets_clip_tail_and_terminal_has_zero_reward_and_q():
     assert (future_index, delta) == (4, 0)
     assert reward == 0.0
     assert q == 0.0
+
+
+def _posttrain_pool(tmp_path, pool_name, *, success, round_id=0, allow_empty=False):
+    root = tmp_path / pool_name
+    task_dir = root / f"task_{pool_name}" / "robonana_rollout"
+    (task_dir / "data").mkdir(parents=True)
+    (task_dir / "flux_cache/latents").mkdir(parents=True)
+    (task_dir / "flux_cache/language").mkdir(parents=True)
+    states = np.arange(4 * 14, dtype=np.float32).reshape(4, 14)
+    with h5py.File(task_dir / "data/episode0.hdf5", "w") as handle:
+        handle.attrs.update(
+            success=success,
+            round_id=round_id,
+            policy_checkpoint="checkpoint-k",
+            policy_version="theta-k",
+            has_final_observation=True,
+            time_limit_truncated=not success,
+        )
+        handle.create_dataset("joint_action/vector", data=states)
+        handle.create_dataset("policy_action/vector", data=states + 0.5)
+        handle.create_dataset("transition_valid", data=np.asarray([1, 1, 1, 0], dtype=bool))
+    torch.save(torch.zeros(4, 2, 4), task_dir / "flux_cache/latents/episode_000000.pt")
+    torch.save(torch.zeros(2, 3), task_dir / "flux_cache/language/episode_000000.pt")
+    stats_path = root / "norm_stats.json"
+    stats_path.write_text(json.dumps(_stats()), encoding="utf-8")
+    return RoboTwinHDF5Dataset(
+        str(root),
+        stats_path=str(stats_path),
+        task_glob="*/robonana_rollout",
+        fixed_horizon=48,
+        eval_horizons=(1,),
+        q_target_mode="td_posttrain",
+        episode_filter="success" if success else "failure",
+        pool_name=pool_name,
+        allow_empty=allow_empty,
+        require_final_observation=pool_name != "original_success",
+    )
+
+
+def test_failure_timeout_uses_real_final_observation_and_zero_length_is_masked(tmp_path):
+    dataset = _posttrain_pool(
+        tmp_path, "latest_failure", success=False, round_id=2
+    )
+    penultimate = dataset[2]
+    final = dataset[3]
+    assert penultimate["future_index"].item() == 3
+    assert penultimate["delta_steps"].item() == 1
+    assert penultimate["success_terminal_h"].item() == 0
+    assert penultimate["time_limit_truncated_h"].item() == 1
+    assert penultimate["q_loss_mask"].item() == 1
+    assert penultimate["round_id"].item() == 2
+    assert penultimate["policy_version"] == "theta-k"
+    assert final["delta_steps"].item() == 0
+    assert final["q_loss_mask"].item() == 0
+    assert final["reward_h"].item() == 0
+    assert discounted_chunk_reward(3) == pytest.approx(-2.997001)
+
+
+def test_failure_without_reset_pre_final_observation_is_rejected(tmp_path):
+    root = tmp_path / "old"
+    dataset = _write_minimal_dataset(
+        root,
+        "task",
+        "robonana_rollout",
+        success=False,
+        policy_value=1.0,
+    )
+    dataset.q_target_mode = "td_posttrain"
+    dataset.episode_filter = "failure"
+    dataset.pool_name = "latest_failure"
+    dataset.require_final_observation = True
+    with pytest.raises(RuntimeError, match="reset-pre final observations"):
+        len(dataset)
+
+
+def test_four_pool_sampler_preserves_fixed_batch_ratio(tmp_path):
+    pools = [
+        _posttrain_pool(tmp_path, "original_success", success=True),
+        _posttrain_pool(tmp_path, "collected_success_replay", success=True),
+        _posttrain_pool(tmp_path, "historical_failure_replay", success=False, round_id=0),
+        _posttrain_pool(tmp_path, "latest_failure", success=False, round_id=1),
+    ]
+    combined = ConcatDataset(pools)
+    sampler = RoboTwinPosttrainSampler(
+        combined,
+        batch_size=8,
+        infinite=False,
+        sample_epoch_size=8,
+        seed=9,
+    )
+    indices = list(sampler)
+    pool_ids = [int(combined[index]["pool_id"].item()) for index in indices]
+    assert [pool_ids.count(index) for index in range(4)] == [2, 2, 2, 2]
+
+
+def test_first_round_redistributes_empty_historical_failure_to_latest(tmp_path):
+    historical = _posttrain_pool(
+        tmp_path, "historical_failure_replay", success=False, allow_empty=True
+    )
+    historical.episode_filter = "failure"
+    historical.selected_round_id = 99
+    historical.records = []
+    historical.episode_starts = np.empty((0,), dtype=np.int64)
+    historical.episode_stops = np.empty((0,), dtype=np.int64)
+    pools = [
+        _posttrain_pool(tmp_path, "original_success", success=True),
+        _posttrain_pool(tmp_path, "collected_success_replay", success=True),
+        historical,
+        _posttrain_pool(tmp_path, "latest_failure", success=False, round_id=0),
+    ]
+    combined = ConcatDataset(pools)
+    sampler = RoboTwinPosttrainSampler(
+        combined,
+        batch_size=8,
+        infinite=False,
+        sample_epoch_size=8,
+    )
+    pool_ids = [int(combined[index]["pool_id"].item()) for index in sampler]
+    assert [pool_ids.count(index) for index in range(4)] == [2, 2, 0, 4]
+
+
+def test_new_round_reclassifies_latest_but_retains_all_historical_failures(tmp_path):
+    historical = _posttrain_pool(
+        tmp_path, "historical_failure_replay", success=False, round_id=0
+    )
+    historical._ensure_index()
+    old = historical.records[0]
+    previous_latest = replace(old, episode_index=1, round_id=1)
+    new_latest = replace(old, episode_index=2, round_id=2)
+    all_failures = [old, previous_latest, new_latest]
+
+    historical.round_max = 1
+    historical._set_records(all_failures)
+    latest = _posttrain_pool(tmp_path, "latest_failure", success=False, round_id=2)
+    latest.selected_round_id = 2
+    latest._set_records(all_failures)
+
+    assert [(record.episode_index, record.round_id) for record in historical.records] == [
+        (0, 0),
+        (1, 1),
+    ]
+    assert [(record.episode_index, record.round_id) for record in latest.records] == [(2, 2)]

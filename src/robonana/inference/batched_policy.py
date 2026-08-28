@@ -16,8 +16,7 @@ from robonana.inference.robotwin_policy import (
     postprocess_action,
     seeded_randn_like,
 )
-from robonana.models.position_ids import image_position_ids, text_position_ids
-from robonana.sampling import sample_action_flow
+from robonana.sampling import sample_flux2_action
 from world_action_model.image_layouts import (
     ROBOTWIN_VIEW_KEYS,
     build_robotwin_ref_tensor,
@@ -143,25 +142,6 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
             device=self.model_device,
             dtype=torch.long,
         )
-        context_ids = text_position_ids(batch_size, context.shape[1], self.model_device)
-        current_ids = image_position_ids(
-            batch_size,
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-            time_coord=torch.zeros_like(horizon),
-            device=self.model_device,
-        )
-        empty_ids = torch.zeros(batch_size, 0, 4, device=self.model_device, dtype=torch.long)
-        empty_image = torch.zeros(
-            batch_size,
-            0,
-            current.shape[-1],
-            device=self.model_device,
-            dtype=self.dtype,
-        )
-        empty_state = torch.zeros(
-            batch_size, 0, self.state_dim, device=self.model_device, dtype=self.dtype
-        )
         clean_gt_action = torch.zeros(
             batch_size,
             self.action_chunk,
@@ -169,7 +149,6 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
             device=self.model_device,
             dtype=self.dtype,
         )
-        clean_wm_time = torch.zeros(batch_size, device=self.model_device, dtype=torch.float32)
         action_noise = torch.cat(
             [
                 seeded_randn_like(clean_gt_action[index : index + 1], seed)
@@ -177,35 +156,17 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
             ],
             dim=0,
         )
-        def predict_action(sampled_action: Tensor, sigma: Tensor) -> Tensor:
-            output = self.model(
-                context=context,
-                context_ids=context_ids,
-                current_latents=current,
-                current_ids=current_ids,
-                noisy_future_latents=empty_image,
-                future_ids=empty_ids,
-                state=state,
-                noisy_pred_action=sampled_action,
-                gt_action_cond=clean_gt_action,
-                horizon_idx=horizon,
-                noisy_future_state=empty_state,
-                noisy_reward=torch.zeros(
-                    batch_size, 0, 1, device=self.model_device, dtype=self.dtype
-                ),
-                noisy_q=torch.zeros(
-                    batch_size, 0, 1, device=self.model_device, dtype=self.dtype
-                ),
-                action_timestep=sigma.expand(batch_size),
-                wm_timestep=clean_wm_time,
-                context_mask=context_mask,
-            )
-            return output.action
-
-        return sample_action_flow(
+        return sample_flux2_action(
+            model=self.model,
+            context=context,
+            current_latents=current,
+            state=state,
+            context_mask=context_mask,
             action_noise=action_noise,
+            horizon_idx=horizon,
             schedule=self.schedule,
-            predict_action=predict_action,
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
         )
 
     @torch.inference_mode()
