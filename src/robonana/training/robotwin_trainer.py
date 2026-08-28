@@ -22,6 +22,7 @@ from robonana.models.pretrained import (
     configure_trainable_parameters,
     initialize_flux2_fact_model,
     load_flux2_fact_checkpoint,
+    load_flux2_fact_trained_checkpoint,
 )
 from robonana.models.position_ids import dino_position_ids, image_position_ids, text_position_ids
 from robonana.sampling import flow_euler_schedule, sample_world_flow
@@ -63,11 +64,34 @@ def _config_value(config: Any, name: str, default: Any = None) -> Any:
         return getter(name, default) if getter is not None else default
 
 
+def _validate_initial_global_step(initial_step: int, max_steps: int) -> int:
+    initial_step = int(initial_step)
+    max_steps = int(max_steps)
+    if initial_step < 0:
+        raise ValueError("initial_global_step cannot be negative")
+    if initial_step >= max_steps:
+        raise ValueError(
+            "initial_global_step must be smaller than max_steps, got "
+            f"{initial_step} >= {max_steps}"
+        )
+    return initial_step
+
+
 class RoboNanaTrainer(Trainer):
     """Reuse FACT's DataLoader, Accelerate, optimizer, checkpoint, and logging loop."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        initial_global_step = int(self.kwargs.get("initial_global_step", 0))
+        if initial_global_step:
+            initial_global_step = _validate_initial_global_step(
+                initial_global_step, self._max_steps
+            )
+            if self.cur_step != 0:
+                raise RuntimeError(
+                    "FACT initialized the trainer at a nonzero step unexpectedly"
+                )
+            self._cur_step = initial_global_step
         self.memory_limit_gib = float(self.kwargs.get("memory_limit_gib", 0.0))
         self.cuda_device_index = resolve_cuda_device_index(self.device)
         if self.memory_limit_gib > 0 and self.device.type == "cuda":
@@ -157,6 +181,27 @@ class RoboNanaTrainer(Trainer):
                 params=params,
             )
             initialization_label = f"pretrained checkpoint parameters={report.checkpoint_parameters}"
+        elif initialization == "trained":
+            if checkpoint is None:
+                raise ValueError("trained initialization requires models.checkpoint")
+            model, report = load_flux2_fact_trained_checkpoint(
+                str(checkpoint),
+                action_dim=action_dim,
+                state_dim=state_dim,
+                reward_dim=reward_dim,
+                q_dim=q_dim,
+                max_horizon=max_horizon,
+                dino_dim=dino_dim,
+                pred_action_bidirectional=pred_action_bidirectional,
+                device=self.device,
+                dtype=self.dtype,
+                params=params,
+                config_path=_config_value(model_config, "checkpoint_config", None),
+            )
+            initialization_label = (
+                f"trained checkpoint parameters={report.checkpoint_parameters}; "
+                f"new_parameters={len(report.initialized_robot_parameters)}"
+            )
         elif initialization == "scratch":
             model = initialize_flux2_fact_model(
                 action_dim=action_dim,
@@ -172,7 +217,10 @@ class RoboNanaTrainer(Trainer):
             )
             initialization_label = "scratch"
         else:
-            raise ValueError(f"initialization must be 'pretrained' or 'scratch', got {initialization!r}")
+            raise ValueError(
+                "initialization must be 'pretrained', 'trained', or 'scratch', "
+                f"got {initialization!r}"
+            )
         train_mode = str(_config_value(model_config, "train_mode", "full"))
         trainable_names = configure_trainable_parameters(model, train_mode)
         if bool(_config_value(model_config, "gradient_checkpointing", True)):
