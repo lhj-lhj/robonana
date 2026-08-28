@@ -317,6 +317,29 @@ export ROBONANA_EVAL_GPUS=0,1,2,3,4,5,6,7
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
 
+For success-rate sweeps, auxiliary Stage-2 outputs are unnecessary. The fast
+path keeps one FLUX model replica per GPU, runs multiple RoboTwin tasks against
+that replica, batches concurrent Stage-1 requests into one model forward, and
+still saves the episode MP4s:
+
+```bash
+export ROBONANA_EVAL_JOBS_PER_GPU=2
+export ROBONANA_EVAL_BATCH_WAIT_MS=6
+export ROBONANA_EVAL_AUX_OUTPUTS=0
+export ROBONANA_SAPIEN_DENOISER=oidn
+bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
+```
+
+Start with two jobs per GPU. Increase to four only after a two-worker smoke
+passes without OIDN/SAPIEN renderer errors. `ROBONANA_EVAL_AUX_OUTPUTS=1`
+retains the original value/Stage-2 artifact workflow and deliberately requires
+`ROBONANA_EVAL_JOBS_PER_GPU=1`.
+
+The server-side RoboTwin 2.0 checkout used for the new official scheduler is
+`/data3/hongjia/RoboTwin-official-main-3095469` (official commit `3095469`,
+including its pinned XPolicyLab submodule). The old simulator checkout remains
+available as a rollback until compatibility validation is complete.
+
 The default renderer denoiser is OptiX for parallel throughput. To match the
 official OIDN rendering path, run serially on one GPU:
 

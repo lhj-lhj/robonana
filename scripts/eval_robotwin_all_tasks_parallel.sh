@@ -19,6 +19,9 @@ run_dir=${ROBONANA_EVAL_RUN_DIR:-${repo_root}/outputs/robotwin_full_eval_$(date 
 deploy_policy=${ROBONANA_DEPLOY_POLICY_PATH:-${repo_root}/src/robonana/configs/robotwin_eval_train_seen.yml}
 task_timeout_seconds=${ROBONANA_TASK_TIMEOUT_SECONDS:-21600}
 task_max_attempts=${ROBONANA_TASK_MAX_ATTEMPTS:-3}
+jobs_per_gpu=${ROBONANA_EVAL_JOBS_PER_GPU:-1}
+batch_wait_ms=${ROBONANA_EVAL_BATCH_WAIT_MS:-6}
+aux_outputs=${ROBONANA_EVAL_AUX_OUTPUTS:-1}
 client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
 
 IFS=',' read -r -a gpu_ids <<< "${gpu_csv}"
@@ -42,8 +45,17 @@ if [[ ! -d "${flux_checkpoint}" || ! -d "${robotwin_env}" ]]; then
   echo "Missing FLUX checkpoint or RoboTwin environment" >&2
   exit 2
 fi
-if ! [[ ${task_timeout_seconds} =~ ^[1-9][0-9]*$ && ${task_max_attempts} =~ ^[1-9][0-9]*$ ]]; then
-  echo "ROBONANA_TASK_TIMEOUT_SECONDS and ROBONANA_TASK_MAX_ATTEMPTS must be positive integers" >&2
+if ! [[ ${task_timeout_seconds} =~ ^[1-9][0-9]*$ && ${task_max_attempts} =~ ^[1-9][0-9]*$ \
+  && ${jobs_per_gpu} =~ ^[1-9][0-9]*$ ]]; then
+  echo "Timeout, max attempts, and ROBONANA_EVAL_JOBS_PER_GPU must be positive integers" >&2
+  exit 2
+fi
+if [[ "${aux_outputs}" != "0" && "${aux_outputs}" != "1" ]]; then
+  echo "ROBONANA_EVAL_AUX_OUTPUTS must be 0 or 1" >&2
+  exit 2
+fi
+if (( jobs_per_gpu > 1 )) && [[ "${aux_outputs}" != "0" ]]; then
+  echo "Dynamic batching is Stage-1-only; set ROBONANA_EVAL_AUX_OUTPUTS=0" >&2
   exit 2
 fi
 
@@ -81,8 +93,12 @@ run_worker() {
   mkdir -p "${worker_dir}" "${runtime_dir}" "${sweep_dir}/logs" "${worker_dir}/attempts"
   [[ -f "${results_csv}" ]] || echo "task,success,total,success_rate" > "${results_csv}"
 
+  local server_script="${repo_root}/scripts/inference_server_robotwin.py"
+  if (( jobs_per_gpu > 1 )); then
+    server_script="${repo_root}/scripts/inference_server_robotwin_batched.py"
+  fi
   local server_args=(
-    "${model_python}" "${repo_root}/scripts/inference_server_robotwin.py"
+    "${model_python}" "${server_script}"
     --checkpoint "${checkpoint}"
     --flux-checkpoint-dir "${flux_checkpoint}"
     --stats-path "${stats_path}"
@@ -93,10 +109,17 @@ run_worker() {
     --action-chunk 48
     --horizon 24
     --num-inference-steps 20
-    --return-chunk-value
-    --return-stage2-image
     --port "${port}"
   )
+  if (( jobs_per_gpu > 1 )); then
+    server_args+=(
+      --max-batch-size "${jobs_per_gpu}"
+      --max-batch-wait-ms "${batch_wait_ms}"
+      --max-clients "$((jobs_per_gpu * 2))"
+    )
+  elif [[ "${aux_outputs}" == "1" ]]; then
+    server_args+=(--return-chunk-value --return-stage2-image)
+  fi
   if [[ -n "${ROBONANA_MODEL_CONFIG:-}" ]]; then
     server_args+=(--model-config "${ROBONANA_MODEL_CONFIG}")
   fi
@@ -137,11 +160,11 @@ run_worker() {
     "SERVER_WAIT_SECONDS=600"
     "EVAL_VIDEO_LOG=1"
     "TRACE_ROOT=${run_dir}/value_traces"
-    "ENABLE_VALUE_VIS=1"
+    "ENABLE_VALUE_VIS=${aux_outputs}"
     "TRACE_VALUE_ONLY=1"
     "LOW_FREQUENCY_RGB=0"
     "SKIP_ACTION_RENDER_SYNC=0"
-    "ROBONANA_OVERLAY_CHUNK_VALUE=1"
+    "ROBONANA_OVERLAY_CHUNK_VALUE=${aux_outputs}"
     "ROBONANA_STAGE2_IMAGE_ROOT=${run_dir}/stage2_images"
     # cuda:0 is this rank's sole logical device after CUDA_VISIBLE_DEVICES isolation.
     "ROBONANA_SAPIEN_RENDER_DEVICE=cuda:0"
@@ -151,11 +174,14 @@ run_worker() {
   upsert_result() {
     local task_name=$1
     local row=$2
-    local temporary="${results_csv}.tmp.$$"
-    awk -F, -v task_name="${task_name}" 'NR == 1 || $1 != task_name' \
-      "${results_csv}" > "${temporary}"
-    printf '%s\n' "${row}" >> "${temporary}"
-    mv "${temporary}" "${results_csv}"
+    (
+      flock -x 9
+      local temporary="${results_csv}.tmp.${BASHPID}"
+      awk -F, -v task_name="${task_name}" 'NR == 1 || $1 != task_name' \
+        "${results_csv}" > "${temporary}"
+      printf '%s\n' "${row}" >> "${temporary}"
+      mv "${temporary}" "${results_csv}"
+    ) 9>"${results_csv}.lock"
   }
 
   run_task() {
@@ -171,11 +197,12 @@ run_worker() {
     local attempt attempt_dir attempt_csv attempt_log row attempt_rc
     for ((attempt = 1; attempt <= task_max_attempts; attempt++)); do
       attempt_dir="${worker_dir}/attempts/${task_name}/attempt_${attempt}_$(date +%Y%m%d_%H%M%S)"
-      mkdir -p "${attempt_dir}"
+      mkdir -p "${attempt_dir}/runtime"
       echo "[attempt ${attempt}/${task_max_attempts}] ${task_name} timeout=${task_timeout_seconds}s"
       attempt_rc=0
       timeout --signal=TERM --kill-after=60 "${task_timeout_seconds}" \
         env "${client_env[@]}" \
+          XDG_RUNTIME_DIR="${attempt_dir}/runtime" \
           TASK_LIST="${task_name}" \
           SWEEP_OUT="${attempt_dir}" \
           bash "${repo_root}/third_party/FACT/evaluation/robotwin/eval_all_tasks.sh" \
@@ -208,10 +235,30 @@ run_worker() {
     return 1
   }
 
+  run_task_slot() {
+    local slot=$1
+    local slot_status=0
+    local shard_index task_name
+    for shard_index in "${!shard[@]}"; do
+      if (( shard_index % jobs_per_gpu == slot )); then
+        task_name=${shard[shard_index]}
+        run_task "${task_name}" || slot_status=1
+      fi
+    done
+    return "${slot_status}"
+  }
+
   local client_status=0
-  local task_name
-  for task_name in "${shard[@]}"; do
-    run_task "${task_name}" || client_status=1
+  local -a task_slot_pids=()
+  local slot slot_pid
+  for ((slot = 0; slot < jobs_per_gpu; slot++)); do
+    run_task_slot "${slot}" &
+    task_slot_pids+=("$!")
+  done
+  for slot_pid in "${task_slot_pids[@]}"; do
+    if ! wait "${slot_pid}"; then
+      client_status=1
+    fi
   done
   cleanup_worker
   trap - EXIT INT TERM
@@ -282,18 +329,28 @@ value_trace_count=$(wc -l < "${run_dir}/value_trace_manifest.txt")
 stage2_image_count=$(wc -l < "${run_dir}/stage2_image_manifest.txt")
 expected_episodes=$((50 * test_num))
 {
+  echo "jobs_per_gpu=${jobs_per_gpu} dynamic_batch=$((jobs_per_gpu > 1)) batch_wait_ms=${batch_wait_ms}"
   echo "result_tasks=${result_tasks}/50"
-  echo "annotated_mp4=${mp4_count}/${expected_episodes}"
-  echo "value_traces=${value_trace_count}/${expected_episodes}"
-  echo "stage2_images=${stage2_image_count} (at least ${expected_episodes})"
+  echo "mp4=${mp4_count}/${expected_episodes}"
+  if [[ "${aux_outputs}" == "1" ]]; then
+    echo "value_traces=${value_trace_count}/${expected_episodes}"
+    echo "stage2_images=${stage2_image_count} (at least ${expected_episodes})"
+  else
+    echo "aux_outputs=disabled (Stage-1 success-rate fast path)"
+  fi
 } | tee -a "${run_dir}/summary.txt"
 
+artifact_status=0
+if [[ "${aux_outputs}" == "1" ]] \
+  && { [[ ${value_trace_count} -ne ${expected_episodes} ]] \
+    || [[ ${stage2_image_count} -lt ${expected_episodes} ]]; }; then
+  artifact_status=1
+fi
 if [[ ${worker_status} -ne 0 ]] \
   || grep -q ',ERROR$' "${results_csv}" \
   || [[ ${result_tasks} -ne 50 ]] \
   || [[ ${mp4_count} -lt ${expected_episodes} ]] \
-  || [[ ${value_trace_count} -ne ${expected_episodes} ]] \
-  || [[ ${stage2_image_count} -lt ${expected_episodes} ]]; then
+  || [[ ${artifact_status} -ne 0 ]]; then
   echo "One or more eval workers/tasks failed; inspect ${run_dir}/workers" >&2
   exit 1
 fi
