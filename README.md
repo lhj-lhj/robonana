@@ -109,13 +109,13 @@ the discounted return over only the real behavior-action prefix that reaches
 `t_h`:
 
 $$
-R_t^{(\delta)} = \sum_{k=0}^{\delta-1}\gamma^k r_{t+k}.
+R_t^{(\delta)} = \sum_{k=0}^{\delta-1}\gamma^{k} r_{t+k}.
 $$
 
 With the current constant step cost this is `0` when `delta=0`, otherwise
 
 $$
-R_t^{(\delta)} = -\frac{1-\gamma^\delta}{1-\gamma}.
+R_t^{(\delta)} = -\frac{1-\gamma^{\delta}}{1-\gamma}.
 $$
 
 For example, with all transitions valid, horizons `1`, `12`, `24`, and `48`
@@ -136,7 +136,7 @@ head, flow-matching path, and inference API remain unchanged:
 
   $$
   Q_t^{\mathrm{MC}} =
-  \sum_{k=0}^{T-1-t}\gamma^k r_{t+k}.
+  \sum_{k=0}^{T-1-t}\gamma^{k} r_{t+k}.
   $$
 
   For a fixed `t`, different sampled horizons have different `reward_h` labels
@@ -145,8 +145,8 @@ head, flow-matching path, and inference API remain unchanged:
 - During iterative posttraining, the target is a bootstrapped action-chunk Q:
 
   $$
-  y_t^Q = R_t^{(\delta)} +
-  \gamma^\delta (1-d_h^{\mathrm{success}})
+  y_t^{Q} = R_t^{(\delta)} +
+  \gamma^{\delta} (1-d_h^{\mathrm{success}})
   Q_{\bar\theta}(s_{t_h},\pi_{\bar\theta}(s_{t_h}); h=48).
   $$
 
@@ -561,7 +561,8 @@ $$
 
 $$
 q_i = Q_{\bar\theta}(s_t,a_i;h=48), \qquad
-i^*=\arg\max_i q_i, \qquad a^{\mathrm{pseudo}}=a_{i^*}.
+i^{*}=\operatorname*{arg\,max}_{i} q_i, \qquad
+a^{\mathrm{pseudo}}=a_{i^{*}}.
 $$
 
 The eight action-noise tensors are independent, while the future-state,
@@ -602,8 +603,8 @@ $$
 The target is
 
 $$
-y_t^Q = R_t^{(\delta)} +
-\gamma^\delta b_h Q', \qquad
+y_t^{Q} = R_t^{(\delta)} +
+\gamma^{\delta} b_h Q', \qquad
 b_h = 1-d_h^{\mathrm{success}}, \qquad \gamma=0.999.
 $$
 
@@ -642,7 +643,7 @@ the same rectified-flow corruption. For clean target `x`, Gaussian noise
 
 $$
 x_\sigma=(1-\sigma)x+\sigma\epsilon, \qquad
-v^*=\epsilon-x.
+v^{*}=\epsilon-x.
 $$
 
 The corresponding adapter/head predicts `v*`; inference integrates from
