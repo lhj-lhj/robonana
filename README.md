@@ -560,9 +560,12 @@ a_i \sim \pi_\theta(\cdot\mid s_t),\quad i=1,\ldots,8,
 $$
 
 $$
-q_i = Q_{\bar\theta}(s_t,a_i;h=48), \qquad
-i^{*}=\arg\max_{i} q_i, \qquad
-a^{\mathrm{pseudo}}=a_{i^{*}}.
+q_i = Q_{\bar{\theta}}(s_t,a_i;h=48), \qquad i=1,\ldots,8.
+$$
+
+$$
+q_{i_{\mathrm{best}}} = \max_{1\leq i\leq 8} q_i, \qquad
+a^{\mathrm{pseudo}}=a_{i_{\mathrm{best}}}.
 $$
 
 The eight action-noise tensors are independent, while the future-state,
