@@ -561,7 +561,7 @@ $$
 
 $$
 q_i = Q_{\bar\theta}(s_t,a_i;h=48), \qquad
-i^{*}=\operatorname*{arg\,max}_{i} q_i, \qquad
+i^{*}=\arg\max_{i} q_i, \qquad
 a^{\mathrm{pseudo}}=a_{i^{*}}.
 $$
 
