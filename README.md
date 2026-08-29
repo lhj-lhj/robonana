@@ -130,31 +130,34 @@ step costs were accumulated over that horizon.
 The meaning of `Q` depends on the training stage, while its token, adapter,
 head, flow-matching path, and inference API remain unchanged:
 
-- During successful-demonstration pretraining, the target is the complete
-  Monte Carlo return from the current frame under the recorded behavior-policy
-  continuation:
+#### Successful-demonstration pretraining
 
-  $$
-  Q_t^{\mathrm{MC}} =
-  \sum_{k=0}^{T-1-t}\gamma^{k} r_{t+k}.
-  $$
+The target is the complete Monte Carlo return from the current frame under the
+recorded behavior-policy continuation:
 
-  For a fixed `t`, different sampled horizons have different `reward_h` labels
-  but the same MC-Q label. At the successful final frame, both labels are zero.
+$$
+Q_t^{\mathrm{MC}} =
+\sum_{k=0}^{T-1-t}\gamma^{k} r_{t+k}.
+$$
 
-- During iterative posttraining, the target is a bootstrapped action-chunk Q:
+For a fixed `t`, different sampled horizons have different `reward_h` labels
+but the same MC-Q label. At the successful final frame, both labels are zero.
 
-  $$
-  y_t^{Q} = R_t^{(\delta)} +
-  \gamma^{\delta} (1-d_h^{\mathrm{success}})
-  Q_{\bar\theta}(s_{t_h},\pi_{\bar\theta}(s_{t_h}); h=48).
-  $$
+#### Iterative posttraining
 
-  The current Q token is conditioned on the current observation and the first
-  `h` tokens of the full-clean **recorded behavior action** track `G`. Thus it
-  means: discounted return for executing that real action prefix, followed by
-  the EMA policy continuation used to build the TD target. A successful
-  terminal stops the bootstrap; a failure timeout does not.
+The target is a bootstrapped action-chunk Q:
+
+$$
+y_t^{Q} = R_t^{(\delta)} +
+\gamma^{\delta} (1-d_h^{\mathrm{success}})
+Q_{\bar{\theta}}(s_{t_h},\pi_{\bar{\theta}}(s_{t_h}); h=48).
+$$
+
+The current Q token is conditioned on the current observation and the first
+`h` tokens of the full-clean **recorded behavior action** track `G`. Thus it
+means: discounted return for executing that real action prefix, followed by
+the EMA policy continuation used to build the TD target. A successful
+terminal stops the bootstrap; a failure timeout does not.
 
 Neither scalar is min-max normalized or the old time-to-go target. Q is also
 not a calibrated success probability. Under the current negative step-cost
