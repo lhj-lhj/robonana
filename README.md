@@ -17,8 +17,8 @@ The supported training target is `robonana.configs.robotwin_flux2_800m_dino.conf
 - 120,000 optimizer steps at global batch size 256 (`32 x 8`);
 - FACT RoboTwin-v2: 2,500 Clean episodes plus 25,000 Randomized episodes;
 - language, robot state, three-view current image, action, horizon, future state,
-  cumulative reward, MC Q, future FLUX-AE image, and a training-only future
-  DINOv3 target;
+  horizon return, Q, future FLUX-AE image, and a training-only future DINOv3
+  target;
 - fixed-horizon W&B visualization at `h = 12, 24, 48` every 1,000 steps.
 
 Training samples `idx_h` uniformly from `1..48`. A target beyond an episode uses
@@ -45,6 +45,22 @@ shared DiT hidden size:
 4B:   dino_in/out = Linear(3072, 3072) / Linear(3072, 3072)
 ```
 
+The scalar branches are equally small adapters around that same hidden stream:
+
+```text
+noisy reward [B,(K),1] -> reward_in Linear(1, hidden, bias=False)
+                         -> shared FLUX.2 DiT
+                         -> reward_out Linear(hidden, 1, bias=False)
+
+noisy Q      [B,(K),1] -> q_in Linear(1, hidden, bias=False)
+                         -> shared FLUX.2 DiT
+                         -> q_out Linear(hidden, 1, bias=False)
+```
+
+They have distinct segment embeddings and output heads, but no independent
+reward/Q backbone. `K` is present only when multiple horizon blocks are packed
+for parallel Stage-2 inference.
+
 The attention policy is prefix-structured:
 
 | Query | Visible keys |
@@ -54,8 +70,8 @@ The attention policy is prefix-structured:
 | full-clean GT action token `G_t` | clean prefix + `G_1..G_t` |
 | horizon | clean prefix + `G_1..G_idx_h` + horizon |
 | future state | previous world prefix + future state |
-| cumulative reward | previous world prefix + cumulative reward |
-| MC Q | previous world prefix + MC Q |
+| horizon reward | previous world prefix + horizon reward |
+| Q (MC in pretraining, TD in posttraining) | previous world prefix + Q |
 | future FLUX latent | previous world prefix + future FLUX latent |
 | future DINO | complete world prefix + future DINO |
 
@@ -70,14 +86,82 @@ DINO is a final one-way auxiliary sink, so earlier tokens cannot depend on it.
 Inference omits the DINO suffix and uses the unchanged action and future-image
 samplers.
 
-Let `t_h = min(t + idx_h, T - 1)` and `delta = t_h - t`. `future_state` is
-exactly the single robot state at `t_h`; it is not the last state of the
-48-action chunk. Successful demonstrations use `gamma=0.999`, reward `-1` at
-each non-terminal frame, and reward `0` at the successful terminal frame. The
-reward token targets `sum(k=0..delta-1) gamma^k r_(t+k)`. The Q token targets
-the full Monte Carlo return from `t`, `sum(k=0..T-1-t) gamma^k r_(t+k)`, so Q is
-independent of the sampled horizon for a fixed `t`. Neither target is min-max
-normalized or interpreted as time-to-go.
+### What the reward and Q outputs mean
+
+The two scalar heads have different semantics. Let the sampled current frame be
+`t`, let the requested horizon be `h = idx_h`, and define
+
+$$
+t_h = \min(t+h, T-1), \qquad
+\delta = \sum_{j=t}^{t_h-1}\mathrm{transition\_valid}_j.
+$$
+
+For an original successful demonstration every transition is valid, so
+`delta = t_h - t`. Replay episodes use the stored `transition_valid` vector so
+clipped padding and a reset observation never count as real robot transitions.
+`future_state`, future FLUX-AE latent, and future DINO target are all the single
+observation at `t_h`; they are not the last element of the fixed 48-action
+chunk.
+
+RoboNana uses `gamma = 0.999`, reward `-1` for each valid non-goal transition,
+and reward `0` at a successful terminal frame. The model's `reward_h` output is
+the discounted return over only the real behavior-action prefix that reaches
+`t_h`:
+
+$$
+R_t^{(\delta)} = \sum_{k=0}^{\delta-1}\gamma^k r_{t+k}.
+$$
+
+With the current constant step cost this is `0` when `delta=0`, otherwise
+
+$$
+R_t^{(\delta)} = -\frac{1-\gamma^\delta}{1-\gamma}.
+$$
+
+For example, with all transitions valid, horizons `1`, `12`, `24`, and `48`
+have clean reward targets `-1.000000`, `-11.934220`, `-23.726013`, and
+`-46.889103`, respectively.
+
+Therefore `reward_h` is not an immediate one-frame reward, not the reward of
+the entire 48-action chunk unless `h=48` and all 48 transitions are valid, and
+not a success probability. A value closer to zero means that fewer discounted
+step costs were accumulated over that horizon.
+
+The meaning of `Q` depends on the training stage, while its token, adapter,
+head, flow-matching path, and inference API remain unchanged:
+
+- During successful-demonstration pretraining, the target is the complete
+  Monte Carlo return from the current frame under the recorded behavior-policy
+  continuation:
+
+  $$
+  Q_t^{\mathrm{MC}} =
+  \sum_{k=0}^{T-1-t}\gamma^k r_{t+k}.
+  $$
+
+  For a fixed `t`, different sampled horizons have different `reward_h` labels
+  but the same MC-Q label. At the successful final frame, both labels are zero.
+
+- During iterative posttraining, the target is a bootstrapped action-chunk Q:
+
+  $$
+  y_t^Q = R_t^{(\delta)} +
+  \gamma^\delta (1-d_h^{\mathrm{success}})
+  Q_{\bar\theta}(s_{t_h},\pi_{\bar\theta}(s_{t_h}); h=48).
+  $$
+
+  The current Q token is conditioned on the current observation and the first
+  `h` tokens of the full-clean **recorded behavior action** track `G`. Thus it
+  means: discounted return for executing that real action prefix, followed by
+  the EMA policy continuation used to build the TD target. A successful
+  terminal stops the bootstrap; a failure timeout does not.
+
+Neither scalar is min-max normalized or the old time-to-go target. Q is also
+not a calibrated success probability. Under the current negative step-cost
+reward, a larger Q (less negative and closer to zero) is preferred. The sampled
+clean tensors are `[B, 1, 1]` for one horizon and `[B, K, 1]` for `K` packed
+horizons; the inference server exposes them as `rewards` and `qs` after
+flattening the last singleton dimensions.
 
 See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact upstream reuse
 boundary.
@@ -393,33 +477,213 @@ not cached.
 
 ## Iterative posttraining
 
-Posttraining keeps four logical views without physically merging data:
+Posttraining changes the source of the Q label and adds policy improvement on
+failed data; it does not add a second network architecture. The online model
+`theta` and target model `theta_bar` are complete copies of the same shared
+FLUX.2+RoboNana model. One round has the following data flow:
 
 ```text
-25% original success | 25% all collected success |
-25% historical failure | 25% latest-round failure
+theta_k checkpoint
+  -> collect RoboTwin success/failure rollouts into a separate replay root
+  -> write aligned RGB/state/executed-action/final-observation metadata
+  -> build Qwen3 context + FLUX-AE caches and robonana_index.json
+  -> train theta_(k+1) from four logical pools with EMA theta_bar
+  -> save online, optimizer, scheduler, trainer, EMA, and round state
 ```
 
-An empty collected-success share moves to original success; in round 0 an
-empty historical-failure share moves to latest failure. Sampling is uniform by
-pool, then task, then episode, then frame. Advancing
-`ROBONANA_COLLECTION_ROUND` automatically reclassifies the previous latest
-failures as historical while retaining every old rollout.
+The implementation remains on the existing FACT/FLUX paths:
 
-For every historical/latest failure sample, the current online policy produces
-eight independent 48-action samples. A local full-model FP32 EMA RoboNana runs
-the existing no-image world/reward/Q path with common world noise, ranks the
-eight candidates by clean Q at `idx_h=48`, and always distills the argmax into
-the predicted-action flow. The clean GT-action track remains the actually
-executed behavior action, so future state/image/DINO/reward and current-Q
-training remain aligned with the real transition.
+| responsibility | maintained implementation |
+|---|---|
+| rollout schema and atomic episode publication | `src/robonana/data/rollout_writer.py` |
+| horizon clipping, valid-transition count, reward/MC labels, replay views, four-pool sampler | `src/robonana/data/robotwin_hdf5.py` |
+| shared action/world Flow-Euler samplers | `src/robonana/sampling.py` |
+| FP32 EMA, best-of-eight search, detached TD target | `src/robonana/training/posttraining.py` |
+| batch wiring, flow corruption, losses, metrics, checkpoint/resume | `src/robonana/training/robotwin_trainer.py` |
+| fixed posttraining contract for both model sizes | `src/robonana/configs/posttrain_config.py` |
+| 4B and 800M entry configs | `src/robonana/configs/robotwin_flux2_4b_dino_posttrain.py`, `src/robonana/configs/robotwin_flux2_800m_dino_posttrain.py` |
 
-All four pools use the detached target
-`reward_h + 0.999**delta_steps * (1-success_terminal_h) * next_q_ema`.
-The next action and next Q both come from EMA. Failure time limits continue to
-bootstrap from the stored reset-pre final observation; `delta_steps=0` has
-`q_loss_mask=0`. EMA updates once, after a successful real optimizer step, with
-decay `0.995`.
+`q_target_mode="mc_success"` selects pretraining labels from successful
+demonstrations. `q_target_mode="td_posttrain"` makes the dataset emit a
+placeholder Q; the two posttraining entry configs also enable the trainer path
+that replaces it with the EMA TD target before flow noise is applied. Do not
+set `td_posttrain` on a pretraining config by itself, because the raw dataset
+placeholder is intentionally zero and is not a valid learning target.
+
+### Four-pool replay sampler
+
+The initial RoboTwin dataset is never physically merged with collected replay.
+The training dataset is a `ConcatDataset` of four `RoboTwinHDF5Dataset` views,
+and every local batch receives deterministic pool quotas:
+
+| pool id | logical pool | nominal batch share | contents |
+|---:|---|---:|---|
+| 0 | `original_success` | 25% | original successful demonstrations |
+| 1 | `collected_success_replay` | 25% | successful policy rollouts from every round |
+| 2 | `historical_failure_replay` | 25% | failures with `round_id < current_round` |
+| 3 | `latest_failure` | 25% | failures with `round_id == current_round` |
+
+Within each pool the sampler selects task uniformly, then episode uniformly
+within that task, then frame uniformly within that episode. This prevents large
+tasks or long episodes from silently dominating. Fractional quotas are rounded
+with stable largest-remainder allocation. If collected success is empty, its
+25% moves to original success. If historical failure is empty, its 25% moves to
+latest failure. Any other requested-but-empty pool is a hard error. Advancing
+`ROBONANA_COLLECTION_ROUND` reclassifies previous latest failures as historical
+without copying or deleting their files.
+
+Each loaded sample preserves both the current frame and the reset-pre final
+observation required for timeout bootstrap. The important batch fields are:
+
+| field | meaning |
+|---|---|
+| `behavior_action` | normalized 48-step action chunk actually executed in the stored trajectory |
+| `future_state`, `future_latents`, `future_dino_images` | real observation target at clipped `t_h` |
+| `reward_h` | real discounted prefix reward `R_t^(delta)` |
+| `delta_steps` | count of valid environment transitions, excluding clipped padding/reset |
+| `success_terminal_h` | 1 only when `t_h` is the true successful terminal |
+| `time_limit_truncated_h` | 1 when a failed rollout reaches its time limit |
+| `failure_episode_mask` | selects failure-only best-of-eight action distillation |
+| `q_loss_mask` | 1 iff `delta_steps > 0` |
+
+### Failure-only action improvement
+
+Success samples keep the recorded behavior chunk as the Stage-1 action-flow
+target. For each historical or latest failure sample, the following search is
+performed without gradients:
+
+$$
+a_i \sim \pi_\theta(\cdot\mid s_t),\quad i=1,\ldots,8,
+$$
+
+$$
+q_i = Q_{\bar\theta}(s_t,a_i;h=48), \qquad
+i^*=\arg\max_i q_i, \qquad a^{\mathrm{pseudo}}=a_{i^*}.
+$$
+
+The eight action-noise tensors are independent, while the future-state,
+reward, and Q noise used by the EMA world sampler is shared across candidates.
+This common-random-number comparison reduces ranking variance. The existing
+state/reward/Q-only Stage-2 path is used, so candidate ranking creates no
+future-image or DINO tokens and does not invoke the VAE.
+
+The best candidate always becomes the noisy predicted-action track `A` target
+for that failure sample. The behavior action is not inserted as a ninth
+candidate, and there is no advantage, confidence, or uncertainty gate. The
+full-clean `G` track always remains the action actually executed in the replay
+trajectory. Consequently:
+
+| prediction/loss | success sample target | failure sample target | conditioning action `G` |
+|---|---|---|---|
+| predicted action | recorded behavior | best-of-8 pseudo action | recorded behavior |
+| future state/image/DINO | recorded future | recorded future | recorded behavior prefix |
+| horizon reward | recorded prefix reward | recorded prefix reward | recorded behavior prefix |
+| current Q | EMA TD target | EMA TD target | recorded behavior prefix |
+
+This separation is deliberate: failed data improves the action generator while
+the world and critic targets stay aligned with transitions that actually
+occurred.
+
+### EMA TD target
+
+For every sample from all four pools, the trainer replaces the dataset's Q
+placeholder with a detached TD target. At `s_(t_h)`, EMA first samples one
+48-step continuation action and then samples its Q through the no-image world
+path:
+
+$$
+a' \sim \pi_{\bar\theta}(\cdot\mid s_{t_h}), \qquad
+Q' = Q_{\bar\theta}(s_{t_h},a';h=48).
+$$
+
+The target is
+
+$$
+y_t^Q = R_t^{(\delta)} +
+\gamma^\delta b_h Q', \qquad
+b_h = 1-d_h^{\mathrm{success}}, \qquad \gamma=0.999.
+$$
+
+Terminal handling is strict:
+
+| case at `t_h` | `b_h` | Q loss | interpretation |
+|---|---:|---:|---|
+| ordinary transition | 1 | enabled | bootstrap from EMA continuation |
+| successful terminal | 0 | enabled when `delta>0` | target is exactly `reward_h` |
+| failed time-limit truncation | 1 | enabled when `delta>0` | bootstrap from stored reset-pre final observation |
+| clipped `delta_steps=0` sample | either | disabled | no fabricated zero-length TD constraint |
+
+Only a successful terminal stops bootstrap. A timeout is a truncation, not a
+terminal success, and the collector must therefore save the final observation
+before reset. The target is computed under `torch.no_grad()` and is independent
+of whether a future version supplies MC, TD, or another scalar target to the
+same Q flow head.
+
+The full-model EMA is rank-local, stored in FP32, excluded from DDP and the
+optimizer, run in eval/no-grad mode with BF16 autocast, and updated only after a
+finite, non-skipped optimizer step:
+
+$$
+\bar\theta \leftarrow 0.995\,\bar\theta + 0.005\,\theta.
+$$
+
+Gradient-accumulation micro-steps do not update EMA. If any rank observes a
+non-finite accumulated loss, every rank cancels that optimizer, scheduler, and
+EMA step together.
+
+### Joint flow-matching objective
+
+Actions, future FLUX latents, future state, reward, Q, and DINO targets all use
+the same rectified-flow corruption. For clean target `x`, Gaussian noise
+`epsilon`, and sampled noise level `sigma`:
+
+$$
+x_\sigma=(1-\sigma)x+\sigma\epsilon, \qquad
+v^*=\epsilon-x.
+$$
+
+The corresponding adapter/head predicts `v*`; inference integrates from
+`sigma=1` pure noise to `sigma=0` clean data with the shared multi-step Euler
+sampler. Reward and Q are therefore generated scalar flow samples, not ordinary
+one-pass regression logits. The weighted training objective is
+
+$$
+\mathcal L =
+1.0\mathcal L_{image}
++10.0\mathcal L_{action}
++0.4\mathcal L_{state}
++0.01\mathcal L_{reward}
++0.001\mathcal L_Q
++0.1\mathcal L_{DINO}.
+$$
+
+All terms are MSE on flow velocity. The action mask is enabled for both success
+and failure samples after the failure pseudo target has been selected; the Q
+mask excludes only `delta_steps=0`. No loss is backpropagated through candidate
+search, EMA next-action sampling, EMA next-Q sampling, or target construction.
+
+### Interpreting Q during inference
+
+`action_reward_q`, `world_all`, and `world_horizon` return the clean sampled
+`rewards` and `qs` tensors together with the matching `horizons` tensor. For a
+supplied action chunk and horizon `h`:
+
+- the reward entry whose `horizons` value is `h` estimates the discounted cost
+  of executing the first `h` action tokens, subject to the training-time tail
+  clipping distribution;
+- the corresponding Q entry estimates that prefix return plus the learned EMA-policy
+  continuation after the predicted `s_(t+h)`;
+- larger Q is better because step rewards are non-positive;
+- Q must not be interpreted as a probability or added to `reward_h` again—the
+  current Q target already contains `reward_h`;
+- ranking candidate chunks uses `Q(h=48)` directly.
+
+Before posttraining, Q has the MC-success semantics described in
+[What the reward and Q outputs mean](#what-the-reward-and-q-outputs-mean).
+After posttraining, it has the bootstrapped behavior-prefix semantics above.
+The checkpoint lineage must therefore be recorded when comparing Q values.
+
+### Launch, monitoring, and exact resume
 
 Launch one round from the trained `theta_k` checkpoint:
 
@@ -439,10 +703,25 @@ bash scripts/run_robotwin_train.sh \
   --config robonana.configs.robotwin_flux2_800m_dino_posttrain.config
 ```
 
-Each checkpoint contains the normal online/optimizer/scheduler/trainer state
-plus `ema_model.safetensors`, `ema_state.json`, and `posttrain_config.json`.
-Resuming an old online-only checkpoint initializes EMA by an exact online copy.
-The bounded two-step GPU smoke is:
+The posttraining W&B namespace reports pool counts, pseudo/success action sample
+counts, candidate Q mean/std, best and behavior Q, best-minus-behavior Q, TD
+reward/delta/discount/next-Q/target statistics, terminal/timeout/bootstrap
+fractions, Q-mask coverage, EMA update count and online distance, plus candidate
+search and TD target time/peak memory.
+
+Each checkpoint contains the normal online model, optimizer, scheduler, and
+trainer state plus:
+
+```text
+ema_model.safetensors  complete FP32 EMA model state
+ema_state.json         decay, update count, dtype, and collection round
+posttrain_config.json  exact data-mixture/search/TD settings
+```
+
+Resume restores all of them. Loading an older online-only RoboNana checkpoint
+emits the normal load report and initializes EMA by an exact online copy; it
+does not guess or silently synthesize model architecture parameters. The
+bounded two-step GPU smoke is:
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python scripts/smoke_posttraining.py --device cuda:0
