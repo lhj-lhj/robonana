@@ -76,11 +76,53 @@ if (( jobs_per_gpu > 1 )) && [[ "${aux_outputs}" != "0" ]]; then
   echo "Dynamic batching is Stage-1-only; set ROBONANA_EVAL_AUX_OUTPUTS=0" >&2
   exit 2
 fi
-if [[ "${sapien_denoiser}" == "oidn" ]] \
-  && { (( jobs_per_gpu != 1 )) || (( ${#gpu_ids[@]} != 1 )); }; then
-  echo "OIDN is process-global on this RoboTwin/SAPIEN runtime; use exactly one GPU " \
-    "and ROBONANA_EVAL_JOBS_PER_GPU=1, or select optix/none for parallel eval" >&2
-  exit 2
+if [[ "${sapien_denoiser}" == "oidn" ]]; then
+  if ! "${robotwin_env}/bin/python" - <<'PY'
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import re
+
+spec = importlib.util.find_spec("sapien")
+if spec is None or spec.origin is None:
+    raise SystemExit("SAPIEN is not installed in the RoboTwin environment")
+root = Path(spec.origin).resolve().parent
+loader = root / "_oidn_tricks.py"
+if not loader.is_file():
+    raise SystemExit(f"SAPIEN OIDN loader is missing: {loader}")
+versions = {
+    tuple(int(part) for part in version.split("."))
+    for version in re.findall(
+        r"libOpenImageDenoise(?:_core)?\.so\.(\d+\.\d+\.\d+)",
+        loader.read_text(encoding="utf-8"),
+    )
+}
+if not versions:
+    raise SystemExit(f"could not determine the SAPIEN OIDN version from {loader}")
+version = max(versions)
+if version < (2, 3, 3):
+    rendered = ".".join(str(part) for part in version)
+    raise SystemExit(
+        f"SAPIEN OIDN {rendered} does not support NVIDIA Blackwell; "
+        "run scripts/install_sapien_oidn_blackwell.sh"
+    )
+suffix = ".".join(str(part) for part in version)
+library_dir = root / "oidn_library"
+required = [
+    library_dir / f"libOpenImageDenoise.so.{suffix}",
+    library_dir / f"libOpenImageDenoise_core.so.{suffix}",
+    library_dir / f"libOpenImageDenoise_device_cuda.so.{suffix}",
+]
+missing = [str(path) for path in required if not path.is_file()]
+if missing:
+    raise SystemExit("missing SAPIEN OIDN CUDA libraries: " + ", ".join(missing))
+print(f"SAPIEN OIDN preflight: CUDA-capable version {suffix}")
+PY
+  then
+    echo "OIDN preflight failed for ${robotwin_env}" >&2
+    exit 2
+  fi
 fi
 
 step_limits="${robotwin_path}/task_config/_eval_step_limit.yml"

@@ -416,16 +416,17 @@ still saves the episode MP4s:
 export ROBONANA_EVAL_JOBS_PER_GPU=2
 export ROBONANA_EVAL_BATCH_WAIT_MS=100
 export ROBONANA_EVAL_AUX_OUTPUTS=0
-export ROBONANA_SAPIEN_DENOISER=optix
+export ROBONANA_SAPIEN_DENOISER=oidn
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
 
 The 100 ms queue window is intentional: real three-view TCP requests fragmented
 into 3+5 or 4+4 batches at 6-20 ms, while 100 ms consistently formed full
-batches. Start with two jobs per GPU. Increase to four only after a two-worker
-OptiX smoke passes without SAPIEN renderer errors. OIDN is process-global in
-this runtime and the launcher therefore rejects every multi-process OIDN
-configuration. `ROBONANA_EVAL_AUX_OUTPUTS=1`
+batches. Start with two jobs per GPU. The pinned OIDN 2.3.3 CUDA runtime was
+validated with one process on each of eight B200 GPUs and with four concurrent
+processes on one B200; all rendered finite RT frames without OIDN errors. The
+launcher rejects OIDN older than 2.3.3 or a runtime missing its CUDA device
+plugin. `ROBONANA_EVAL_AUX_OUTPUTS=1`
 retains the reward/Q Stage-2 artifact workflow and deliberately requires
 `ROBONANA_EVAL_JOBS_PER_GPU=1`.
 
@@ -434,11 +435,13 @@ The server-side RoboTwin 2.0 checkout used for the new official scheduler is
 including its pinned XPolicyLab submodule). The old simulator checkout remains
 available as a rollback until compatibility validation is complete.
 
-The default renderer denoiser is OptiX for parallel throughput. To match the
-official OIDN rendering path, run serially on one GPU:
+The default renderer denoiser is OptiX. To match the official OIDN rendering
+path while retaining parallel task evaluation:
 
 ```bash
-export ROBONANA_EVAL_GPUS=2
+export ROBONANA_EVAL_GPUS=0,1,2,3,4,5,6,7
+export ROBONANA_EVAL_JOBS_PER_GPU=2
+export ROBONANA_EVAL_AUX_OUTPUTS=0
 export ROBONANA_SAPIEN_DENOISER=oidn
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
