@@ -407,7 +407,6 @@ path:
 - one shared dynamically batched action server per GPU;
 - per-task and aggregate success rates plus native episode MP4s.
 
-It does not run Stage 2 or produce future-state, reward, Q, VAE, or DINO outputs.
 The default is two concurrent RoboTwin clients per GPU with a 100 ms batching
 window. This is the reliable setting for full 50-episode task evaluation.
 
