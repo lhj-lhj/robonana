@@ -13,15 +13,13 @@ model_python=${ROBONANA_MODEL_PYTHON:-/data3/hongjia/conda/envs/robonana/bin/pyt
 robotwin_env=${ROBOTWIN_CONDA_ENV:-/data3/hongjia/conda/envs/robotwin2}
 fact_conda_env=${FACT_CONDA_ENV:-$(dirname "$(dirname "${model_python}")")}
 gpu_csv=${ROBONANA_EVAL_GPUS:-0,1,2,3,4,5,6,7}
-sapien_denoiser=${ROBONANA_SAPIEN_DENOISER:-optix}
 port_base=${ROBONANA_PORT_BASE:-18000}
 run_dir=${ROBONANA_EVAL_RUN_DIR:-${repo_root}/outputs/robotwin_full_eval_$(date +%Y%m%d_%H%M%S)}
 deploy_policy=${ROBONANA_DEPLOY_POLICY_PATH:-${repo_root}/src/robonana/configs/robotwin_eval_train_seen.yml}
 task_timeout_seconds=${ROBONANA_TASK_TIMEOUT_SECONDS:-21600}
 task_max_attempts=${ROBONANA_TASK_MAX_ATTEMPTS:-3}
-jobs_per_gpu=${ROBONANA_EVAL_JOBS_PER_GPU:-1}
+jobs_per_gpu=${ROBONANA_EVAL_JOBS_PER_GPU:-2}
 batch_wait_ms=${ROBONANA_EVAL_BATCH_WAIT_MS:-100}
-aux_outputs=${ROBONANA_EVAL_AUX_OUTPUTS:-1}
 client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
 
 terminate_process_tree() {
@@ -47,11 +45,6 @@ if [[ ${#gpu_ids[@]} -eq 0 ]]; then
   echo "ROBONANA_EVAL_GPUS resolved to an empty GPU list" >&2
   exit 2
 fi
-if [[ "${sapien_denoiser}" != "oidn" && "${sapien_denoiser}" != "optix" \
-  && "${sapien_denoiser}" != "none" ]]; then
-  echo "ROBONANA_SAPIEN_DENOISER must be one of: oidn, optix, none" >&2
-  exit 2
-fi
 for required in "${checkpoint}" "${stats_path}" "${deploy_policy}" "${model_python}" \
   "${robotwin_env}/bin/python" "${client_python_wrapper}"; do
   if [[ ! -f "${required}" ]]; then
@@ -68,16 +61,7 @@ if ! [[ ${task_timeout_seconds} =~ ^[1-9][0-9]*$ && ${task_max_attempts} =~ ^[1-
   echo "Timeout, max attempts, and ROBONANA_EVAL_JOBS_PER_GPU must be positive integers" >&2
   exit 2
 fi
-if [[ "${aux_outputs}" != "0" && "${aux_outputs}" != "1" ]]; then
-  echo "ROBONANA_EVAL_AUX_OUTPUTS must be 0 or 1" >&2
-  exit 2
-fi
-if (( jobs_per_gpu > 1 )) && [[ "${aux_outputs}" != "0" ]]; then
-  echo "Dynamic batching is Stage-1-only; set ROBONANA_EVAL_AUX_OUTPUTS=0" >&2
-  exit 2
-fi
-if [[ "${sapien_denoiser}" == "oidn" ]]; then
-  if ! "${robotwin_env}/bin/python" - <<'PY'
+if ! "${robotwin_env}/bin/python" - <<'PY'
 from __future__ import annotations
 
 import importlib.util
@@ -119,10 +103,9 @@ if missing:
     raise SystemExit("missing SAPIEN OIDN CUDA libraries: " + ", ".join(missing))
 print(f"SAPIEN OIDN preflight: CUDA-capable version {suffix}")
 PY
-  then
-    echo "OIDN preflight failed for ${robotwin_env}" >&2
-    exit 2
-  fi
+then
+  echo "OIDN preflight failed for ${robotwin_env}" >&2
+  exit 2
 fi
 
 step_limits="${robotwin_path}/task_config/_eval_step_limit.yml"
@@ -163,7 +146,7 @@ if [[ -n "${ROBONANA_EVAL_TASKS:-}" ]]; then
 fi
 expected_task_count=${#tasks[@]}
 
-mkdir -p "${run_dir}/workers" "${run_dir}/value_traces" "${run_dir}/stage2_images"
+mkdir -p "${run_dir}/workers"
 [[ -e "${run_dir}/.started" ]] || touch "${run_dir}/.started"
 "${model_python}" "${repo_root}/scripts/audit_robotwin_instructions.py" \
   --dataset-root "${dataset_root}" \
@@ -190,12 +173,8 @@ run_worker() {
   mkdir -p "${worker_dir}" "${runtime_dir}" "${sweep_dir}/logs" "${worker_dir}/attempts"
   [[ -f "${results_csv}" ]] || echo "task,success,total,success_rate" > "${results_csv}"
 
-  local server_script="${repo_root}/scripts/inference_server_robotwin.py"
-  if (( jobs_per_gpu > 1 )); then
-    server_script="${repo_root}/scripts/inference_server_robotwin_batched.py"
-  fi
   local server_args=(
-    "${model_python}" "${server_script}"
+    "${model_python}" "${repo_root}/scripts/inference_server_robotwin_batched.py"
     --checkpoint "${checkpoint}"
     --flux-checkpoint-dir "${flux_checkpoint}"
     --stats-path "${stats_path}"
@@ -207,16 +186,10 @@ run_worker() {
     --horizon 24
     --num-inference-steps 20
     --port "${port}"
+    --max-batch-size "${jobs_per_gpu}"
+    --max-batch-wait-ms "${batch_wait_ms}"
+    --max-clients "$((jobs_per_gpu * 2))"
   )
-  if (( jobs_per_gpu > 1 )); then
-    server_args+=(
-      --max-batch-size "${jobs_per_gpu}"
-      --max-batch-wait-ms "${batch_wait_ms}"
-      --max-clients "$((jobs_per_gpu * 2))"
-    )
-  elif [[ "${aux_outputs}" == "1" ]]; then
-    server_args+=(--return-chunk-q --return-stage2-image)
-  fi
   if [[ -n "${ROBONANA_MODEL_CONFIG:-}" ]]; then
     server_args+=(--model-config "${ROBONANA_MODEL_CONFIG}")
   fi
@@ -261,16 +234,10 @@ run_worker() {
     "SERVER_TIMEOUT_MS=600000"
     "SERVER_WAIT_SECONDS=600"
     "EVAL_VIDEO_LOG=1"
-    "TRACE_ROOT=${run_dir}/value_traces"
-    "ENABLE_VALUE_VIS=${aux_outputs}"
-    "TRACE_VALUE_ONLY=1"
     "LOW_FREQUENCY_RGB=0"
     "SKIP_ACTION_RENDER_SYNC=0"
-    "ROBONANA_OVERLAY_CHUNK_RETURN=${aux_outputs}"
-    "ROBONANA_STAGE2_IMAGE_ROOT=${run_dir}/stage2_images"
     # cuda:0 is this rank's sole logical device after CUDA_VISIBLE_DEVICES isolation.
     "ROBONANA_SAPIEN_RENDER_DEVICE=cuda:0"
-    "ROBONANA_SAPIEN_DENOISER=${sapien_denoiser}"
   )
 
   upsert_result() {
@@ -417,39 +384,21 @@ awk -F, '
 
 find "${robotwin_path}/eval_result" -type f -name '*.mp4' -newer "${run_dir}/.started" -print \
   | sort > "${run_dir}/mp4_manifest.txt"
-find "${run_dir}/value_traces" -type f -name '*.npz' -print \
-  | sort > "${run_dir}/value_trace_manifest.txt"
-find "${run_dir}/stage2_images" -type f -name '*.png' -print \
-  | sort > "${run_dir}/stage2_image_manifest.txt"
 
 result_tasks=$(awk 'END {print NR-1}' "${results_csv}")
 mp4_count=$(wc -l < "${run_dir}/mp4_manifest.txt")
-value_trace_count=$(wc -l < "${run_dir}/value_trace_manifest.txt")
-stage2_image_count=$(wc -l < "${run_dir}/stage2_image_manifest.txt")
 expected_episodes=$((expected_task_count * test_num))
 {
+  echo "mode=action_only renderer=sapien_oidn_cuda"
   echo "jobs_per_gpu=${jobs_per_gpu} dynamic_batch=$((jobs_per_gpu > 1)) batch_wait_ms=${batch_wait_ms}"
   echo "result_tasks=${result_tasks}/${expected_task_count}"
   echo "mp4=${mp4_count}/${expected_episodes}"
-  if [[ "${aux_outputs}" == "1" ]]; then
-    echo "value_traces=${value_trace_count}/${expected_episodes}"
-    echo "stage2_images=${stage2_image_count} (at least ${expected_episodes})"
-  else
-    echo "aux_outputs=disabled (Stage-1 success-rate fast path)"
-  fi
 } | tee -a "${run_dir}/summary.txt"
 
-artifact_status=0
-if [[ "${aux_outputs}" == "1" ]] \
-  && { [[ ${value_trace_count} -ne ${expected_episodes} ]] \
-    || [[ ${stage2_image_count} -lt ${expected_episodes} ]]; }; then
-  artifact_status=1
-fi
 if [[ ${worker_status} -ne 0 ]] \
   || grep -q ',ERROR$' "${results_csv}" \
   || [[ ${result_tasks} -ne ${expected_task_count} ]] \
-  || [[ ${mp4_count} -lt ${expected_episodes} ]] \
-  || [[ ${artifact_status} -ne 0 ]]; then
+  || [[ ${mp4_count} -lt ${expected_episodes} ]]; then
   echo "One or more eval workers/tasks failed; inspect ${run_dir}/workers" >&2
   exit 1
 fi

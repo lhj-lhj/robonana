@@ -398,62 +398,48 @@ python scripts/rollout_dataset_world_all.py \
 
 ## Full RoboTwin evaluation
 
-The eight-way launcher audits train/eval instructions, evaluates all 50 tasks,
-saves native MP4s, one reward/Q trace per episode, and the decoded Stage-2 future
-images. Each 48-action chunk uses one `h=24` reward/Q prediction, which is overlaid on every
-executed frame in that chunk.
+The evaluation launcher follows the FACT RoboTwin protocol and has one execution
+path:
+
+- SAPIEN ray tracing with OIDN 2.3.3 CUDA denoising;
+- Stage-1 action diffusion only;
+- 48 actions executed per policy request;
+- one shared dynamically batched action server per GPU;
+- per-task and aggregate success rates plus native episode MP4s.
+
+It does not run Stage 2 or produce future-state, reward, Q, VAE, or DINO outputs.
+The default is two concurrent RoboTwin clients per GPU with a 100 ms batching
+window. This is the reliable setting for full 50-episode task evaluation.
 
 ```bash
 export ROBONANA_TRAINED_CHECKPOINT=$PWD/experiments/<run>/models/<checkpoint>/transformer/diffusion_pytorch_model.bin
-export ROBONANA_DATASET_ROOT=/data3/hongjia/robonana-migration/datasets/fact-robotwin-v2/RoboTwin
+export ROBONANA_DATASET_ROOT=/workspace/datasets/fact-robotwin-v2/RoboTwin
 export ROBONANA_EVAL_GPUS=0,1,2,3,4,5,6,7
-bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
-```
-
-For success-rate sweeps, auxiliary Stage-2 outputs are unnecessary. The fast
-path keeps one FLUX model replica per GPU, runs multiple RoboTwin tasks against
-that replica, batches concurrent Stage-1 requests into one model forward, and
-still saves the episode MP4s:
-
-```bash
 export ROBONANA_EVAL_JOBS_PER_GPU=2
 export ROBONANA_EVAL_BATCH_WAIT_MS=100
-export ROBONANA_EVAL_AUX_OUTPUTS=0
-export ROBONANA_SAPIEN_DENOISER=oidn
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
 
-The 100 ms queue window is intentional: real three-view TCP requests fragmented
-into 3+5 or 4+4 batches at 6-20 ms, while 100 ms consistently formed full
-batches. Start with two jobs per GPU. The pinned OIDN 2.3.3 CUDA runtime was
-validated with one process on each of eight B200 GPUs and with four concurrent
-processes on one B200; all rendered finite RT frames without OIDN errors. The
-launcher rejects OIDN older than 2.3.3 or a runtime missing its CUDA device
-plugin. `ROBONANA_EVAL_AUX_OUTPUTS=1`
-retains the reward/Q Stage-2 artifact workflow and deliberately requires
-`ROBONANA_EVAL_JOBS_PER_GPU=1`.
-
-The server-side RoboTwin 2.0 checkout used for the new official scheduler is
-`/data3/hongjia/RoboTwin-official-main-3095469` (official commit `3095469`,
-including its pinned XPolicyLab submodule). The old simulator checkout remains
-available as a rollback until compatibility validation is complete.
-
-The default renderer denoiser is OptiX. To match the official OIDN rendering
-path while retaining parallel task evaluation:
+The second positional argument is the number of episodes per task. To rerun a
+strict subset without changing the protocol:
 
 ```bash
-export ROBONANA_EVAL_GPUS=0,1,2,3,4,5,6,7
-export ROBONANA_EVAL_JOBS_PER_GPU=2
-export ROBONANA_EVAL_AUX_OUTPUTS=0
-export ROBONANA_SAPIEN_DENOISER=oidn
+export ROBONANA_EVAL_TASKS=click_bell,stamp_seal
+export ROBONANA_TASK_TIMEOUT_SECONDS=43200
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
 
-Blackwell requires the pinned OIDN-compatible environment installed by:
+Each run directory contains `results.csv` with one row per task, `summary.txt`
+with micro/macro success rates, `mp4_manifest.txt`, per-worker logs, and the
+instruction audit. An `ERROR` row is infrastructure failure or timeout and must
+be rerun; it is never counted as a 0% policy result.
+
+On Blackwell, install the pinned OIDN CUDA runtime once in the RoboTwin
+environment. The launcher rejects older versions and a missing CUDA plugin:
 
 ```bash
-bash scripts/install_sapien_oidn_blackwell.sh /path/to/robotwin2-oidn233
-export ROBOTWIN_CONDA_ENV=/path/to/robotwin2-oidn233
+bash scripts/install_sapien_oidn_blackwell.sh /path/to/robotwin2
+export ROBOTWIN_CONDA_ENV=/path/to/robotwin2
 ```
 
 ## Failure rollout collection

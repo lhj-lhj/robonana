@@ -31,18 +31,18 @@ def fake_sapien():
     return module, denoisers
 
 
-def test_configure_sapien_runtime_selects_physical_gpu_and_optix():
+def test_configure_sapien_runtime_selects_physical_gpu_and_oidn():
     module, denoisers = fake_sapien()
 
     assert configure_sapien_runtime(
-        device="cuda:6", denoiser="optix", sapien_module=module
-    ) == ("cuda:6", "optix")
+        device="cuda:6", sapien_module=module
+    ) == ("cuda:6", "oidn")
     scene = module.wrapper.scene.Scene()
-    module.render.set_ray_tracing_denoiser("oidn")
+    module.render.set_ray_tracing_denoiser("ignored-by-robonana")
 
     assert scene.systems[0] == "cpu"
     assert scene.systems[1].device == "cuda:6"
-    assert denoisers == ["optix"]
+    assert denoisers == ["oidn"]
 
 
 @pytest.mark.parametrize("device", ["", "cuda", "cuda:x", "gpu:1"])
