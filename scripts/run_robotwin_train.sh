@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-project_dir="${ROBONANA_PROJECT_DIR:-${repo_root}/experiments/robotwin_flux2_800m_dino_full_bs256_120k}"
+project_dir="${ROBONANA_PROJECT_DIR:-${repo_root}/experiments/robotwin_flux2_4b_dino_bs256_120k}"
 python_bin="${ROBONANA_PYTHON:-${repo_root}/.venv/bin/python}"
 log_dir="${ROBONANA_LOG_DIR:-${project_dir}/logs}"
 run_stamp="$(date -u +%Y%m%dT%H%M%SZ)"

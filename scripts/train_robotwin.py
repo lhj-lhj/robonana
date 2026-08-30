@@ -10,14 +10,18 @@ from pathlib import Path
 from fact_train import launch_from_config
 
 
+DEFAULT_TRAIN_CONFIG = "robonana.configs.robotwin_flux2_4b_dino.config"
+DEFAULT_PROJECT_DIR = "experiments/robotwin_flux2_4b_dino_bs256_120k"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="robonana.configs.robotwin_flux2_800m_dino.config")
+    parser.add_argument("--config", default=DEFAULT_TRAIN_CONFIG)
     args = parser.parse_args()
     project_dir = Path(
         os.environ.get(
             "ROBONANA_PROJECT_DIR",
-            "experiments/robotwin_flux2_800m_dino_full_bs256_120k",
+            DEFAULT_PROJECT_DIR,
         )
     ).resolve()
     os.environ.setdefault("WANDB_DIR", str(project_dir / "wandb"))

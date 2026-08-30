@@ -3,6 +3,12 @@ from flux2.model import Flux2Params
 
 from robonana.configs.robotwin_flux2_4b_dino import config
 from robonana.models.flux2_fact import Flux2FACTModel
+from scripts.train_robotwin import DEFAULT_PROJECT_DIR, DEFAULT_TRAIN_CONFIG
+
+
+def test_4b_dino_is_the_default_training_entrypoint():
+    assert DEFAULT_TRAIN_CONFIG == "robonana.configs.robotwin_flux2_4b_dino.config"
+    assert DEFAULT_PROJECT_DIR == "experiments/robotwin_flux2_4b_dino_bs256_120k"
 
 
 def test_4b_dino_training_contract():

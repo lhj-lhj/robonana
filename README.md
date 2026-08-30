@@ -8,22 +8,27 @@ experiment.
 
 ## Current experiment
 
-The supported training target is `robonana.configs.robotwin_flux2_800m_dino.config`:
+The canonical pretraining entrypoint is
+`robonana.configs.robotwin_flux2_4b_dino.config`:
 
-- scratch FLUX.2-shaped DiT: 800,781,312 parameters;
-- hidden size 1536, 12 attention heads, 4 double-stream blocks, and 16
+- official pretrained FLUX.2 Klein 4B backbone;
+- hidden size 3072, 24 attention heads, 5 double-stream blocks, and 20
   single-stream blocks;
-- ordinary BF16 DDP on eight GPUs, without ZeRO-2 or gradient checkpointing;
-- 120,000 optimizer steps at global batch size 256 (`32 x 8`);
+- BF16 training on eight GPUs with ZeRO-2 and gradient checkpointing disabled;
+- 120,000 optimizer steps at global batch size 256 (`16 x 8 x 2` gradient
+  accumulation);
 - FACT RoboTwin-v2: 2,500 Clean episodes plus 25,000 Randomized episodes;
 - language, robot state, three-view current image, action, horizon, future state,
   horizon return, Q, future FLUX-AE image, and a training-only future DINOv3
   target;
-- fixed-horizon W&B visualization at `h = 12, 24, 48` every 1,000 steps.
+- pretrained-backbone learning rate `2e-5` and RoboNana adapter/head learning
+  rate `1e-4`;
+- fixed-horizon W&B visualization at `h = 12, 24, 48` every 2,000 steps.
 
 Training samples `idx_h` uniformly from `1..48`. A target beyond an episode uses
 the final valid frame/action, which matches the retained FACT tail-clipping
-behavior.
+behavior. The scratch 800M configuration is retained only for inexpensive
+contract tests, smoke runs, and ablations; it is not the default experiment.
 
 ## Shared-DiT design
 
@@ -41,8 +46,8 @@ branch adds only two projections whose middle dimension follows the selected
 shared DiT hidden size:
 
 ```text
-800M: dino_in/out = Linear(3072, 1536) / Linear(1536, 3072)
 4B:   dino_in/out = Linear(3072, 3072) / Linear(3072, 3072)
+800M test: dino_in/out = Linear(3072, 1536) / Linear(1536, 3072)
 ```
 
 The scalar branches are equally small adapters around that same hidden stream:
@@ -182,8 +187,21 @@ scripts/                   current preprocessing, training, evaluation, and roll
 tests/                     maintained unit/integration contract tests
 ```
 
-The 4B and non-DINO config modules remain only as inheritance layers used by the
-current 800M+DINO config. They are not the default experiment entrypoints.
+The supported entrypoint roles are:
+
+| role | entrypoint | DINO behavior |
+|---|---|---|
+| canonical pretraining | `robonana.configs.robotwin_flux2_4b_dino.config` | frozen DINOv3 targets and DINO flow loss enabled |
+| canonical inference | `scripts/inference_server_robotwin.py` with the trained 4B checkpoint | no DINO encoder, target tokens, sampling, or output |
+| iterative posttraining | `robonana.configs.robotwin_flux2_4b_dino_posttrain.config` | same training-only DINO supervision |
+| test/smoke only | `robonana.configs.robotwin_flux2_800m_dino.config` | smaller scratch backbone for fast validation |
+
+“No-DINO inference” describes the execution graph, not a second loosely loaded
+checkpoint format. Strict loading still reconstructs the exact 4B training
+architecture, including the small DINO adapter parameters stored in the
+checkpoint, but every inference mode omits DINO tokens and never constructs or
+runs the frozen DINOv3 encoder. This preserves strict checkpoint diagnostics
+while removing DINO computation from inference.
 
 ## Environment and upstream code
 
@@ -246,18 +264,30 @@ pixel-unshuffle. This gives `3 cameras x 7 x 7 = 147` tokens with feature width
 checkpoints. This removes the roughly 4.99 TiB full-dataset DINO cache, at the
 cost of three random MP4 frame reads and one frozen ViT forward per sample.
 
-The resumable full pipeline builds metadata and Qwen3/FLUX caches, validates
-their shapes, waits for eight idle GPUs and valid W&B authentication, then starts
-the 120k-step job:
+Build the metadata and the shared Qwen3/FLUX caches before launching the
+canonical 4B run:
 
 ```bash
 export ROBONANA_DATASET_ROOT=/data3/hongjia/robonana-migration/datasets/fact-robotwin-v2/RoboTwin
 export ROBONANA_FLUX_CHECKPOINT_DIR=$PWD/checkpoints/FLUX.2-klein-base-4B
-setsid -f bash scripts/run_full800m_pipeline.sh
 
-cat /data3/hongjia/robonana-jobs/full800m_dino_bs256_120k/status.txt
-tail -f /data3/hongjia/robonana-jobs/full800m_dino_bs256_120k/pipeline.log
+.venv/bin/python scripts/compute_robotwin_lerobot_metadata.py \
+  --dataset-root "$ROBONANA_DATASET_ROOT" \
+  --task-glob 'Clean/*' --task-glob 'Randomized/*'
+
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+.venv/bin/python -m torch.distributed.run --standalone --nproc-per-node 8 \
+  scripts/preprocess_robotwin_lerobot_flux.py \
+  --dataset-root "$ROBONANA_DATASET_ROOT" \
+  --checkpoint "$ROBONANA_FLUX_CHECKPOINT_DIR" \
+  --stage all --batch-size 64 --language-batch-size 4
+
+.venv/bin/python scripts/validate_robotwin_lerobot_flux.py \
+  --dataset-root "$ROBONANA_DATASET_ROOT"
 ```
+
+`scripts/run_full800m_pipeline.sh` remains available only as the historical
+800M smoke/ablation automation; it is not the canonical training launcher.
 
 For a bounded cache smoke test, use `--max-tasks` or `--max-episodes` explicitly:
 
@@ -271,35 +301,35 @@ CUDA_VISIBLE_DEVICES=0 \
 
 ## Training
 
-After the Qwen3 and FLUX cache families validate, the default launcher runs the current
-800M+DINO config:
-
-```bash
-export ROBONANA_GPU_IDS=0,1,2,3,4,5,6,7
-export ROBONANA_BATCH_SIZE=32
-export ROBONANA_MAX_STEPS=120000
-export ROBONANA_PIXEL_EVAL_INTERVAL=1000
-export ROBONANA_CHECKPOINT_INTERVAL=1000
-bash scripts/run_robotwin_train.sh
-```
-
-The FLUX.2 Klein 4B+DINO config keeps the same dataset, token order, attention
-mask, output heads, and loss contract. It uses pretrained Klein 4B, ZeRO-2, no
-gradient checkpointing, local micro-batch 16, two accumulation steps
-(`16 x 8 x 2 = 256` global batch), and GT-action-only Stage-2 pixel eval every
-2,000 optimizer steps. AdamW uses `2e-5` for the pretrained FLUX backbone and
-`1e-4` for RoboNana heads, token embeddings, and DINO adapters; both groups
-share the same warmup/cosine multiplier:
+After the Qwen3 and FLUX cache families validate, the default launcher runs the
+pretrained FLUX.2 Klein 4B+DINO configuration. No explicit `--config` is
+required:
 
 ```bash
 export ROBONANA_GPU_IDS=0,1,2,3,4,5,6,7
 export ROBONANA_BATCH_SIZE=16
 export ROBONANA_MAX_STEPS=120000
 export ROBONANA_PIXEL_EVAL_INTERVAL=2000
+export ROBONANA_CHECKPOINT_INTERVAL=1000
 export ROBONANA_BACKBONE_LR=2e-5
 export ROBONANA_ROBOT_LR=1e-4
+bash scripts/run_robotwin_train.sh
+```
+
+This is equivalent to passing
+`--config robonana.configs.robotwin_flux2_4b_dino.config` explicitly. It uses
+ZeRO-2, no gradient checkpointing, local micro-batch 16, and two accumulation
+steps (`16 x 8 x 2 = 256` global batch). AdamW applies `2e-5` to the pretrained
+FLUX backbone and `1e-4` to RoboNana heads, token embeddings, and DINO adapters;
+both groups share the same warmup/cosine multiplier.
+
+The 800M scratch+DINO path must always be requested explicitly and is intended
+only for tests, smoke runs, and small ablations:
+
+```bash
+export ROBONANA_BATCH_SIZE=32
 bash scripts/run_robotwin_train.sh \
-  --config robonana.configs.robotwin_flux2_4b_dino.config
+  --config robonana.configs.robotwin_flux2_800m_dino.config
 ```
 
 The joint flow loss weights are image `1.0`, action `10.0`, future state `0.4`,
@@ -689,11 +719,11 @@ export ROBONANA_POSTTRAIN_MODEL_CONFIG=/path/to/theta_k/config.json
 export ROBONANA_COLLECTION_ROUND=0
 export ROBONANA_PROJECT_DIR=$PWD/experiments/robotwin_posttrain_round0
 
-# Pretrained Klein 4B + DINO lineage
+# Canonical pretrained Klein 4B + DINO lineage
 bash scripts/run_robotwin_train.sh \
   --config robonana.configs.robotwin_flux2_4b_dino_posttrain.config
 
-# Or the 800M + DINO lineage
+# Test/smoke-only 800M + DINO lineage
 bash scripts/run_robotwin_train.sh \
   --config robonana.configs.robotwin_flux2_800m_dino_posttrain.config
 ```
