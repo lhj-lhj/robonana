@@ -18,6 +18,10 @@ XPL_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BENCH_ROOT="$(cd "${XPL_ROOT}/.." && pwd)"
 UTILS_DIR="${XPL_ROOT}/utils"
 yaml_file="${SCRIPT_DIR}/deploy.yml"
+RESOLVED_SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+INTEGRATION_ROOT="$(cd "${RESOLVED_SCRIPT_DIR}/../.." && pwd)"
+LEGACY_CLIENT_SHIM="${INTEGRATION_ROOT}/legacy_client_shim"
+additional_info="${additional_info},xpolicylab_root=${LEGACY_CLIENT_SHIM}"
 
 bash "${UTILS_DIR}/setup_env_client.sh" \
     "${UTILS_DIR}" \

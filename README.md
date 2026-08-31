@@ -496,8 +496,8 @@ ln -sfn "$PWD/integrations/xpolicylab/policy/RoboNana/setup_eval_env_client.sh" 
 
 # Current upstream imports legacy TCP from client_server.model_client although
 # its implementation lives at client_server/tcp/model_client.py. This external
-# namespace shim re-exports that official class without editing RoboTwin.
-export XPOLICYLAB_ROOT="$PWD/integrations/xpolicylab/legacy_client_shim"
+# namespace shim re-exports that official class without editing RoboTwin. The
+# versioned setup script resolves and passes the shim path automatically.
 ```
 
 Start the policy on a GPU that is not assigned to SAPIEN:
