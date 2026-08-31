@@ -462,8 +462,82 @@ python scripts/rollout_dataset_world_all.py \
 
 ## Full RoboTwin evaluation
 
-The evaluation launcher follows the FACT RoboTwin protocol and has one execution
-path:
+### Official RoboTwin/XPolicyLab batch path on H100
+
+For Hopper, keep the simulator and scheduler at an unmodified official
+RoboTwin commit. RoboNana supplies only a legacy-TCP transport adapter because
+the official evaluator and the existing FACT server use different wire
+formats. Each official batch worker owns one SAPIEN process and one persistent
+TCP connection. Its observation is connection-local; concurrent `get_action`
+calls are combined into one `BatchedRoboNanaRobotWinPolicy.inference_batch`
+call.
+
+The official observation is converted exactly as follows:
+
+```text
+cam_head.color        -> observation.images.cam_high
+cam_left_wrist.color  -> observation.images.cam_left_wrist
+cam_right_wrist.color -> observation.images.cam_right_wrist
+
+state = [left_arm_joint_state, left_ee_joint_state,
+         right_arm_joint_state, right_ee_joint_state]
+```
+
+Expose the versioned client shim inside the official XPolicyLab policy tree;
+do not copy or patch any RoboTwin source file:
+
+```bash
+export ROBOTWIN_ROOT=/workspace/hongjia/RoboTwin-official
+mkdir -p "$ROBOTWIN_ROOT/XPolicyLab/policy/RoboNana"
+ln -sfn "$PWD/integrations/xpolicylab/policy/RoboNana/deploy.yml" \
+  "$ROBOTWIN_ROOT/XPolicyLab/policy/RoboNana/deploy.yml"
+ln -sfn "$PWD/integrations/xpolicylab/policy/RoboNana/setup_eval_env_client.sh" \
+  "$ROBOTWIN_ROOT/XPolicyLab/policy/RoboNana/setup_eval_env_client.sh"
+```
+
+Start the policy on a GPU that is not assigned to SAPIEN:
+
+```bash
+python scripts/inference_server_robotwin_xpolicylab.py \
+  --checkpoint "$ROBONANA_TRAINED_CHECKPOINT" \
+  --model-config /path/to/experiment/config.json \
+  --flux-checkpoint-dir "$ROBONANA_FLUX_CHECKPOINT" \
+  --stats-path "$ROBONANA_STATS_PATH" \
+  --xpolicylab-root "$ROBOTWIN_ROOT/XPolicyLab" \
+  --model-device cuda:0 --vae-device cuda:0 \
+  --max-batch-size 7 --max-batch-wait-ms 100 --port 8094
+```
+
+Then run the official config-driven evaluator on disjoint simulator GPUs. The
+official `--eval-batch --num-workers N` mode creates `N` independent SAPIEN
+workers per task; it does not create one vectorized SAPIEN scene:
+
+```bash
+cd "$ROBOTWIN_ROOT"
+bash scripts/eval_policy.sh multitask \
+  --config /path/to/eval_tasks.yml \
+  --policy-name RoboNana \
+  --env-cfg-type aloha_agilex \
+  --eval-env-conda-env /path/to/robotwin-env \
+  --enable-remote \
+  --policy-server-ip 127.0.0.1 --policy-server-port 8094 \
+  --eval-batch --num-workers 7 --test-num 50 \
+  --task-config demo_clean --action-type joint \
+  --output-dir /path/to/eval-output
+```
+
+`eval_tasks.yml` uses the official scheduler schema, for example:
+
+```yaml
+gpu_ids: [1, 2, 3, 4, 5, 6, 7]
+jobs_per_gpu: 1
+num_workers: 7
+tasks: [hanging_mug]
+```
+
+### FACT-compatible isolated-GPU path
+
+The existing launcher follows the FACT RoboTwin protocol:
 
 - SAPIEN nightly ray tracing with OIDN 2.4.1 CUDA denoising and serialized
   Vulkan/CUDA hand-offs;
