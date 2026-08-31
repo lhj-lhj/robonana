@@ -2,7 +2,7 @@ diff --git a/src/renderer/denoiser_oidn.cpp b/src/renderer/denoiser_oidn.cpp
 index c85ec9a..a1f219d 100644
 --- a/src/renderer/denoiser_oidn.cpp
 +++ b/src/renderer/denoiser_oidn.cpp
-@@ -153,12 +153,20 @@ void DenoiserOidn::denoise(core::Image &color, core::Image *albedo, core::Image
+@@ -153,12 +153,22 @@ void DenoiserOidn::denoise(core::Image &color, core::Image *albedo, core::Image
  
    mCommandBufferIn->end();
  
@@ -28,7 +28,7 @@ index c85ec9a..a1f219d 100644
  
    // run
    // mFilter.executeAsync();
-@@ -173,7 +181,14 @@ void DenoiserOidn::denoise(core::Image &color, core::Image *albedo, core::Image
+@@ -173,7 +183,13 @@ void DenoiserOidn::denoise(core::Image &color, core::Image *albedo, core::Image
    cudaExternalSemaphoreSignalParams sigParams{};
    sigParams.flags = 0;
    sigParams.params.fence.value = ++mSemValue;
@@ -43,7 +43,7 @@ index c85ec9a..a1f219d 100644
  
    mCommandBufferOut->reset();
    mCommandBufferOut->begin({vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
-@@ -182,8 +197,9 @@ void DenoiserOidn::denoise(core::Image &color, core::Image *albedo, core::Image
+@@ -182,8 +198,9 @@ void DenoiserOidn::denoise(core::Image &color, core::Image *albedo, core::Image
    mCommandBufferOut->end();
  
    vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eTransfer;
