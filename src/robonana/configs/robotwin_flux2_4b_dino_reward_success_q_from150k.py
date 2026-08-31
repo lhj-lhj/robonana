@@ -57,8 +57,8 @@ config["launch"]["gpu_ids"] = [
     for value in os.environ.get("ROBONANA_GPU_IDS", "6").split(",")
     if value.strip()
 ]
-if len(config["launch"]["gpu_ids"]) != 1:
-    raise ValueError("this focused continuation config requires exactly one GPU")
+if not config["launch"]["gpu_ids"]:
+    raise ValueError("ROBONANA_GPU_IDS must select at least one GPU")
 config["dataloaders"]["train"].update(
     batch_size_per_gpu=int(os.environ.get("ROBONANA_BATCH_SIZE", "32"))
 )
@@ -85,6 +85,6 @@ config["train"].update(
 )
 config["train"]["tracker_init_kwargs"]["wandb"].update(
     name=os.environ.get(
-        "WANDB_NAME", "flux4b-dino-reward-success-q-from150k-plus10k-gpu7-bs32"
+        "WANDB_NAME", "flux4b-dino-reward-success-q-from150k-plus10k"
     )
 )

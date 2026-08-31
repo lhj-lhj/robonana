@@ -333,11 +333,12 @@ both groups share the same warmup/cosine multiplier.
 
 To warm-start the direct reward/success heads from the existing 150k reward/Q
 checkpoint while preserving the trained FLUX, action, state, Q, image, and DINO
-weights, run the focused one-GPU continuation:
+weights, run the continuation. On two B200s, local batch 16 gives global batch
+32 while leaving safe activation headroom:
 
 ```bash
-export ROBONANA_GPU_IDS=6
-export ROBONANA_BATCH_SIZE=32
+export ROBONANA_GPU_IDS=6,7
+export ROBONANA_BATCH_SIZE=16
 export ROBONANA_ADDITIONAL_STEPS=10000
 bash scripts/run_robotwin_train.sh \
   --config robonana.configs.robotwin_flux2_4b_dino_reward_success_q_from150k.config
