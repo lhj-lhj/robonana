@@ -493,6 +493,11 @@ ln -sfn "$PWD/integrations/xpolicylab/policy/RoboNana/deploy.yml" \
   "$ROBOTWIN_ROOT/XPolicyLab/policy/RoboNana/deploy.yml"
 ln -sfn "$PWD/integrations/xpolicylab/policy/RoboNana/setup_eval_env_client.sh" \
   "$ROBOTWIN_ROOT/XPolicyLab/policy/RoboNana/setup_eval_env_client.sh"
+
+# Current upstream imports legacy TCP from client_server.model_client although
+# its implementation lives at client_server/tcp/model_client.py. This external
+# namespace shim re-exports that official class without editing RoboTwin.
+export XPOLICYLAB_ROOT="$PWD/integrations/xpolicylab/legacy_client_shim"
 ```
 
 Start the policy on a GPU that is not assigned to SAPIEN:
@@ -514,6 +519,7 @@ workers per task; it does not create one vectorized SAPIEN scene:
 
 ```bash
 cd "$ROBOTWIN_ROOT"
+export PATH="/path/to/robotwin-env/bin:/path/to/conda/condabin:$PATH"
 bash scripts/eval_policy.sh multitask \
   --config /path/to/eval_tasks.yml \
   --policy-name RoboNana \
