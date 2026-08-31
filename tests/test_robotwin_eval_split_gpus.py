@@ -26,8 +26,8 @@ def test_rollout_collector_separates_policy_and_simulator_gpus() -> None:
     assert "ROBONANA_SERVER_GPU_ID" in script
     assert "ROBONANA_SIM_GPU_ID" in script
     assert "policy server and SAPIEN simulator GPUs must be disjoint" in script
-    assert 'CUDA_VISIBLE_DEVICES="${server_gpu_id}"' in script
-    assert 'CUDA_VISIBLE_DEVICES="${sim_gpu_id}"' in script
-    assert "OIDN_DEFAULT_DEVICE=cuda" in script
-    assert "ROBONANA_SAPIEN_RENDER_DEVICE=cuda:0" in script
+    assert 'ROBONANA_EVAL_SERVER_GPUS="${server_gpu_id}"' in script
+    assert 'ROBONANA_EVAL_SIM_GPUS="${sim_gpu_id}"' in script
+    assert 'bash "${isolated_eval}"' in script
+    assert "EVAL_VIDEO_LOG=0" in script
     assert "ROBONANA_ROBOTWIN_STATIC_CAMERAS" in script

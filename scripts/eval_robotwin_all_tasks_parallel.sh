@@ -26,6 +26,8 @@ episode_cpu_fallback=${ROBONANA_EPISODE_CPU_FALLBACK:-0}
 jobs_per_gpu=${ROBONANA_EVAL_JOBS_PER_GPU:-1}
 batch_wait_ms=${ROBONANA_EVAL_BATCH_WAIT_MS:-100}
 static_camera_csv=${ROBONANA_ROBOTWIN_STATIC_CAMERAS:-head_camera}
+video_log=${EVAL_VIDEO_LOG:-1}
+seed_group=${ROBONANA_EVAL_SEED_GROUP:-0}
 client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
 isolated_task_runner=${repo_root}/scripts/eval_robotwin_task_isolated.py
 
@@ -102,6 +104,14 @@ if ! [[ ${task_timeout_seconds} =~ ^[1-9][0-9]*$ && ${task_max_attempts} =~ ^[1-
 fi
 if [[ ${episode_cpu_fallback} != 0 && ${episode_cpu_fallback} != 1 ]]; then
   echo "ROBONANA_EPISODE_CPU_FALLBACK must be 0 or 1" >&2
+  exit 2
+fi
+if [[ ${video_log} != 0 && ${video_log} != 1 ]]; then
+  echo "EVAL_VIDEO_LOG must be 0 or 1" >&2
+  exit 2
+fi
+if ! [[ ${seed_group} =~ ^[0-9]+$ ]]; then
+  echo "ROBONANA_EVAL_SEED_GROUP must be a non-negative integer" >&2
   exit 2
 fi
 if ! "${robotwin_python}" - <<'PY'
@@ -293,7 +303,7 @@ run_worker() {
     "EXECUTE_ACTIONS_PER_PLAN=48"
     "SERVER_TIMEOUT_MS=600000"
     "SERVER_WAIT_SECONDS=600"
-    "EVAL_VIDEO_LOG=1"
+    "EVAL_VIDEO_LOG=${video_log}"
     "PYTHONUNBUFFERED=1"
     "LOW_FREQUENCY_RGB=0"
     "SKIP_ACTION_RENDER_SYNC=0"
@@ -349,6 +359,7 @@ run_worker() {
             --launch-client "${repo_root}/third_party/FACT/evaluation/robotwin/launch_client.sh" \
             --episode-timeout-seconds "${episode_timeout_seconds}" \
             --gpu-attempts "${episode_gpu_attempts}" \
+            --seed-group "${seed_group}" \
             "${fallback_flag}" \
             > "${attempt_log}" 2>&1 || attempt_rc=$?
       attempt_csv="${task_state_dir}/results.csv"
@@ -456,18 +467,19 @@ find "${run_dir}/workers" -type f -path '*/task_runs/*/mp4_manifest.txt' -exec c
 result_tasks=$(awk 'END {print NR-1}' "${results_csv}")
 mp4_count=$(wc -l < "${run_dir}/mp4_manifest.txt")
 expected_episodes=$((expected_task_count * test_num))
+expected_mp4=$((video_log * expected_episodes))
 {
   echo "mode=action_only renderer=sapien_oidn episode_isolation=1"
   echo "episode_timeout_seconds=${episode_timeout_seconds} gpu_attempts=${episode_gpu_attempts} cpu_fallback=${episode_cpu_fallback}"
   echo "jobs_per_gpu=${jobs_per_gpu} dynamic_batch=$((jobs_per_gpu > 1)) batch_wait_ms=${batch_wait_ms}"
   echo "result_tasks=${result_tasks}/${expected_task_count}"
-  echo "mp4=${mp4_count}/${expected_episodes}"
+  echo "mp4=${mp4_count}/${expected_mp4}"
 } | tee -a "${run_dir}/summary.txt"
 
 if [[ ${worker_status} -ne 0 ]] \
   || grep -q ',ERROR$' "${results_csv}" \
   || [[ ${result_tasks} -ne ${expected_task_count} ]] \
-  || [[ ${mp4_count} -lt ${expected_episodes} ]]; then
+  || [[ ${mp4_count} -lt ${expected_mp4} ]]; then
   echo "One or more eval workers/tasks failed; inspect ${run_dir}/workers" >&2
   exit 1
 fi

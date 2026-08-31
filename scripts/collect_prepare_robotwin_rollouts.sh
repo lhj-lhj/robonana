@@ -22,8 +22,8 @@ robotwin_path=${ROBOTWIN_PATH:-/workspace/hongjia/RoboTwin}
 robotwin_env=${ROBOTWIN_CONDA_ENV:-/workspace/.conda/envs/robotwin2}
 robotwin_python=${ROBONANA_ROBOTWIN_PYTHON:-${robotwin_env}/bin/python}
 fact_conda_env=${FACT_CONDA_ENV:-$(dirname "$(dirname "${model_python}")")}
-client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
 deploy_policy=${ROBONANA_DEPLOY_POLICY_PATH:-${repo_root}/src/robonana/configs/robotwin_eval_train_seen.yml}
+isolated_eval=${repo_root}/scripts/eval_robotwin_all_tasks_parallel.sh
 server_gpu_id=${ROBONANA_SERVER_GPU_ID:-6}
 sim_gpu_id=${ROBONANA_SIM_GPU_ID:-7}
 prepare_gpu_id=${ROBONANA_PREPARE_GPU_ID:-7}
@@ -32,7 +32,7 @@ port=${PORT:-8094}
 test_num=${TEST_NUM:-1}
 
 for required_path in "${trained_checkpoint}" "${stats_source}" "${model_python}" \
-  "${robotwin_python}" "${client_python_wrapper}" "${deploy_policy}"; do
+  "${robotwin_python}" "${deploy_policy}" "${isolated_eval}"; do
   if [[ ! -f "${required_path}" ]]; then
     echo "Required file does not exist: ${required_path}" >&2
     exit 2
@@ -58,80 +58,39 @@ if [[ ${server_gpu_id} == "${sim_gpu_id}" ]]; then
 fi
 
 mkdir -p "${dataset_root}/logs"
-server_log="${dataset_root}/logs/inference_server.log"
-runtime_dir="/tmp/robonana_robotwin_${collection}_${port}"
-mkdir -p "${runtime_dir}"
-
-cleanup_server() {
-  if [[ -n "${server_pid:-}" ]] && kill -0 "${server_pid}" 2>/dev/null; then
-    kill "${server_pid}"
-    wait "${server_pid}" 2>/dev/null || true
-  fi
-}
-cleanup() {
-  cleanup_server
-  rmdir "${runtime_dir}" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-server_args=(
-  "${model_python}" "${repo_root}/scripts/inference_server_robotwin.py"
-  --checkpoint "${trained_checkpoint}"
-  --flux-checkpoint-dir "${flux_checkpoint}"
-  --stats-path "${stats_source}"
-  --model-device cuda:0
-  --vae-device cuda:0
-  --text-encoder-device cuda:0
-  --dtype bf16
-  --action-chunk 48
-  --horizon 24
-  --num-inference-steps 20
-  --port "${port}"
-)
-if [[ -n "${ROBONANA_MODEL_CONFIG:-}" ]]; then
-  server_args+=(--model-config "${ROBONANA_MODEL_CONFIG}")
-fi
-
 env \
-  CUDA_VISIBLE_DEVICES="${server_gpu_id}" \
-  PYTHONPATH="${repo_root}/src:${repo_root}/third_party/FACT:${repo_root}/third_party/flux2/src:${repo_root}/third_party/flux2_official/src" \
-  "${server_args[@]}" \
-    >"${server_log}" 2>&1 &
-server_pid=$!
-
-env \
-  CUDA_VISIBLE_DEVICES="${sim_gpu_id}" \
-  OIDN_DEFAULT_DEVICE=cuda \
-  XDG_RUNTIME_DIR="${runtime_dir}" \
-  PYTHONPATH="${repo_root}/src" \
+  ROBONANA_TRAINED_CHECKPOINT="${trained_checkpoint}" \
+  ROBONANA_STATS_PATH="${stats_source}" \
+  ROBONANA_MODEL_PYTHON="${model_python}" \
+  ROBONANA_MODEL_CONFIG="${ROBONANA_MODEL_CONFIG:-}" \
+  ROBONANA_FLUX_CHECKPOINT_DIR="${flux_checkpoint}" \
   FACT_CONDA_ENV="${fact_conda_env}" \
   ROBOTWIN_PATH="${robotwin_path}" \
   ROBOTWIN_CONDA_ENV="${robotwin_env}" \
   ROBONANA_ROBOTWIN_PYTHON="${robotwin_python}" \
-  CLIENT_PYTHON="${client_python_wrapper}" \
   DEPLOY_POLICY_PATH="${deploy_policy}" \
-  POLICY_NAME=robonana_robotwin.adapter \
-  PORT="${port}" \
-  TEST_NUM="${test_num}" \
-  EXECUTE_ACTIONS_PER_PLAN="${EXECUTE_ACTIONS_PER_PLAN:-48}" \
-  SERVER_TIMEOUT_MS="${SERVER_TIMEOUT_MS:-600000}" \
-  SERVER_WAIT_SECONDS="${SERVER_WAIT_SECONDS:-600}" \
+  ROBONANA_DATASET_ROOT="${initial_dataset_root}" \
+  ROBONANA_EVAL_TASKS="${task_name}" \
+  ROBONANA_EVAL_SERVER_GPUS="${server_gpu_id}" \
+  ROBONANA_EVAL_SIM_GPUS="${sim_gpu_id}" \
+  ROBONANA_EVAL_JOBS_PER_GPU=1 \
+  ROBONANA_EPISODE_CPU_FALLBACK=0 \
+  ROBONANA_EVAL_SEED_GROUP="${seed}" \
+  ROBONANA_EVAL_RUN_DIR="${dataset_root}/logs/isolated_collection" \
+  ROBONANA_PORT_BASE="${port}" \
   EVAL_VIDEO_LOG=0 \
-  PYTHONUNBUFFERED=1 \
-  LOW_FREQUENCY_RGB=0 \
-  SKIP_ACTION_RENDER_SYNC=0 \
   ROBONANA_ROBOTWIN_STATIC_CAMERAS="${static_camera_csv}" \
-  ROBONANA_SAPIEN_RENDER_DEVICE=cuda:0 \
   ROBONANA_ROLLOUT_DATASET_ROOT="${dataset_root}" \
   ROBONANA_INITIAL_DATASET_ROOT="${initial_dataset_root}" \
   ROBONANA_ROLLOUT_CHECKPOINT="${trained_checkpoint}" \
-  bash "${repo_root}/third_party/FACT/evaluation/robotwin/launch_client.sh" \
-    "${task_name}" "${task_config}" "${collection}" "${seed}"
+  bash "${isolated_eval}" "${task_config}" "${test_num}"
 
-cleanup_server
-server_pid=""
-rmdir "${runtime_dir}" 2>/dev/null || true
-trap - EXIT
+episode_count=$(find "${dataset_root}/${task_name}/robonana_rollout/data" \
+  -maxdepth 1 -type f -name 'episode*.hdf5' | wc -l)
+if [[ ${episode_count} -ne ${test_num} ]]; then
+  echo "isolated collection wrote ${episode_count} episodes, expected ${test_num}" >&2
+  exit 1
+fi
 
 env \
   CUDA_VISIBLE_DEVICES="${prepare_gpu_id}" \
