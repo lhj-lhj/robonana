@@ -470,12 +470,15 @@ path:
 - Stage-1 action diffusion only;
 - 48 actions executed per policy request;
 - only the three policy inputs are rendered: left wrist, right wrist, and head;
-- one shared dynamically batched action server per GPU;
+- policy servers and SAPIEN/OIDN simulators on disjoint physical GPU pools;
 - one fresh SAPIEN process per accepted episode with deterministic seed handoff;
 - per-task and aggregate success rates plus native episode MP4s.
 
-The default is two concurrent RoboTwin clients per GPU with a 100 ms batching
-window. Each episode has its own watchdog. A failed CUDA/OIDN attempt is
+The default topology uses GPU 0–3 for four policy servers and GPU 4–7 for four
+single-client SAPIEN/OIDN simulators. The launcher rejects overlapping pools;
+putting FLUX inference and Vulkan/OIDN on the same physical GPU can trigger an
+NVIDIA graphics context-switch timeout and `vk::DeviceLostError` on Blackwell.
+Each episode has its own watchdog. A failed CUDA/OIDN attempt is
 terminated and retried from the same seed. All retries remain on CUDA; exhausting
 them marks an infrastructure error instead of silently changing the renderer.
 The denoiser is never disabled, accepted seeds are never silently skipped, and
@@ -484,8 +487,9 @@ completed episodes survive task restarts.
 ```bash
 export ROBONANA_TRAINED_CHECKPOINT=$PWD/experiments/<run>/models/<checkpoint>/transformer/diffusion_pytorch_model.bin
 export ROBONANA_DATASET_ROOT=/workspace/datasets/fact-robotwin-v2/RoboTwin
-export ROBONANA_EVAL_GPUS=0,1,2,3,4,5,6,7
-export ROBONANA_EVAL_JOBS_PER_GPU=2
+export ROBONANA_EVAL_SERVER_GPUS=0,1,2,3
+export ROBONANA_EVAL_SIM_GPUS=4,5,6,7
+export ROBONANA_EVAL_JOBS_PER_GPU=1
 export ROBONANA_EVAL_BATCH_WAIT_MS=100
 export ROBONANA_EPISODE_TIMEOUT_SECONDS=3600
 export ROBONANA_EPISODE_GPU_ATTEMPTS=2

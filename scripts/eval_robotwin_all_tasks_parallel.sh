@@ -13,7 +13,8 @@ model_python=${ROBONANA_MODEL_PYTHON:-/data3/hongjia/conda/envs/robonana/bin/pyt
 robotwin_env=${ROBOTWIN_CONDA_ENV:-/data3/hongjia/conda/envs/robotwin2}
 robotwin_python=${ROBONANA_ROBOTWIN_PYTHON:-${robotwin_env}/bin/python}
 fact_conda_env=${FACT_CONDA_ENV:-$(dirname "$(dirname "${model_python}")")}
-gpu_csv=${ROBONANA_EVAL_GPUS:-0,1,2,3,4,5,6,7}
+server_gpu_csv=${ROBONANA_EVAL_SERVER_GPUS:-0,1,2,3}
+sim_gpu_csv=${ROBONANA_EVAL_SIM_GPUS:-4,5,6,7}
 port_base=${ROBONANA_PORT_BASE:-18000}
 run_dir=${ROBONANA_EVAL_RUN_DIR:-${repo_root}/outputs/robotwin_full_eval_$(date +%Y%m%d_%H%M%S)}
 deploy_policy=${ROBONANA_DEPLOY_POLICY_PATH:-${repo_root}/src/robonana/configs/robotwin_eval_train_seen.yml}
@@ -22,7 +23,7 @@ task_max_attempts=${ROBONANA_TASK_MAX_ATTEMPTS:-3}
 episode_timeout_seconds=${ROBONANA_EPISODE_TIMEOUT_SECONDS:-3600}
 episode_gpu_attempts=${ROBONANA_EPISODE_GPU_ATTEMPTS:-2}
 episode_cpu_fallback=${ROBONANA_EPISODE_CPU_FALLBACK:-0}
-jobs_per_gpu=${ROBONANA_EVAL_JOBS_PER_GPU:-2}
+jobs_per_gpu=${ROBONANA_EVAL_JOBS_PER_GPU:-1}
 batch_wait_ms=${ROBONANA_EVAL_BATCH_WAIT_MS:-100}
 static_camera_csv=${ROBONANA_ROBOTWIN_STATIC_CAMERAS:-head_camera}
 client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
@@ -46,11 +47,41 @@ terminate_process_tree() {
   kill -TERM "${root_pid}" 2>/dev/null || true
 }
 
-IFS=',' read -r -a gpu_ids <<< "${gpu_csv}"
-if [[ ${#gpu_ids[@]} -eq 0 ]]; then
-  echo "ROBONANA_EVAL_GPUS resolved to an empty GPU list" >&2
+if [[ -n "${ROBONANA_EVAL_GPUS:-}" ]]; then
+  echo "ROBONANA_EVAL_GPUS is no longer supported because it colocates policy and SAPIEN." >&2
+  echo "Set disjoint ROBONANA_EVAL_SERVER_GPUS and ROBONANA_EVAL_SIM_GPUS instead." >&2
   exit 2
 fi
+IFS=',' read -r -a server_gpu_ids <<< "${server_gpu_csv}"
+IFS=',' read -r -a sim_gpu_ids <<< "${sim_gpu_csv}"
+if [[ ${#server_gpu_ids[@]} -eq 0 || ${#sim_gpu_ids[@]} -eq 0 ]]; then
+  echo "ROBONANA_EVAL_SERVER_GPUS and ROBONANA_EVAL_SIM_GPUS must not be empty" >&2
+  exit 2
+fi
+if [[ ${#server_gpu_ids[@]} -ne ${#sim_gpu_ids[@]} ]]; then
+  echo "Policy-server and simulator GPU lists must have the same length" >&2
+  exit 2
+fi
+declare -A server_gpu_set=()
+declare -A sim_gpu_set=()
+for gpu in "${server_gpu_ids[@]}"; do
+  if [[ ! ${gpu} =~ ^[0-9]+$ || -n "${server_gpu_set[${gpu}]:-}" ]]; then
+    echo "Invalid or duplicate policy-server GPU: ${gpu}" >&2
+    exit 2
+  fi
+  server_gpu_set["${gpu}"]=1
+done
+for gpu in "${sim_gpu_ids[@]}"; do
+  if [[ ! ${gpu} =~ ^[0-9]+$ || -n "${sim_gpu_set[${gpu}]:-}" ]]; then
+    echo "Invalid or duplicate simulator GPU: ${gpu}" >&2
+    exit 2
+  fi
+  if [[ -n "${server_gpu_set[${gpu}]:-}" ]]; then
+    echo "GPU ${gpu} is assigned to both policy serving and SAPIEN; the pools must be disjoint" >&2
+    exit 2
+  fi
+  sim_gpu_set["${gpu}"]=1
+done
 for required in "${checkpoint}" "${stats_path}" "${deploy_policy}" "${model_python}" \
   "${robotwin_python}" "${client_python_wrapper}" "${isolated_task_runner}"; do
   if [[ ! -f "${required}" ]]; then
@@ -184,14 +215,15 @@ mkdir -p "${run_dir}/workers"
 
 run_worker() {
   local rank=$1
-  local gpu=$2
+  local server_gpu=$2
+  local sim_gpu=$3
   local port=$((port_base + rank))
-  local worker_dir="${run_dir}/workers/rank_${rank}_gpu_${gpu}"
+  local worker_dir="${run_dir}/workers/rank_${rank}_server_${server_gpu}_sim_${sim_gpu}"
   local runtime_dir="/tmp/robonana_eval_${USER}_${port}"
   local shard=()
   local index
   for index in "${!tasks[@]}"; do
-    if (( index % ${#gpu_ids[@]} == rank )); then
+    if (( index % ${#sim_gpu_ids[@]} == rank )); then
       shard+=("${tasks[index]}")
     fi
   done
@@ -238,14 +270,15 @@ run_worker() {
   trap 'exit 130' INT TERM
 
   env \
-    CUDA_VISIBLE_DEVICES="${gpu}" \
+    CUDA_VISIBLE_DEVICES="${server_gpu}" \
     PYTHONPATH="${repo_root}/src:${repo_root}/third_party/FACT:${repo_root}/third_party/flux2_official/src:${repo_root}/third_party/flux2/src" \
     "${server_args[@]}" \
     > "${worker_dir}/server.log" 2>&1 &
   server_pid=$!
 
   local client_env=(
-    "CUDA_VISIBLE_DEVICES=${gpu}"
+    "CUDA_VISIBLE_DEVICES=${sim_gpu}"
+    "OIDN_DEFAULT_DEVICE=cuda"
     "XDG_RUNTIME_DIR=${runtime_dir}"
     "PYTHONPATH=${repo_root}/src"
     "ROBOTWIN_PATH=${robotwin_path}"
@@ -379,8 +412,8 @@ cleanup_all_workers() {
   done
 }
 trap cleanup_all_workers EXIT INT TERM
-for rank in "${!gpu_ids[@]}"; do
-  run_worker "${rank}" "${gpu_ids[rank]}" \
+for rank in "${!sim_gpu_ids[@]}"; do
+  run_worker "${rank}" "${server_gpu_ids[rank]}" "${sim_gpu_ids[rank]}" \
     > "${run_dir}/workers/rank_${rank}.log" 2>&1 &
   worker_pids+=("$!")
 done
@@ -397,8 +430,8 @@ trap - EXIT INT TERM
 results_csv="${run_dir}/results.csv"
 results_body="${run_dir}/results.body"
 : > "${results_body}"
-for rank in "${!gpu_ids[@]}"; do
-  worker_csv="${run_dir}/workers/rank_${rank}_gpu_${gpu_ids[rank]}/sweep/results.csv"
+for rank in "${!sim_gpu_ids[@]}"; do
+  worker_csv="${run_dir}/workers/rank_${rank}_server_${server_gpu_ids[rank]}_sim_${sim_gpu_ids[rank]}/sweep/results.csv"
   if [[ -f "${worker_csv}" ]]; then
     tail -n +2 "${worker_csv}" >> "${results_body}"
   fi

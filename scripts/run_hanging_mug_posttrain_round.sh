@@ -49,7 +49,8 @@ run_eval() {
     ROBOTWIN_CONDA_ENV="${robotwin_env}" \
     ROBONANA_DATASET_ROOT="${dataset_root}" \
     ROBONANA_EVAL_TASKS=hanging_mug \
-    ROBONANA_EVAL_GPUS=7 \
+    ROBONANA_EVAL_SERVER_GPUS=6 \
+    ROBONANA_EVAL_SIM_GPUS=7 \
     ROBONANA_EVAL_JOBS_PER_GPU=1 \
     ROBONANA_EVAL_RUN_DIR="${output_dir}" \
     ROBONANA_PORT_BASE=18700 \
