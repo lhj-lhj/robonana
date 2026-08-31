@@ -3,11 +3,72 @@
 
 from __future__ import annotations
 
+import json
+import os
 import runpy
 import sys
 from pathlib import Path
+from typing import Any
 
 from robonana.sim import configure_sapien_runtime
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _run_one_isolated_episode(entrypoint: Path, start_seed: int, metadata_path: Path) -> None:
+    """Run exactly one accepted RoboTwin episode from an explicit seed.
+
+    RoboTwin's evaluator may reject unstable expert seeds before accepting one.
+    The wrapped return value therefore records the *next* seed, allowing a fresh
+    process to resume the canonical deterministic sequence without duplicates or
+    silently skipped policy episodes.
+    """
+
+    namespace = runpy.run_path(str(entrypoint), run_name="_robonana_robotwin_eval")
+    parse_args = namespace.get("parse_args_and_config")
+    main = namespace.get("main")
+    original_eval = namespace.get("eval_policy")
+    if not callable(parse_args) or not callable(main) or not callable(original_eval):
+        raise RuntimeError(
+            "RoboTwin eval entrypoint must define parse_args_and_config, main, and eval_policy"
+        )
+
+    def eval_one(*args, **kwargs):
+        positional = list(args)
+        if len(positional) < 5:
+            raise RuntimeError("unexpected RoboTwin eval_policy signature")
+        positional[4] = start_seed
+        kwargs["test_num"] = 1
+        next_seed, success = original_eval(*positional, **kwargs)
+        next_seed = int(next_seed)
+        success = int(success)
+        if next_seed <= start_seed:
+            raise RuntimeError(
+                f"RoboTwin returned non-advancing seed {next_seed} from {start_seed}"
+            )
+        if success not in (0, 1):
+            raise RuntimeError(f"single-episode success must be 0 or 1, got {success}")
+        _atomic_write_json(
+            metadata_path,
+            {
+                "accepted_seed": next_seed - 1,
+                "next_seed": next_seed,
+                "start_seed": start_seed,
+                "success": success,
+            },
+        )
+        return next_seed, success
+
+    # Functions produced by runpy resolve globals through their own globals dict.
+    main.__globals__["eval_policy"] = eval_one
+    usr_args = parse_args()
+    usr_args["test_num"] = 1
+    main(usr_args)
 
 
 def main() -> int:
@@ -21,7 +82,16 @@ def main() -> int:
     # RoboTwin's ``from test_render import Sapien_TEST`` continue to work.
     sys.path.insert(0, str(entrypoint.parent))
     sys.argv = [str(entrypoint), *sys.argv[2:]]
-    runpy.run_path(str(entrypoint), run_name="__main__")
+    isolated_seed = os.environ.get("ROBONANA_EVAL_START_SEED")
+    metadata = os.environ.get("ROBONANA_EVAL_EPISODE_METADATA")
+    if (isolated_seed is None) != (metadata is None):
+        raise RuntimeError(
+            "ROBONANA_EVAL_START_SEED and ROBONANA_EVAL_EPISODE_METADATA must be set together"
+        )
+    if isolated_seed is None:
+        runpy.run_path(str(entrypoint), run_name="__main__")
+    else:
+        _run_one_isolated_episode(entrypoint, int(isolated_seed), Path(metadata).resolve())
     return 0
 
 

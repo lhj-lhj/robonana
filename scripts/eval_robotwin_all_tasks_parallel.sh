@@ -16,11 +16,15 @@ gpu_csv=${ROBONANA_EVAL_GPUS:-0,1,2,3,4,5,6,7}
 port_base=${ROBONANA_PORT_BASE:-18000}
 run_dir=${ROBONANA_EVAL_RUN_DIR:-${repo_root}/outputs/robotwin_full_eval_$(date +%Y%m%d_%H%M%S)}
 deploy_policy=${ROBONANA_DEPLOY_POLICY_PATH:-${repo_root}/src/robonana/configs/robotwin_eval_train_seen.yml}
-task_timeout_seconds=${ROBONANA_TASK_TIMEOUT_SECONDS:-21600}
+task_timeout_seconds=${ROBONANA_TASK_TIMEOUT_SECONDS:-86400}
 task_max_attempts=${ROBONANA_TASK_MAX_ATTEMPTS:-3}
+episode_timeout_seconds=${ROBONANA_EPISODE_TIMEOUT_SECONDS:-3600}
+episode_gpu_attempts=${ROBONANA_EPISODE_GPU_ATTEMPTS:-2}
+episode_cpu_fallback=${ROBONANA_EPISODE_CPU_FALLBACK:-1}
 jobs_per_gpu=${ROBONANA_EVAL_JOBS_PER_GPU:-2}
 batch_wait_ms=${ROBONANA_EVAL_BATCH_WAIT_MS:-100}
 client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
+isolated_task_runner=${repo_root}/scripts/eval_robotwin_task_isolated.py
 
 terminate_process_tree() {
   local root_pid=$1
@@ -46,7 +50,7 @@ if [[ ${#gpu_ids[@]} -eq 0 ]]; then
   exit 2
 fi
 for required in "${checkpoint}" "${stats_path}" "${deploy_policy}" "${model_python}" \
-  "${robotwin_env}/bin/python" "${client_python_wrapper}"; do
+  "${robotwin_env}/bin/python" "${client_python_wrapper}" "${isolated_task_runner}"; do
   if [[ ! -f "${required}" ]]; then
     echo "Required file does not exist: ${required}" >&2
     exit 2
@@ -57,8 +61,14 @@ if [[ ! -d "${flux_checkpoint}" || ! -d "${robotwin_env}" ]]; then
   exit 2
 fi
 if ! [[ ${task_timeout_seconds} =~ ^[1-9][0-9]*$ && ${task_max_attempts} =~ ^[1-9][0-9]*$ \
+  && ${episode_timeout_seconds} =~ ^[1-9][0-9]*$ \
+  && ${episode_gpu_attempts} =~ ^[1-9][0-9]*$ \
   && ${jobs_per_gpu} =~ ^[1-9][0-9]*$ ]]; then
-  echo "Timeout, max attempts, and ROBONANA_EVAL_JOBS_PER_GPU must be positive integers" >&2
+  echo "Task/episode timeouts, retry counts, and jobs per GPU must be positive integers" >&2
+  exit 2
+fi
+if [[ ${episode_cpu_fallback} != 0 && ${episode_cpu_fallback} != 1 ]]; then
+  echo "ROBONANA_EPISODE_CPU_FALLBACK must be 0 or 1" >&2
   exit 2
 fi
 if ! "${robotwin_env}/bin/python" - <<'PY'
@@ -234,6 +244,7 @@ run_worker() {
     "SERVER_TIMEOUT_MS=600000"
     "SERVER_WAIT_SECONDS=600"
     "EVAL_VIDEO_LOG=1"
+    "PYTHONUNBUFFERED=1"
     "LOW_FREQUENCY_RGB=0"
     "SKIP_ACTION_RENDER_SYNC=0"
     # cuda:0 is this rank's sole logical device after CUDA_VISIBLE_DEVICES isolation.
@@ -255,6 +266,11 @@ run_worker() {
 
   run_task() {
     local task_name=$1
+    local task_state_dir="${worker_dir}/task_runs/${task_name}"
+    local fallback_flag=--no-cpu-fallback
+    if [[ ${episode_cpu_fallback} == 1 ]]; then
+      fallback_flag=--cpu-fallback
+    fi
     local existing
     existing=$(awk -F, -v task_name="${task_name}" \
       '$1 == task_name && $4 != "ERROR" && $3 != "" {print; exit}' "${results_csv}")
@@ -263,36 +279,37 @@ run_worker() {
       return 0
     fi
 
+    mkdir -p "${task_state_dir}"
     local attempt attempt_dir attempt_csv attempt_log row attempt_rc
     for ((attempt = 1; attempt <= task_max_attempts; attempt++)); do
       attempt_dir="${worker_dir}/attempts/${task_name}/attempt_${attempt}_$(date +%Y%m%d_%H%M%S)"
-      mkdir -p "${attempt_dir}/runtime"
-      echo "[attempt ${attempt}/${task_max_attempts}] ${task_name} timeout=${task_timeout_seconds}s"
+      mkdir -p "${attempt_dir}"
+      attempt_log="${attempt_dir}/task.log"
+      echo "[attempt ${attempt}/${task_max_attempts}] ${task_name} " \
+        "task_timeout=${task_timeout_seconds}s episode_timeout=${episode_timeout_seconds}s"
       attempt_rc=0
       timeout --signal=TERM --kill-after=60 "${task_timeout_seconds}" \
         env "${client_env[@]}" \
-          XDG_RUNTIME_DIR="${attempt_dir}/runtime" \
-          TASK_LIST="${task_name}" \
-          SWEEP_OUT="${attempt_dir}" \
-          bash "${repo_root}/third_party/FACT/evaluation/robotwin/eval_all_tasks.sh" \
-            "${task_config}" "${test_num}" || attempt_rc=$?
-      attempt_csv="${attempt_dir}/results.csv"
-      attempt_log="${attempt_dir}/logs/${task_name}.log"
+          "${model_python}" "${isolated_task_runner}" \
+            --task-name "${task_name}" \
+            --task-config "${task_config}" \
+            --test-num "${test_num}" \
+            --output-dir "${task_state_dir}" \
+            --launch-client "${repo_root}/third_party/FACT/evaluation/robotwin/launch_client.sh" \
+            --episode-timeout-seconds "${episode_timeout_seconds}" \
+            --gpu-attempts "${episode_gpu_attempts}" \
+            "${fallback_flag}" \
+            > "${attempt_log}" 2>&1 || attempt_rc=$?
+      attempt_csv="${task_state_dir}/results.csv"
       row=""
       if [[ -f "${attempt_csv}" ]]; then
         row=$(awk -F, -v task_name="${task_name}" \
           '$1 == task_name && $4 != "ERROR" && $3 != "" {print; exit}' "${attempt_csv}")
       fi
-      if [[ -n "${row}" && -f "${attempt_log}" ]] \
-        && grep -Eq 'OIDN Error:|ErrorDeviceLost|DeviceLost|Render Error' "${attempt_log}"; then
-        echo "[retry] ${task_name}: renderer error found in successful client log"
-        row=""
-      fi
       if [[ -n "${row}" ]]; then
         upsert_result "${task_name}" "${row}"
-        if [[ -f "${attempt_dir}/logs/${task_name}.log" ]]; then
-          cp "${attempt_dir}/logs/${task_name}.log" \
-            "${sweep_dir}/logs/${task_name}.attempt_${attempt}.log"
+        if [[ -f "${attempt_log}" ]]; then
+          cp "${attempt_log}" "${sweep_dir}/logs/${task_name}.attempt_${attempt}.log"
         fi
         echo "[recovered] ${row}"
         return 0
@@ -382,14 +399,15 @@ awk -F, '
   }
 ' "${results_csv}" | tee "${run_dir}/summary.txt"
 
-find "${robotwin_path}/eval_result" -type f -name '*.mp4' -newer "${run_dir}/.started" -print \
-  | sort > "${run_dir}/mp4_manifest.txt"
+find "${run_dir}/workers" -type f -path '*/task_runs/*/mp4_manifest.txt' -exec cat {} + \
+  | sort -u > "${run_dir}/mp4_manifest.txt"
 
 result_tasks=$(awk 'END {print NR-1}' "${results_csv}")
 mp4_count=$(wc -l < "${run_dir}/mp4_manifest.txt")
 expected_episodes=$((expected_task_count * test_num))
 {
-  echo "mode=action_only renderer=sapien_oidn_cuda"
+  echo "mode=action_only renderer=sapien_oidn episode_isolation=1"
+  echo "episode_timeout_seconds=${episode_timeout_seconds} gpu_attempts=${episode_gpu_attempts} cpu_fallback=${episode_cpu_fallback}"
   echo "jobs_per_gpu=${jobs_per_gpu} dynamic_batch=$((jobs_per_gpu > 1)) batch_wait_ms=${batch_wait_ms}"
   echo "result_tasks=${result_tasks}/${expected_task_count}"
   echo "mp4=${mp4_count}/${expected_episodes}"

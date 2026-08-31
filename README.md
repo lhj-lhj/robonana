@@ -435,10 +435,14 @@ path:
 - Stage-1 action diffusion only;
 - 48 actions executed per policy request;
 - one shared dynamically batched action server per GPU;
+- one fresh SAPIEN process per accepted episode with deterministic seed handoff;
 - per-task and aggregate success rates plus native episode MP4s.
 
 The default is two concurrent RoboTwin clients per GPU with a 100 ms batching
-window. This is the reliable setting for full 50-episode task evaluation.
+window. Each episode has its own watchdog. A stalled CUDA/OIDN attempt is
+terminated and retried from the same seed; after two CUDA attempts, only that
+episode falls back to OIDN on CPU. The denoiser is never disabled, accepted
+seeds are never silently skipped, and completed episodes survive task restarts.
 
 ```bash
 export ROBONANA_TRAINED_CHECKPOINT=$PWD/experiments/<run>/models/<checkpoint>/transformer/diffusion_pytorch_model.bin
@@ -446,6 +450,9 @@ export ROBONANA_DATASET_ROOT=/workspace/datasets/fact-robotwin-v2/RoboTwin
 export ROBONANA_EVAL_GPUS=0,1,2,3,4,5,6,7
 export ROBONANA_EVAL_JOBS_PER_GPU=2
 export ROBONANA_EVAL_BATCH_WAIT_MS=100
+export ROBONANA_EPISODE_TIMEOUT_SECONDS=3600
+export ROBONANA_EPISODE_GPU_ATTEMPTS=2
+export ROBONANA_EPISODE_CPU_FALLBACK=1
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
 
@@ -460,8 +467,10 @@ bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 
 Each run directory contains `results.csv` with one row per task, `summary.txt`
 with micro/macro success rates, `mp4_manifest.txt`, per-worker logs, and the
-instruction audit. An `ERROR` row is infrastructure failure or timeout and must
-be rerun; it is never counted as a 0% policy result.
+instruction audit. Each task also has an append-only `episodes.jsonl` seed and
+success ledger plus `attempts.jsonl` with timeout/fallback diagnostics. An
+`ERROR` row is infrastructure failure or timeout and must be rerun; it is never
+counted as a 0% policy result.
 
 On Blackwell, install the pinned OIDN CUDA runtime once in the RoboTwin
 environment. The launcher rejects older versions and a missing CUDA plugin:
