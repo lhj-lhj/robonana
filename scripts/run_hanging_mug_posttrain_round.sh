@@ -10,6 +10,7 @@ pretrain_config=${ROBONANA_PRETRAIN_MODEL_CONFIG:-${pretrain_project}/config.jso
 model_python=${ROBONANA_MODEL_PYTHON:-/data3/hongjia/conda/envs/robonana/bin/python}
 robotwin_path=${ROBOTWIN_PATH:-/workspace/hongjia/RoboTwin}
 robotwin_env=${ROBOTWIN_CONDA_ENV:-/data3/hongjia/conda/envs/robotwin2}
+robotwin_python=${ROBONANA_ROBOTWIN_PYTHON:-${robotwin_env}/bin/python}
 dataset_root=${ROBONANA_INITIAL_DATASET_ROOT:-/workspace/datasets/fact-robotwin-v2/RoboTwin}
 rollout_base=${ROBONANA_ROLLOUT_BASE:-/data3/hongjia/robonana_rollouts}
 collection=${ROBONANA_ROLLOUT_COLLECTION:-hanging_mug_round0_from160k}
@@ -47,11 +48,14 @@ run_eval() {
     ROBONANA_MODEL_PYTHON="${model_python}" \
     ROBOTWIN_PATH="${robotwin_path}" \
     ROBOTWIN_CONDA_ENV="${robotwin_env}" \
+    ROBONANA_ROBOTWIN_PYTHON="${robotwin_python}" \
     ROBONANA_DATASET_ROOT="${dataset_root}" \
     ROBONANA_EVAL_TASKS=hanging_mug \
     ROBONANA_EVAL_SERVER_GPUS=6 \
     ROBONANA_EVAL_SIM_GPUS=7 \
     ROBONANA_EVAL_JOBS_PER_GPU=1 \
+    ROBONANA_EPISODE_CPU_FALLBACK=0 \
+    ROBONANA_ROBOTWIN_STATIC_CAMERAS=head_camera \
     ROBONANA_EVAL_RUN_DIR="${output_dir}" \
     ROBONANA_PORT_BASE=18700 \
     bash "${repo_root}/scripts/eval_robotwin_all_tasks_parallel.sh" demo_clean "${test_num}"
@@ -68,15 +72,17 @@ if [[ ! -f ${state_dir}/rollout_replay.done ]]; then
     ROBONANA_MODEL_CONFIG="${pretrain_config}" \
     ROBOTWIN_PATH="${robotwin_path}" \
     ROBOTWIN_CONDA_ENV="${robotwin_env}" \
+    ROBONANA_ROBOTWIN_PYTHON="${robotwin_python}" \
     ROBONANA_ROLLOUT_BASE="${rollout_base}" \
     ROBONANA_INITIAL_DATASET_ROOT="${dataset_root}" \
     ROBONANA_STATS_SOURCE="${dataset_root}/robonana_norm_stats.json" \
     ROBONANA_TRAINED_CHECKPOINT="${pretrain_checkpoint}" \
     ROBONANA_COLLECTION_ROUND=0 \
     ROBONANA_POLICY_VERSION=reward_success_q_160k \
-    ROBONANA_SERVER_GPU_IDS=6,7 \
-    ROBONANA_CLIENT_GPU_ID=7 \
+    ROBONANA_SERVER_GPU_ID=6 \
+    ROBONANA_SIM_GPU_ID=7 \
     ROBONANA_PREPARE_GPU_ID=7 \
+    ROBONANA_ROBOTWIN_STATIC_CAMERAS=head_camera \
     TEST_NUM="${test_num}" \
     PORT=18720 \
     bash "${repo_root}/scripts/collect_prepare_robotwin_rollouts.sh" \
