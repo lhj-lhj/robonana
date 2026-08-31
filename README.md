@@ -647,7 +647,7 @@ trajectory. Consequently:
 |---|---|---|---|
 | predicted action | recorded behavior | best-of-8 pseudo action | recorded behavior |
 | future state/image/DINO | recorded future | recorded future | recorded behavior prefix |
-| horizon reward | recorded prefix reward | recorded prefix reward | recorded behavior prefix |
+| future-state reward/success | recorded one-state reward and success label | recorded one-state reward and success label | recorded behavior prefix |
 | current Q | EMA TD target | EMA TD target | recorded behavior prefix |
 
 This separation is deliberate: failed data improves the action generator while
@@ -701,11 +701,11 @@ Gradient-accumulation micro-steps do not update EMA. If any rank observes a
 non-finite accumulated loss, every rank cancels that optimizer, scheduler, and
 EMA step together.
 
-### Joint flow-matching objective
+### Joint training objective
 
-Actions, future FLUX latents, future state, reward, Q, and DINO targets all use
-the same rectified-flow corruption. For clean target `x`, Gaussian noise
-`epsilon`, and sampled noise level `sigma`:
+Actions, future FLUX latents, future state, Q, and DINO targets use the same
+rectified-flow corruption. For clean target `x`, Gaussian noise `epsilon`, and
+sampled noise level `sigma`:
 
 $$
 x_\sigma=(1-\sigma)x+\sigma\epsilon, \qquad
@@ -714,8 +714,10 @@ $$
 
 The corresponding adapter/head predicts `v*`; inference integrates from
 `sigma=1` pure noise to `sigma=0` clean data with the shared multi-step Euler
-sampler. Reward and Q are therefore generated scalar flow samples, not ordinary
-one-pass regression logits. The weighted training objective is
+sampler. Q is therefore a scalar flow sample. Reward is a direct scalar
+regression target (`-1` nonterminal, `0` successful terminal), and success is a
+direct binary logit. Neither direct head receives its target as input. The
+weighted training objective is
 
 $$
 \mathcal L =
@@ -723,30 +725,37 @@ $$
 +10.0\mathcal L_{action}
 +0.4\mathcal L_{state}
 +0.01\mathcal L_{reward}
++0.01\mathcal L_{success}
 +0.001\mathcal L_Q
 +0.1\mathcal L_{DINO}.
 $$
 
-All terms are MSE on flow velocity. The action mask is enabled for both success
-and failure samples after the failure pseudo target has been selected; the Q
-mask excludes only `delta_steps=0`. No loss is backpropagated through candidate
-search, EMA next-action sampling, EMA next-Q sampling, or target construction.
+The flow terms and direct reward use MSE; success uses binary cross entropy with
+logits. The action mask is enabled for both success and failure samples after
+the failure pseudo target has been selected; the Q mask excludes only
+`delta_steps=0`. No loss is backpropagated through candidate search, EMA
+next-action sampling, EMA next-Q sampling, or target construction.
 
 ### Interpreting Q during inference
 
-`action_reward_q`, `world_all`, and `world_horizon` return the clean sampled
-`rewards` and `qs` tensors together with the matching `horizons` tensor. For a
-supplied action chunk and horizon `h`:
+`action_reward_q`, `world_all`, and `world_horizon` return direct `rewards`,
+`success_probs`, and sampled `qs` together with the matching `horizons` tensor.
+For a supplied action chunk and horizon `h`:
 
-- the reward entry whose `horizons` value is `h` estimates the discounted cost
-  of executing the first `h` action tokens, subject to the training-time tail
-  clipping distribution;
+- the reward entry estimates the one-state reward at the selected future state,
+  while `success_probs` estimates whether that state is a successful terminal;
 - the corresponding Q entry estimates that prefix return plus the learned EMA-policy
   continuation after the predicted `s_(t+h)`;
 - larger Q is better because step rewards are non-positive;
 - Q must not be interpreted as a probability or added to `reward_h` again—the
   current Q target already contains `reward_h`;
 - ranking candidate chunks uses `Q(h=48)` directly.
+
+The optimized `action_reward_q` path queries `h=48` first. If its success
+probability is below threshold, it skips horizons 1 through 47 and analytically
+accumulates 48 nonterminal rewards. Only when `success_48` is positive does it
+query all horizons to locate the first predicted terminal and construct the
+discounted accumulated-reward curve.
 
 Before posttraining, Q has the MC-success semantics described in
 [What the reward and Q outputs mean](#what-the-reward-and-q-outputs-mean).
@@ -796,6 +805,22 @@ bounded two-step GPU smoke is:
 ```bash
 CUDA_VISIBLE_DEVICES=7 python scripts/smoke_posttraining.py --device cuda:0
 ```
+
+For the focused hanging-mug experiment, the resumable orchestration script runs
+the same 50-seed evaluation before and after one posttraining round, keeps the
+rollout replay outside the initial dataset, and writes `comparison.json`:
+
+```bash
+export ROBONANA_PRETRAIN_CHECKPOINT=$PWD/experiments/robotwin_flux2_4b_dino_reward_success_q_from150k_plus10k/models/checkpoint_epoch_1_step_160000/transformer/diffusion_pytorch_model.bin
+export ROBONANA_PRETRAIN_MODEL_CONFIG=$PWD/experiments/robotwin_flux2_4b_dino_reward_success_q_from150k_plus10k/config.json
+export ROBONANA_POSTTRAIN_STEPS=1000
+bash scripts/run_hanging_mug_posttrain_round.sh
+```
+
+The default posttraining run uses physical GPUs 7 and 8 (`CUDA` indices 6 and
+7), local batch 4, serial OIDN evaluation on GPU 8, and the training-seen
+instruction policy. Completed stages are marked under the output `state/`
+directory so a relaunch does not repeat a finished 50-episode stage.
 
 ## Verification
 

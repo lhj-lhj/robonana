@@ -13,17 +13,24 @@ fi
 
 rollout_base=${ROBONANA_ROLLOUT_BASE:-/workspace/hongjia/robonana_rollouts}
 dataset_root="${rollout_base}/${collection}"
-initial_dataset_root=${ROBONANA_INITIAL_DATASET_ROOT:-/workspace/datasets/RoboTwin/hf_dataset}
+initial_dataset_root=${ROBONANA_INITIAL_DATASET_ROOT:-/workspace/datasets/fact-robotwin-v2/RoboTwin}
 flux_checkpoint=${ROBONANA_FLUX_CHECKPOINT_DIR:-${repo_root}/checkpoints/FLUX.2-klein-base-4B}
 trained_checkpoint=${ROBONANA_TRAINED_CHECKPOINT:?"set ROBONANA_TRAINED_CHECKPOINT to a complete diffusion_pytorch_model.bin"}
 stats_source=${ROBONANA_STATS_SOURCE:-${initial_dataset_root}/robonana_norm_stats.json}
+model_python=${ROBONANA_MODEL_PYTHON:-${repo_root}/.venv/bin/python}
+robotwin_path=${ROBOTWIN_PATH:-/workspace/hongjia/RoboTwin}
+robotwin_env=${ROBOTWIN_CONDA_ENV:-/workspace/.conda/envs/robotwin2}
+fact_conda_env=${FACT_CONDA_ENV:-$(dirname "$(dirname "${model_python}")")}
+client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
+deploy_policy=${ROBONANA_DEPLOY_POLICY_PATH:-${repo_root}/src/robonana/configs/robotwin_eval_train_seen.yml}
 server_gpu_ids=${ROBONANA_SERVER_GPU_IDS:-6,7}
 client_gpu_id=${ROBONANA_CLIENT_GPU_ID:-7}
 prepare_gpu_id=${ROBONANA_PREPARE_GPU_ID:-7}
 port=${PORT:-8094}
 test_num=${TEST_NUM:-1}
 
-for required_path in "${trained_checkpoint}" "${stats_source}"; do
+for required_path in "${trained_checkpoint}" "${stats_source}" "${model_python}" \
+  "${robotwin_env}/bin/python" "${client_python_wrapper}" "${deploy_policy}"; do
   if [[ ! -f "${required_path}" ]]; then
     echo "Required file does not exist: ${required_path}" >&2
     exit 2
@@ -51,21 +58,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
+server_args=(
+  "${model_python}" "${repo_root}/scripts/inference_server_robotwin.py"
+  --checkpoint "${trained_checkpoint}"
+  --flux-checkpoint-dir "${flux_checkpoint}"
+  --stats-path "${stats_source}"
+  --model-device cuda:0
+  --vae-device cuda:1
+  --text-encoder-device cpu
+  --dtype bf16
+  --action-chunk 48
+  --horizon 24
+  --num-inference-steps 20
+  --port "${port}"
+)
+if [[ -n "${ROBONANA_MODEL_CONFIG:-}" ]]; then
+  server_args+=(--model-config "${ROBONANA_MODEL_CONFIG}")
+fi
+
 env \
   CUDA_VISIBLE_DEVICES="${server_gpu_ids}" \
   PYTHONPATH="${repo_root}/src:${repo_root}/third_party/FACT:${repo_root}/third_party/flux2/src:${repo_root}/third_party/flux2_official/src" \
-  "${repo_root}/.venv/bin/python" "${repo_root}/scripts/inference_server_robotwin.py" \
-    --checkpoint "${trained_checkpoint}" \
-    --flux-checkpoint-dir "${flux_checkpoint}" \
-    --stats-path "${stats_source}" \
-    --model-device cuda:0 \
-    --vae-device cuda:1 \
-    --text-encoder-device cpu \
-    --dtype bf16 \
-    --action-chunk 48 \
-    --horizon 24 \
-    --num-inference-steps 20 \
-    --port "${port}" \
+  "${server_args[@]}" \
     >"${server_log}" 2>&1 &
 server_pid=$!
 
@@ -73,10 +87,12 @@ env \
   CUDA_VISIBLE_DEVICES="${client_gpu_id}" \
   XDG_RUNTIME_DIR="${runtime_dir}" \
   PYTHONPATH="${repo_root}/src" \
-  FACT_CONDA_ENV="${repo_root}/.venv" \
-  ROBOTWIN_PATH="${ROBOTWIN_PATH:-/workspace/hongjia/RoboTwin}" \
-  ROBOTWIN_CONDA_ENV="${ROBOTWIN_CONDA_ENV:-/workspace/.conda/envs/robotwin2}" \
-  DEPLOY_POLICY_PATH="${repo_root}/third_party/FACT/evaluation/robotwin/deploy_policy.yml" \
+  FACT_CONDA_ENV="${fact_conda_env}" \
+  ROBOTWIN_PATH="${robotwin_path}" \
+  ROBOTWIN_CONDA_ENV="${robotwin_env}" \
+  ROBONANA_ROBOTWIN_PYTHON="${robotwin_env}/bin/python" \
+  CLIENT_PYTHON="${client_python_wrapper}" \
+  DEPLOY_POLICY_PATH="${deploy_policy}" \
   POLICY_NAME=robonana_robotwin.adapter \
   PORT="${port}" \
   TEST_NUM="${test_num}" \
@@ -98,7 +114,7 @@ trap - EXIT
 env \
   CUDA_VISIBLE_DEVICES="${prepare_gpu_id}" \
   PYTHONPATH="${repo_root}/src:${repo_root}/third_party/FACT:${repo_root}/third_party/flux2/src:${repo_root}/third_party/flux2_official/src" \
-  "${repo_root}/.venv/bin/python" "${repo_root}/scripts/prepare_robotwin_rollouts.py" \
+  "${model_python}" "${repo_root}/scripts/prepare_robotwin_rollouts.py" \
     --dataset-root "${dataset_root}" \
     --initial-dataset-root "${initial_dataset_root}" \
     --checkpoint "${flux_checkpoint}" \
