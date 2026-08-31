@@ -17,6 +17,7 @@ class TwoStageFlowSample:
     future: Tensor
     future_state: Tensor
     reward: Tensor
+    success: Tensor
     q: Tensor
 
 
@@ -25,6 +26,7 @@ class WorldFlowSample:
     future: Tensor
     future_state: Tensor
     reward: Tensor
+    success: Tensor
     q: Tensor
 
 
@@ -172,13 +174,13 @@ def sample_flux2_world(
     horizon_idx: int | Tensor,
     future_noise: Tensor,
     future_state_noise: Tensor,
-    reward_noise: Tensor,
+    reward_template: Tensor,
     q_noise: Tensor,
     schedule: Tensor,
     grid_height: int,
     grid_width: int,
 ) -> WorldFlowSample:
-    """Sample Stage-2 world/reward/Q with image tokens optionally omitted."""
+    """Sample Stage-2 world/Q flow plus direct reward/success outputs."""
 
     batch_size = clean_action.shape[0]
     device = clean_action.device
@@ -229,11 +231,11 @@ def sample_flux2_world(
     def predict_world(
         sampled_future: Tensor,
         sampled_future_state: Tensor,
-        sampled_reward: Tensor,
+        reward_query: Tensor,
         sampled_q: Tensor,
         sampled_action: Tensor,
         sigma: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         output = model(
             context=context,
             context_ids=context_ids,
@@ -246,19 +248,19 @@ def sample_flux2_world(
             gt_action_cond=sampled_action,
             horizon_idx=horizon,
             noisy_future_state=sampled_future_state,
-            noisy_reward=sampled_reward,
+            noisy_reward=reward_query,
             noisy_q=sampled_q,
             action_timestep=clean_action_time,
             wm_timestep=sigma.expand(batch_size),
             context_mask=context_mask,
         )
-        return output.image, output.future_state, output.reward, output.q
+        return output.image, output.future_state, output.reward, output.success, output.q
 
     return sample_world_flow(
         clean_action=clean_action,
         future_noise=future_noise,
         future_state_noise=future_state_noise,
-        reward_noise=reward_noise,
+        reward_template=reward_template,
         q_noise=q_noise,
         schedule=schedule,
         predict_world=predict_world,
@@ -270,12 +272,12 @@ def sample_world_flow(
     clean_action: Tensor,
     future_noise: Tensor,
     future_state_noise: Tensor,
-    reward_noise: Tensor,
+    reward_template: Tensor,
     q_noise: Tensor,
     schedule: Tensor,
     predict_world: Callable[
         [Tensor, Tensor, Tensor, Tensor, Tensor, Tensor],
-        tuple[Tensor, Tensor, Tensor, Tensor],
+        tuple[Tensor, Tensor, Tensor, Tensor, Tensor],
     ],
 ) -> WorldFlowSample:
     """Denoise world targets from pure noise under a fixed clean action chunk."""
@@ -291,13 +293,12 @@ def sample_world_flow(
 
     sampled_future = future_noise
     sampled_future_state = future_state_noise
-    sampled_reward = reward_noise
     sampled_q = q_noise
     for sigma, sigma_next in zip(schedule[:-1], schedule[1:]):
-        image_velocity, state_velocity, reward_velocity, q_velocity = predict_world(
+        image_velocity, state_velocity, _, _, q_velocity = predict_world(
             sampled_future,
             sampled_future_state,
-            sampled_reward,
+            reward_template,
             sampled_q,
             clean_action,
             sigma,
@@ -306,15 +307,24 @@ def sample_world_flow(
         sampled_future_state = flow_euler_step(
             sampled_future_state, state_velocity, sigma, sigma_next
         )
-        sampled_reward = flow_euler_step(
-            sampled_reward, reward_velocity, sigma, sigma_next
-        )
         sampled_q = flow_euler_step(sampled_q, q_velocity, sigma, sigma_next)
+
+    # Reward and success are direct heads.  Evaluate them once on the fully
+    # denoised world/Q state instead of integrating them through the flow.
+    _, _, direct_reward, success_logit, _ = predict_world(
+        sampled_future,
+        sampled_future_state,
+        reward_template,
+        sampled_q,
+        clean_action,
+        schedule[-1],
+    )
 
     return WorldFlowSample(
         future=sampled_future,
         future_state=sampled_future_state,
-        reward=sampled_reward,
+        reward=direct_reward,
+        success=success_logit,
         q=sampled_q,
     )
 
@@ -324,13 +334,13 @@ def sample_two_stage_flow(
     action_noise: Tensor,
     future_noise: Tensor,
     future_state_noise: Tensor,
-    reward_noise: Tensor,
+    reward_template: Tensor,
     q_noise: Tensor,
     schedule: Tensor,
     predict_action: Callable[[Tensor, Tensor], Tensor],
     predict_world: Callable[
         [Tensor, Tensor, Tensor, Tensor, Tensor, Tensor],
-        tuple[Tensor, Tensor, Tensor, Tensor],
+        tuple[Tensor, Tensor, Tensor, Tensor, Tensor],
     ],
 ) -> TwoStageFlowSample:
     """Run FACT-style action-first, world-second inference from pure noise."""
@@ -353,7 +363,7 @@ def sample_two_stage_flow(
         clean_action=sampled_action,
         future_noise=future_noise,
         future_state_noise=future_state_noise,
-        reward_noise=reward_noise,
+        reward_template=reward_template,
         q_noise=q_noise,
         schedule=schedule,
         predict_world=predict_world,
@@ -364,5 +374,6 @@ def sample_two_stage_flow(
         future=world.future,
         future_state=world.future_state,
         reward=world.reward,
+        success=world.success,
         q=world.q,
     )

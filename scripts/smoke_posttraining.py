@@ -95,7 +95,13 @@ def _optimizer_step(
     noisy_action, action_target = flow_noise(pred_action_target, action_timestep)
     noisy_future, image_target = flow_noise(inputs["future"], wm_timestep)
     noisy_state, state_target = flow_noise(inputs["future_state"], wm_timestep)
-    noisy_reward, reward_target = flow_noise(inputs["reward"], wm_timestep)
+    reward_target = torch.where(
+        inputs["success_terminal_h"].reshape(batch_size, 1, 1).bool(),
+        torch.zeros_like(inputs["reward"]),
+        -torch.ones_like(inputs["reward"]),
+    )
+    reward_query = torch.zeros_like(reward_target)
+    success_target = inputs["success_terminal_h"].reshape(batch_size, 1, 1)
     clean_q = td.q_target.to(dtype=inputs["context"].dtype)
     noisy_q, q_target = flow_noise(clean_q, wm_timestep)
     context_ids = text_position_ids(batch_size, inputs["context"].shape[1], inputs["context"].device)
@@ -126,7 +132,7 @@ def _optimizer_step(
         gt_action_cond=inputs["behavior_action"],
         horizon_idx=inputs["horizon_idx"],
         noisy_future_state=noisy_state,
-        noisy_reward=noisy_reward,
+        noisy_reward=reward_query,
         noisy_q=noisy_q,
         action_timestep=action_timestep,
         wm_timestep=wm_timestep,
@@ -138,6 +144,7 @@ def _optimizer_step(
         action_target=action_target,
         future_state_target=state_target,
         reward_target=reward_target,
+        success_target=success_target,
         q_target=q_target,
         action_loss_mask=torch.ones(batch_size, device=inputs["context"].device),
         q_loss_mask=td.q_loss_mask,
@@ -147,6 +154,7 @@ def _optimizer_step(
         + 10.0 * losses["action_loss"]
         + 0.4 * losses["future_state_loss"]
         + 0.01 * losses["reward_loss"]
+        + 0.01 * losses["success_loss"]
         + 0.001 * losses["q_loss"]
     )
     optimizer.zero_grad(set_to_none=True)

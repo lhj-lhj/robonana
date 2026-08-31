@@ -234,7 +234,7 @@ def _sample_q_microbatched(
     clean_action: Tensor,
     horizon: int,
     future_state_noise: Tensor,
-    reward_noise: Tensor,
+    reward_template: Tensor,
     q_noise: Tensor,
     schedule: Tensor,
     grid_height: int,
@@ -258,7 +258,7 @@ def _sample_q_microbatched(
                 horizon_idx=horizon,
                 future_noise=future_noise,
                 future_state_noise=future_state_noise[start:stop],
-                reward_noise=reward_noise[start:stop],
+                reward_template=reward_template[start:stop],
                 q_noise=q_noise[start:stop],
                 schedule=schedule,
                 grid_height=grid_height,
@@ -289,7 +289,7 @@ def search_failure_candidates(
     ema_autocast_dtype: torch.dtype = torch.bfloat16,
     action_noise: Tensor | None = None,
     common_future_state_noise: Tensor | None = None,
-    common_reward_noise: Tensor | None = None,
+    common_reward_template: Tensor | None = None,
     common_q_noise: Tensor | None = None,
 ) -> CandidateSearchResult:
     """Online best-of-N actions ranked by EMA Q with common world noise."""
@@ -347,10 +347,10 @@ def search_failure_candidates(
         if common_future_state_noise is None
         else common_future_state_noise
     )
-    common_reward_noise = (
-        torch.randn(batch_size, 1, 1, device=device, dtype=behavior_action.dtype)
-        if common_reward_noise is None
-        else common_reward_noise
+    common_reward_template = (
+        torch.zeros(batch_size, 1, 1, device=device, dtype=behavior_action.dtype)
+        if common_reward_template is None
+        else common_reward_template
     )
     common_q_noise = (
         torch.randn(batch_size, 1, 1, device=device, dtype=behavior_action.dtype)
@@ -368,7 +368,7 @@ def search_failure_candidates(
         clean_action=candidates.reshape(batch_size * candidate_count, action_horizon, action_dim),
         horizon=candidate_horizon,
         future_state_noise=_repeat_candidates(common_future_state_noise, candidate_count),
-        reward_noise=_repeat_candidates(common_reward_noise, candidate_count),
+        reward_template=_repeat_candidates(common_reward_template, candidate_count),
         q_noise=_repeat_candidates(common_q_noise, candidate_count),
         schedule=world_schedule,
         grid_height=grid_height,
@@ -386,7 +386,7 @@ def search_failure_candidates(
         clean_action=behavior_action,
         horizon=candidate_horizon,
         future_state_noise=common_future_state_noise,
-        reward_noise=common_reward_noise,
+        reward_template=common_reward_template,
         q_noise=common_q_noise,
         schedule=world_schedule,
         grid_height=grid_height,
@@ -492,7 +492,7 @@ def build_td_targets(
             future_state_noise=torch.randn(
                 selected.numel(), 1, next_state.shape[-1], device=device, dtype=action_template.dtype
             ),
-            reward_noise=torch.randn(
+            reward_template=torch.zeros(
                 selected.numel(), 1, 1, device=device, dtype=action_template.dtype
             ),
             q_noise=torch.randn(

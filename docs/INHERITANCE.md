@@ -10,7 +10,7 @@ RoboTwinLeRobotDataset (initial FACT RoboTwin-v2)
       -> existing Flux2.double_blocks
       -> existing Flux2.single_blocks
       -> existing Flux2.final_layer for image output
-      -> small action/state/reward/Q heads
+      -> small action/state/direct-reward/success/Q heads
       -> optional training-only DINO input/output heads
 ```
 
@@ -23,15 +23,15 @@ RoboTwinLeRobotDataset (initial FACT RoboTwin-v2)
 | FLUX.2 | `Flux2`, image/text projections, RoPE and modulation | `Flux2FACTModel` subclass |
 | FLUX.2 | all `DoubleStreamBlock` parameters | masked forward using existing private helpers |
 | FLUX.2 | all `SingleStreamBlock` parameters | masked forward using existing private helpers |
-| FLUX.2 | image `final_layer` | action/state/reward/Q linear heads |
+| FLUX.2 | image `final_layer` | action/state/direct-reward/success/Q linear heads |
 
 ## New trainable parameters
 
 - shared action input projection for noisy and clean action tracks;
 - shared state input projection for current and future state;
-- scalar reward and Q input projections;
+- learned direct-reward and success query tokens plus a scalar Q input projection;
 - horizon embedding and segment embeddings;
-- action, future-state, reward, and Q output heads.
+- action, future-state, direct-reward, success-logit, and Q output heads.
 - optional `Linear(3072, hidden_size)` / `Linear(hidden_size, 3072)` DINO heads.
 
 There is no MoT, ActionDiT, or second transformer backbone.
@@ -40,7 +40,7 @@ There is no MoT, ActionDiT, or second transformer backbone.
 
 ```text
 [language | state | current image | noisy action | clean GT action |
- horizon | future state | reward | Q | future image VAE | future image DINO]
+ horizon | future state | reward | success | Q | future image VAE | future image DINO]
 ```
 
 The single-horizon order above is unchanged for training. Multi-horizon
@@ -48,20 +48,20 @@ Stage-2 inference extends only the suffix:
 
 ```text
 [language | state | current image | A | G |
- H_1 | S_1 | R_1 | Q_1 | I_1 | H_2 | S_2 | R_2 | Q_2 | I_2 | ... |
- H_T | S_T | R_T | Q_T | I_T]
+ H_1 | S_1 | R_1 | U_1 | Q_1 | I_1 | H_2 | S_2 | R_2 | U_2 | Q_2 | I_2 | ... |
+ H_T | S_T | R_T | U_T | Q_T | I_T]
 ```
 
 `A` is zero-length in Stage-2. Every horizon block reads the shared clean
 condition and only `G_1..G_h`; attention between different horizon blocks is
 blocked in both directions. Omitting image prediction sets every `I_h` to zero
-tokens, so all state/reward/Q horizons share one forward without FLUX-latent or
+tokens, so all state/reward/success/Q horizons share one forward without FLUX-latent or
 VAE-decoder work. DINO is always omitted at inference.
 
 The attention mask is applied inside every reused FLUX.2 double-stream and single-stream block.
 The noisy-action track A is bidirectional for joint diffusion denoising, while
 the full-clean-action track G is causal. For a sample with horizon `idx_h`,
-horizon/state/reward/Q/VAE/DINO target queries can read
+horizon/state/reward/success/Q/VAE/DINO target queries can read
 only clean action tokens `G_1..G_idx_h`; they cannot read the clean action suffix
 or any noisy-action token. This per-sample mask is rebuilt from the batch's
 `idx_h` tensor on every forward.
@@ -88,11 +88,12 @@ parameter, is not written into RoboNana checkpoints, and is not loaded by
 inference.
 
 At `t_h = min(t + idx_h, T - 1)`, `future_state` is one state vector from exactly
-that frame. With `delta=t_h-t`, reward is the discounted cumulative reward over
-the first `delta` transitions, while Q is the full successful-demonstration MC
-return from `t`. For the same `t`, changing `idx_h` changes reward but not Q.
-Both are raw scalar flow targets; neither uses the removed time-to-go
-normalization.
+that frame. The model's reward is the direct `-1/0` reward at that state and the
+success logit marks the same terminal event. The dataset separately preserves
+the discounted cumulative reward over the first `delta` valid transitions for
+TD targets. Q is the full successful-demonstration MC return from `t`. Q is a
+raw scalar flow target; reward/success are direct heads. None uses the removed
+time-to-go normalization.
 
 ## Iterative-posttraining reuse
 
@@ -107,7 +108,7 @@ and EMA action/Q evaluation call the same `sample_flux2_action` and
 four separate dataset views
   -> RoboTwinPosttrainSampler (pool -> task -> episode -> frame)
   -> online shared FLUX: best-of-8 candidate actions
-  -> EMA shared FLUX: future-state/reward/Q flow and argmax Q
+  -> EMA shared FLUX: future-state/Q flow, direct reward/success, and argmax Q
   -> online shared FLUX training:
        pred_action target = behavior on success, EMA-ranked pseudo on failure
        clean G/world/reward/current-Q condition = behavior action everywhere

@@ -172,7 +172,7 @@ def test_future_state_reward_and_mc_q_follow_mac_targets(tmp_path):
     stats_path = root / "norm_stats.json"
     stats_path.write_text(json.dumps(_stats()), encoding="utf-8")
     samples = []
-    for horizon in (1, 3):
+    for horizon in (1, 3, 4):
         dataset = RoboTwinHDF5Dataset(
             str(root),
             stats_path=str(stats_path),
@@ -184,16 +184,23 @@ def test_future_state_reward_and_mc_q_follow_mac_targets(tmp_path):
         dataset.open()
         samples.append(dataset._get_data(0))
 
-    assert [sample["future_index"].item() for sample in samples] == [1, 3]
+    assert [sample["future_index"].item() for sample in samples] == [1, 3, 4]
     torch.testing.assert_close(samples[0]["future_state"], torch.from_numpy(vectors[1]))
     torch.testing.assert_close(samples[1]["future_state"], torch.from_numpy(vectors[3]))
+    torch.testing.assert_close(samples[2]["future_state"], torch.from_numpy(vectors[4]))
     torch.testing.assert_close(samples[0]["reward"], torch.tensor([-1.0]))
-    torch.testing.assert_close(samples[1]["reward"], torch.tensor([-2.997001]))
+    torch.testing.assert_close(samples[1]["reward"], torch.tensor([-1.0]))
+    torch.testing.assert_close(samples[2]["reward"], torch.tensor([0.0]))
+    torch.testing.assert_close(samples[0]["reward_h"], torch.tensor([-1.0]))
+    torch.testing.assert_close(samples[1]["reward_h"], torch.tensor([-2.997001]))
+    assert [sample["success"].item() for sample in samples] == [0, 0, 1]
     expected_q = -sum(0.999**offset for offset in range(4))
     torch.testing.assert_close(samples[0]["q"], torch.tensor([expected_q]))
     torch.testing.assert_close(samples[1]["q"], torch.tensor([expected_q]))
+    torch.testing.assert_close(samples[2]["q"], torch.tensor([expected_q]))
     assert samples[0]["delta"].item() == 1
     assert samples[1]["delta"].item() == 3
+    assert samples[2]["delta"].item() == 4
 
 
 def test_mac_targets_clip_tail_and_terminal_has_zero_reward_and_q():
@@ -262,6 +269,8 @@ def test_failure_timeout_uses_real_final_observation_and_zero_length_is_masked(t
     assert penultimate["future_index"].item() == 3
     assert penultimate["delta_steps"].item() == 1
     assert penultimate["success_terminal_h"].item() == 0
+    assert penultimate["reward"].item() == -1
+    assert penultimate["success"].item() == 0
     assert penultimate["time_limit_truncated_h"].item() == 1
     assert penultimate["q_loss_mask"].item() == 1
     assert penultimate["round_id"].item() == 2
@@ -269,6 +278,7 @@ def test_failure_timeout_uses_real_final_observation_and_zero_length_is_masked(t
     assert final["delta_steps"].item() == 0
     assert final["q_loss_mask"].item() == 0
     assert final["reward_h"].item() == 0
+    assert final["reward"].item() == -1
     assert discounted_chunk_reward(3) == pytest.approx(-2.997001)
 
 

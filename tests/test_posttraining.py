@@ -98,7 +98,7 @@ def test_failure_candidate_search_is_online_best_of_8_and_ema_ranked(monkeypatch
         calls["world_noise"].append(
             (
                 kwargs["future_state_noise"].clone(),
-                kwargs["reward_noise"].clone(),
+                kwargs["reward_template"].clone(),
                 kwargs["q_noise"].clone(),
                 kwargs["horizon"],
             )
@@ -132,13 +132,14 @@ def test_failure_candidate_search_is_online_best_of_8_and_ema_ranked(monkeypatch
     torch.testing.assert_close(result.pseudo_action, torch.full_like(behavior, 7.0))
     assert not torch.equal(result.pseudo_action, behavior)
     assert result.behavior_q.tolist() == [-10.0, -10.0]
-    candidate_state_noise, candidate_reward_noise, candidate_q_noise, used_horizon = calls[
+    candidate_state_noise, candidate_reward_template, candidate_q_noise, used_horizon = calls[
         "world_noise"
     ][0]
     assert used_horizon == 48
-    for noise in (candidate_state_noise, candidate_reward_noise, candidate_q_noise):
+    for noise in (candidate_state_noise, candidate_reward_template, candidate_q_noise):
         grouped = noise.reshape(batch, candidates, *noise.shape[1:])
         torch.testing.assert_close(grouped, grouped[:, :1].expand_as(grouped))
+    assert torch.count_nonzero(candidate_reward_template) == 0
     assert not torch.equal(action_noise[:, 0], action_noise[:, 1])
 
 
@@ -355,6 +356,7 @@ def test_forward_uses_pseudo_only_for_pred_action_and_behavior_for_clean_world(m
                 action=kwargs["noisy_pred_action"],
                 future_state=kwargs["noisy_future_state"],
                 reward=kwargs["noisy_reward"],
+                success=torch.zeros_like(kwargs["noisy_reward"]),
                 q=kwargs["noisy_q"],
                 dino=None,
             )
@@ -396,7 +398,9 @@ def test_forward_uses_pseudo_only_for_pred_action_and_behavior_for_clean_world(m
         "future_state": torch.ones(2, 2),
         "action": behavior,
         "behavior_action": behavior,
-        "reward": torch.tensor([[-1.0], [-2.0]]),
+        "reward": torch.tensor([[-1.0], [0.0]]),
+        "success": torch.tensor([[0.0], [1.0]]),
+        "reward_h": torch.tensor([[-12.0], [-48.0]]),
         "q": torch.zeros(2, 1),
         "horizon_idx": torch.tensor([12, 48]),
         "action_loss_mask": torch.ones(2),

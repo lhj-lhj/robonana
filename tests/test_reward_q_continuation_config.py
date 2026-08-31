@@ -18,6 +18,7 @@ def test_reward_q_continuation_uses_distinct_run_and_fresh_30k_schedule():
     assert config["train"]["resume"] is False
     assert config["schedulers"]["decay_steps"] == 30000
     assert config["train"]["loss_weights"]["reward_loss"] == 0.01
+    assert config["train"]["loss_weights"]["success_loss"] == 0.01
     assert config["train"]["loss_weights"]["q_loss"] == 0.001
 
     global_batch = (

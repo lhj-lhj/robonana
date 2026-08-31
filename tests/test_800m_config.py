@@ -30,7 +30,7 @@ def test_800m_parameter_count():
     with init_empty_weights():
         model = Flux2FACTModel(params, action_dim=14, state_dim=14, max_horizon=48)
     count = sum(parameter.numel() for parameter in model.parameters())
-    assert count == 791_337_984
+    assert count == 791_341_056
 
 
 def test_existing_legacy_experiment_preserves_causal_pred_action(tmp_path, monkeypatch):

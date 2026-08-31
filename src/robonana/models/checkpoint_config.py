@@ -18,7 +18,9 @@ class RoboNanaCheckpointConfig:
     action_dim: int
     state_dim: int
     reward_dim: int
+    success_dim: int
     q_dim: int
+    reward_head_type: str
     max_horizon: int
     dino_dim: int | None
     pred_action_bidirectional: bool
@@ -102,13 +104,23 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
         )
     if reward_dim != 1 or q_dim != 1:
         raise ValueError("reward_dim and q_dim must both be one scalar token")
+    reward_head_type = str(models.get("reward_head_type", "flow"))
+    if reward_head_type not in {"flow", "direct"}:
+        raise ValueError("models.reward_head_type must be 'flow' or 'direct'")
+    success_dim = int(models.get("success_dim", 0))
+    if reward_head_type == "direct" and success_dim != 1:
+        raise ValueError("direct reward checkpoints must declare models.success_dim=1")
+    if reward_head_type == "flow" and success_dim != 0:
+        raise ValueError("legacy flow-reward checkpoints must not declare a success head")
 
     return RoboNanaCheckpointConfig(
         params=Flux2Params(**dict(raw_params)),
         action_dim=int(models["action_dim"]),
         state_dim=int(models["state_dim"]),
         reward_dim=reward_dim,
+        success_dim=success_dim,
         q_dim=q_dim,
+        reward_head_type=reward_head_type,
         max_horizon=int(models["max_horizon"]),
         # Legacy checkpoints explicitly reconstruct the pre-DINO architecture.
         # We never infer this dimension from checkpoint tensor shapes.
@@ -128,7 +140,9 @@ def resolve_checkpoint_config(
     action_dim: int | None = None,
     state_dim: int | None = None,
     reward_dim: int | None = None,
+    success_dim: int | None = None,
     q_dim: int | None = None,
+    reward_head_type: str | None = None,
     max_horizon: int | None = None,
     dino_dim: int | None = None,
     pred_action_bidirectional: bool | None = None,
@@ -141,13 +155,23 @@ def resolve_checkpoint_config(
         else discover_model_config(checkpoint_path)
     )
     if discovered is None:
-        explicit = (params, action_dim, state_dim, reward_dim, q_dim, max_horizon)
+        explicit = (
+            params,
+            action_dim,
+            state_dim,
+            reward_dim,
+            success_dim,
+            q_dim,
+            reward_head_type,
+            max_horizon,
+        )
         if any(value is not None for value in explicit) and not all(
             value is not None for value in explicit
         ):
             raise ValueError(
                 "partial explicit model metadata is not allowed; provide params, action_dim, "
-                "state_dim, reward_dim, q_dim, and max_horizon together"
+                "state_dim, reward_dim, success_dim, q_dim, reward_head_type, "
+                "and max_horizon together"
             )
         if all(value is not None for value in explicit):
             resolved = RoboNanaCheckpointConfig(
@@ -155,7 +179,9 @@ def resolve_checkpoint_config(
                 action_dim=int(action_dim),
                 state_dim=int(state_dim),
                 reward_dim=int(reward_dim),
+                success_dim=int(success_dim),
                 q_dim=int(q_dim),
+                reward_head_type=str(reward_head_type),
                 max_horizon=int(max_horizon),
                 dino_dim=None if dino_dim is None else int(dino_dim),
                 pred_action_bidirectional=(
@@ -168,6 +194,8 @@ def resolve_checkpoint_config(
             )
             if resolved.reward_dim != 1 or resolved.q_dim != 1:
                 raise ValueError("reward_dim and q_dim must both be one scalar token")
+            if resolved.success_dim != 1 or resolved.reward_head_type != "direct":
+                raise ValueError("current RoboNana models require direct reward and success_dim=1")
             return resolved
         raise FileNotFoundError(
             "no complete RoboNana model config was found above checkpoint "
@@ -183,7 +211,13 @@ def resolve_checkpoint_config(
         action_dim=int(action_dim) if action_dim is not None else resolved.action_dim,
         state_dim=int(state_dim) if state_dim is not None else resolved.state_dim,
         reward_dim=int(reward_dim) if reward_dim is not None else resolved.reward_dim,
+        success_dim=int(success_dim) if success_dim is not None else resolved.success_dim,
         q_dim=int(q_dim) if q_dim is not None else resolved.q_dim,
+        reward_head_type=(
+            str(reward_head_type)
+            if reward_head_type is not None
+            else resolved.reward_head_type
+        ),
         max_horizon=int(max_horizon) if max_horizon is not None else resolved.max_horizon,
         dino_dim=int(dino_dim) if dino_dim is not None else resolved.dino_dim,
         pred_action_bidirectional=(
@@ -194,4 +228,6 @@ def resolve_checkpoint_config(
     )
     if resolved.reward_dim != 1 or resolved.q_dim != 1:
         raise ValueError("reward_dim and q_dim must both be one scalar token")
+    if resolved.reward_head_type not in {"flow", "direct"}:
+        raise ValueError("reward_head_type must be 'flow' or 'direct'")
     return resolved

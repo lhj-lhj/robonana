@@ -228,7 +228,13 @@ class RoboNanaTrainer(Trainer):
         action_dim = int(_config_value(model_config, "action_dim", 14))
         state_dim = int(_config_value(model_config, "state_dim", 14))
         reward_dim = int(_config_value(model_config, "reward_dim", 1))
+        success_dim = int(_config_value(model_config, "success_dim", 1))
         q_dim = int(_config_value(model_config, "q_dim", 1))
+        reward_head_type = str(_config_value(model_config, "reward_head_type", "direct"))
+        if reward_head_type != "direct" or success_dim != 1:
+            raise ValueError(
+                "current training requires models.reward_head_type='direct' and success_dim=1"
+            )
         max_horizon = int(_config_value(model_config, "max_horizon", 48))
         raw_dino_dim = _config_value(model_config, "dino_dim", None)
         dino_dim = None if raw_dino_dim is None else int(raw_dino_dim)
@@ -277,6 +283,7 @@ class RoboNanaTrainer(Trainer):
                 action_dim=action_dim,
                 state_dim=state_dim,
                 reward_dim=reward_dim,
+                success_dim=success_dim,
                 q_dim=q_dim,
                 max_horizon=max_horizon,
                 dino_dim=dino_dim,
@@ -294,7 +301,9 @@ class RoboNanaTrainer(Trainer):
                 action_dim=action_dim,
                 state_dim=state_dim,
                 reward_dim=reward_dim,
+                success_dim=success_dim,
                 q_dim=q_dim,
+                reward_head_type=reward_head_type,
                 max_horizon=max_horizon,
                 dino_dim=dino_dim,
                 pred_action_bidirectional=pred_action_bidirectional,
@@ -312,6 +321,7 @@ class RoboNanaTrainer(Trainer):
                 action_dim=action_dim,
                 state_dim=state_dim,
                 reward_dim=reward_dim,
+                success_dim=success_dim,
                 q_dim=q_dim,
                 max_horizon=max_horizon,
                 dino_dim=dino_dim,
@@ -667,18 +677,18 @@ class RoboNanaTrainer(Trainer):
                 # the batch's full-clean GT action teacher-forcing track.
                 future_noise = torch.randn_like(future_template)
                 future_state_noise = torch.randn_like(future_state_template)
-                reward_noise = torch.randn_like(reward_template)
+                reward_query = torch.zeros_like(reward_template)
                 q_noise = torch.randn_like(q_template)
                 clean_action_time = torch.zeros(count, device=self.device, dtype=torch.float32)
 
                 def predict_world(
                     sampled_future: Tensor,
                     sampled_future_state: Tensor,
-                    sampled_reward: Tensor,
+                    reward_query_: Tensor,
                     sampled_q: Tensor,
                     sampled_action: Tensor,
                     sigma: Tensor,
-                ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+                ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
                     clean_action_cond = sampled_action.expand(count, -1, -1)
                     pred_action_dummy = torch.zeros_like(clean_action_cond)
                     wm_time = sigma.expand(count)
@@ -694,7 +704,7 @@ class RoboNanaTrainer(Trainer):
                         gt_action_cond=clean_action_cond,
                         horizon_idx=horizons,
                         noisy_future_state=sampled_future_state,
-                        noisy_reward=sampled_reward,
+                        noisy_reward=reward_query_,
                         noisy_q=sampled_q,
                         action_timestep=clean_action_time,
                         wm_timestep=wm_time,
@@ -704,6 +714,7 @@ class RoboNanaTrainer(Trainer):
                         world_output.image,
                         world_output.future_state,
                         world_output.reward,
+                        world_output.success,
                         world_output.q,
                     )
 
@@ -711,7 +722,7 @@ class RoboNanaTrainer(Trainer):
                     clean_action=action[:1].expand(count, -1, -1),
                     future_noise=future_noise,
                     future_state_noise=future_state_noise,
-                    reward_noise=reward_noise,
+                    reward_template=reward_query,
                     q_noise=q_noise,
                     schedule=schedule,
                     predict_world=predict_world,
@@ -977,6 +988,12 @@ class RoboNanaTrainer(Trainer):
         reward = batch_dict["reward"].to(device=self.device, dtype=self.dtype).reshape(
             context.shape[0], 1, 1
         )
+        success = batch_dict["success"].to(device=self.device, dtype=self.dtype).reshape(
+            context.shape[0], 1, 1
+        )
+        accumulated_reward = batch_dict["reward_h"].to(
+            device=self.device, dtype=self.dtype
+        ).reshape(context.shape[0], 1, 1)
         q = batch_dict["q"].to(device=self.device, dtype=self.dtype).reshape(
             context.shape[0], 1, 1
         )
@@ -999,7 +1016,7 @@ class RoboNanaTrainer(Trainer):
                     state=state,
                     future_state=future_state,
                     behavior_action=behavior_action,
-                    reward=reward,
+                    reward=accumulated_reward,
                 )
             )
 
@@ -1014,7 +1031,8 @@ class RoboNanaTrainer(Trainer):
         noisy_action, action_target = flow_noise(pred_action_target, action_timestep)
         noisy_future, image_target = flow_noise(future, wm_timestep)
         noisy_future_state, future_state_target = flow_noise(future_state, wm_timestep)
-        noisy_reward, reward_target = flow_noise(reward, wm_timestep)
+        reward_query = torch.zeros_like(reward)
+        reward_target = reward
         noisy_q, q_target = flow_noise(q, wm_timestep)
         noisy_future_dino = None
         dino_target = None
@@ -1064,7 +1082,7 @@ class RoboNanaTrainer(Trainer):
             gt_action_cond=behavior_action,
             horizon_idx=horizon,
             noisy_future_state=noisy_future_state,
-            noisy_reward=noisy_reward,
+            noisy_reward=reward_query,
             noisy_q=noisy_q,
             action_timestep=action_timestep,
             wm_timestep=wm_timestep,
@@ -1088,6 +1106,7 @@ class RoboNanaTrainer(Trainer):
             action_target=action_target,
             future_state_target=future_state_target,
             reward_target=reward_target,
+            success_target=success,
             q_target=q_target,
             dino_target=dino_target,
             action_loss_mask=action_loss_mask,

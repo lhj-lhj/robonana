@@ -19,8 +19,8 @@ The canonical pretraining entrypoint is
   accumulation);
 - FACT RoboTwin-v2: 2,500 Clean episodes plus 25,000 Randomized episodes;
 - language, robot state, three-view current image, action, horizon, future state,
-  horizon return, Q, future FLUX-AE image, and a training-only future DINOv3
-  target;
+  future-state reward, terminal-success logit, Q, future FLUX-AE image, and a
+  training-only future DINOv3 target;
 - pretrained-backbone learning rate `2e-5` and RoboNana adapter/head learning
   rate `1e-4`;
 - fixed-horizon W&B visualization at `h = 12, 24, 48` every 2,000 steps.
@@ -36,11 +36,11 @@ The exact token order is:
 
 ```text
 [language | state | current_image | pred_action | gt_action_full_clean |
- idx_h | future_state | reward | Q | future_image_vae | future_image_dino]
+ idx_h | future_state | reward | success | Q | future_image_vae | future_image_dino]
 ```
 
 All segments pass through the same FLUX.2 double-stream and single-stream
-blocks. Image, action, future-state, reward, Q, and DINO predictions use separate
+blocks. Image, action, future-state, reward, success, Q, and DINO predictions use separate
 output projections; they are not separate transformer backbones. The DINO
 branch adds only two projections whose middle dimension follows the selected
 shared DiT hidden size:
@@ -53,17 +53,20 @@ shared DiT hidden size:
 The scalar branches are equally small adapters around that same hidden stream:
 
 ```text
-noisy reward [B,(K),1] -> reward_in Linear(1, hidden, bias=False)
-                         -> shared FLUX.2 DiT
-                         -> reward_out Linear(hidden, 1, bias=False)
+learned reward query [B,(K),1] -> shared FLUX.2 DiT
+                                -> reward_out Linear(hidden, 1, bias=False)
+
+learned success query [B,(K),1] -> shared FLUX.2 DiT
+                                 -> success_out Linear(hidden, 1, bias=False)
 
 noisy Q      [B,(K),1] -> q_in Linear(1, hidden, bias=False)
                          -> shared FLUX.2 DiT
                          -> q_out Linear(hidden, 1, bias=False)
 ```
 
-They have distinct segment embeddings and output heads, but no independent
-reward/Q backbone. `K` is present only when multiple horizon blocks are packed
+Reward is trained by scalar regression and success by BCE-with-logits; neither
+is flow-noised. Q remains a scalar flow token. They have distinct queries and
+output heads, but no independent scalar backbone. `K` is present only when multiple horizon blocks are packed
 for parallel Stage-2 inference.
 
 The attention policy is prefix-structured:
@@ -75,7 +78,8 @@ The attention policy is prefix-structured:
 | full-clean GT action token `G_t` | clean prefix + `G_1..G_t` |
 | horizon | clean prefix + `G_1..G_idx_h` + horizon |
 | future state | previous world prefix + future state |
-| horizon reward | previous world prefix + horizon reward |
+| direct reward | previous world prefix + direct reward |
+| success logit | previous world prefix + success logit |
 | Q (MC in pretraining, TD in posttraining) | previous world prefix + Q |
 | future FLUX latent | previous world prefix + future FLUX latent |
 | future DINO | complete world prefix + future DINO |
@@ -83,7 +87,7 @@ The attention policy is prefix-structured:
 The noisy predicted-action track A is bidirectional inside its 48-token chunk,
 so diffusion denoises the complete action trajectory jointly. The full-clean
 conditioning track G is causal: token `t` cannot read token `t+1`. For every
-sample, horizon, future state, reward, Q, future FLUX latent, and future DINO can
+sample, horizon, future state, reward, success, Q, future FLUX latent, and future DINO can
 read only the first `idx_h` full-clean action tokens.
 The mask is constructed dynamically from the batch's `idx_h` tensor. The
 predicted-action track remains a sink and is never visible to the GT/world path.
@@ -91,7 +95,7 @@ DINO is a final one-way auxiliary sink, so earlier tokens cannot depend on it.
 Inference omits the DINO suffix and uses the unchanged action and future-image
 samplers.
 
-### What the reward and Q outputs mean
+### What reward, success, accumulated reward, and Q mean
 
 The two scalar heads have different semantics. Let the sampled current frame be
 `t`, let the requested horizon be `h = idx_h`, and define
@@ -108,10 +112,16 @@ clipped padding and a reset observation never count as real robot transitions.
 observation at `t_h`; they are not the last element of the fixed 48-action
 chunk.
 
-RoboNana uses `gamma = 0.999`, reward `-1` for each valid non-goal transition,
-and reward `0` at a successful terminal frame. The model's `reward_h` output is
-the discounted return over only the real behavior-action prefix that reaches
-`t_h`:
+RoboNana uses `gamma = 0.999`. The model's direct `reward_h` output is attached
+to the selected future state: `-1` for a nonterminal state and `0` for the true
+successful terminal state. `success_h` is a redundant Bernoulli logit for that
+same terminal event. This intentional duplication provides an explicit
+terminal detector while retaining a scalar reward interface for later tasks
+with non-binary rewards.
+
+The dataset separately preserves the accumulated prefix reward (the batch
+field remains named `reward_h`) for TD target construction. It is the discounted
+real reward over the valid behavior-action prefix that reaches `t_h`:
 
 $$
 R_t^{(\delta)} = \sum_{k=0}^{\delta-1}\gamma^{k} r_{t+k}.
@@ -123,14 +133,11 @@ $$
 R_t^{(\delta)} = -\frac{1-\gamma^{\delta}}{1-\gamma}.
 $$
 
-For example, with all transitions valid, horizons `1`, `12`, `24`, and `48`
-have clean reward targets `-1.000000`, `-11.934220`, `-23.726013`, and
-`-46.889103`, respectively.
-
-Therefore `reward_h` is not an immediate one-frame reward, not the reward of
-the entire 48-action chunk unless `h=48` and all 48 transitions are valid, and
-not a success probability. A value closer to zero means that fewer discounted
-step costs were accumulated over that horizon.
+For example, a nonterminal `h=48` target still has direct reward `-1` and
+success target `0`, while its accumulated TD prefix reward is `-46.889103` when
+all 48 transitions are valid. At a clipped successful terminal, direct reward
+is `0` and success is `1`; clipped padding adds no transitions to the accumulated
+prefix reward.
 
 The meaning of `Q` depends on the training stage, while its token, adapter,
 head, flow-matching path, and inference API remain unchanged:
@@ -145,8 +152,9 @@ Q_t^{\mathrm{MC}} =
 \sum_{k=0}^{T-1-t}\gamma^{k} r_{t+k}.
 $$
 
-For a fixed `t`, different sampled horizons have different `reward_h` labels
-but the same MC-Q label. At the successful final frame, both labels are zero.
+For a fixed `t`, different sampled horizons can change the direct reward/success
+label and the accumulated prefix reward, but the MC-Q label is the same. At the
+successful final frame, direct reward and Q are zero and success is one.
 
 #### Iterative posttraining
 
@@ -164,12 +172,12 @@ means: discounted return for executing that real action prefix, followed by
 the EMA policy continuation used to build the TD target. A successful
 terminal stops the bootstrap; a failure timeout does not.
 
-Neither scalar is min-max normalized or the old time-to-go target. Q is also
-not a calibrated success probability. Under the current negative step-cost
-reward, a larger Q (less negative and closer to zero) is preferred. The sampled
-clean tensors are `[B, 1, 1]` for one horizon and `[B, K, 1]` for `K` packed
-horizons; the inference server exposes them as `rewards` and `qs` after
-flattening the last singleton dimensions.
+No scalar is min-max normalized or the old time-to-go target. Q is not a
+calibrated success probability; under the negative step cost a larger Q (less
+negative and closer to zero) is preferred. Scalar outputs are `[B, 1, 1]` for
+one horizon and `[B, K, 1]` for `K` packed horizons. Inference exposes direct
+`rewards`, sigmoid `success_probs`, and sampled `qs` after flattening the last
+singleton dimension.
 
 See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact upstream reuse
 boundary.
@@ -323,6 +331,22 @@ steps (`16 x 8 x 2 = 256` global batch). AdamW applies `2e-5` to the pretrained
 FLUX backbone and `1e-4` to RoboNana heads, token embeddings, and DINO adapters;
 both groups share the same warmup/cosine multiplier.
 
+To warm-start the direct reward/success heads from the existing 150k reward/Q
+checkpoint while preserving the trained FLUX, action, state, Q, image, and DINO
+weights, run the focused one-GPU continuation:
+
+```bash
+export ROBONANA_GPU_IDS=6
+export ROBONANA_BATCH_SIZE=32
+export ROBONANA_ADDITIONAL_STEPS=10000
+bash scripts/run_robotwin_train.sh \
+  --config robonana.configs.robotwin_flux2_4b_dino_reward_success_q_from150k.config
+```
+
+The old flow-matched `reward_in/reward_out` tensors are explicitly skipped with
+a warning; the direct reward query/head and success query/head are newly
+initialized. This is an initialization run, not an optimizer-state resume.
+
 The 800M scratch+DINO path must always be requested explicitly and is intended
 only for tests, smoke runs, and small ablations:
 
@@ -332,11 +356,12 @@ bash scripts/run_robotwin_train.sh \
   --config robonana.configs.robotwin_flux2_800m_dino.config
 ```
 
-The joint flow loss weights are image `1.0`, action `10.0`, future state `0.4`,
-reward `0.01`, Q `0.001`, and DINO `0.1`. Periodic training visualization performs only
-Stage 2: it conditions on the batch's full-clean GT action and samples future
-image/state/reward/Q from pure noise with 20-step Flow-Euler. It does not run
-Stage-1 action diffusion. The standalone inference modes below are unchanged.
+The loss weights are image `1.0`, action `10.0`, future state `0.4`, direct
+reward `0.01`, success BCE `0.01`, Q `0.001`, and DINO `0.1`. Periodic training
+visualization performs only Stage 2: it conditions on the batch's full-clean GT
+action, samples future image/state/Q from pure noise with 20-step Flow-Euler,
+then evaluates direct reward/success once on the clean sampled world. It does
+not run Stage-1 action diffusion.
 
 Checkpoint loading is strict. Evaluation must find a complete FACT `config.json`
 next to the experiment checkpoint or receive `--model-config`; model size is
@@ -350,20 +375,28 @@ strict graphs:
 | mode | action source | Stage-2 horizons | future image |
 |---|---|---|---|
 | `action` | Stage-1 diffusion | none | none |
-| `action_reward_q` | Stage-1 diffusion | all `1..T` in one packed pass | omitted |
+| `action_reward_q` | Stage-1 diffusion | `h=T` first; expand `1..T` only if `success_T` is positive | omitted |
 | `world_all` | request `action_chunk` | all `1..T` in packed horizon batches | FLUX latent + decoded pixels |
 | `world_horizon` | request `action_chunk` | request scalar `horizon` | FLUX latent + decoded pixels |
 
 `action_chunk` is the absolute robot-space `[T, action_dim]` chunk; the policy
 applies the same delta conversion and z-score normalization used in training.
 Packed Stage-2 uses one shared clean causal action track followed by isolated
-`[idx_h | future_state_h | reward_h | Q_h | future_image_h]` blocks. A block sees only
-`G_1..G_h` and itself, never another horizon block. State/reward/Q-only inference
+`[idx_h | future_state_h | reward_h | success_h | Q_h | future_image_h]` blocks. A block sees only
+`G_1..G_h` and itself, never another horizon block. State/reward/success/Q-only inference
 creates zero future-image tokens and never invokes the VAE decoder. DINO is a
 training-only branch and is absent from every inference mode. Image horizons
 default to four isolated blocks per forward because packing 48 full FLUX image
 grids into one dense-attention sequence is impractical; configure this with
 `--stage2-image-horizon-batch-size`.
+
+`action_reward_q` short-circuits the common failure case. It first evaluates
+only `h=T`. If `sigmoid(success_T)` is below `--success-threshold`, every earlier
+state must also be nonterminal under tail clipping, so the cumulative reward is
+computed analytically as `sum_{k=0}^{T-1} gamma^k * (-1)` and no dense horizon
+query is run. If `success_T` is positive, horizons `1..T-1` are packed, the
+first positive success logit identifies the terminal frame, and the directly
+predicted per-frame rewards are discounted through that frame.
 
 Run from the repository root. Define the shared arguments once, then launch
 exactly one of the four commands:
@@ -389,17 +422,17 @@ ROBONANA_SERVER=(
 # 1. Stage-1 only: fastest action inference.
 "${ROBONANA_SERVER[@]}" --inference-mode action --port 8094
 
-# 2. Stage-1 plus state/reward/Q for every h=1..48; no future VAE/DINO tokens.
+# 2. Stage-1 plus conditional state/reward/success/Q; no future VAE/DINO tokens.
 "${ROBONANA_SERVER[@]}" --inference-mode action_reward_q --port 8094
 
-# 3. Supplied action chunk plus all state/reward/Q/VAE/pixel horizons.
+# 3. Supplied action chunk plus all state/reward/success/Q/VAE/pixel horizons.
 "${ROBONANA_SERVER[@]}" \
   --inference-mode world_all \
   --stage2-image-horizon-batch-size 4 \
   --vae-decode-batch-size 4 \
   --port 8094
 
-# 4. Supplied action chunk and h plus one state/reward/Q/VAE/pixel prediction.
+# 4. Supplied action chunk and h plus one state/reward/success/Q/VAE/pixel prediction.
 "${ROBONANA_SERVER[@]}" --inference-mode world_horizon --port 8094
 ```
 
@@ -569,6 +602,7 @@ observation required for timeout bootstrap. The important batch fields are:
 |---|---|
 | `behavior_action` | normalized 48-step action chunk actually executed in the stored trajectory |
 | `future_state`, `future_latents`, `future_dino_images` | real observation target at clipped `t_h` |
+| `reward`, `success` | direct `-1/0` reward and terminal-success label at `t_h` |
 | `reward_h` | real discounted prefix reward `R_t^(delta)` |
 | `delta_steps` | count of valid environment transitions, excluding clipped padding/reset |
 | `success_terminal_h` | 1 only when `t_h` is the true successful terminal |
@@ -595,10 +629,11 @@ q_{i_{\mathrm{best}}} = \max_{1\leq i\leq 8} q_i, \qquad
 a^{\mathrm{pseudo}}=a_{i_{\mathrm{best}}}.
 $$
 
-The eight action-noise tensors are independent, while the future-state,
-reward, and Q noise used by the EMA world sampler is shared across candidates.
+The eight action-noise tensors are independent, while the future-state and Q
+noise used by the EMA world sampler is shared across candidates. Reward and
+success are direct heads and therefore have no sampling noise.
 This common-random-number comparison reduces ranking variance. The existing
-state/reward/Q-only Stage-2 path is used, so candidate ranking creates no
+state/reward/success/Q-only Stage-2 path is used, so candidate ranking creates no
 future-image or DINO tokens and does not invoke the VAE.
 
 The best candidate always becomes the noisy predicted-action track `A` target

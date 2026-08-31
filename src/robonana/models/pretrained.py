@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import warnings
 
@@ -11,14 +11,19 @@ from safetensors.torch import load_file
 
 from flux2.model import Flux2Params, Klein4BParams
 
-from .checkpoint_config import RoboNanaCheckpointConfig, resolve_checkpoint_config
+from .checkpoint_config import (
+    RoboNanaCheckpointConfig,
+    discover_model_config,
+    resolve_checkpoint_config,
+)
 from .flux2_fact import Flux2FACTModel
 
 
 ROBOT_MODULE_NAMES = (
     "action_in",
     "state_in",
-    "reward_in",
+    "reward_token",
+    "success_token",
     "q_in",
     "horizon_embed",
     "segment_embed",
@@ -26,14 +31,23 @@ ROBOT_MODULE_NAMES = (
     "action_out",
     "state_out",
     "reward_out",
+    "success_out",
     "q_out",
 )
 REWARD_Q_MODULE_NAMES = (
-    "reward_in",
+    "reward_token",
+    "success_token",
     "q_in",
     "q_segment_embed",
     "reward_out",
+    "success_out",
     "q_out",
+)
+DIRECT_REWARD_SUCCESS_MODULE_NAMES = (
+    "reward_token",
+    "success_token",
+    "reward_out",
+    "success_out",
 )
 OPTIONAL_DINO_MODULE_NAMES = (
     "dino_in",
@@ -77,6 +91,7 @@ def initialize_flux2_fact_model(
     action_dim: int,
     state_dim: int,
     reward_dim: int = 1,
+    success_dim: int = 1,
     q_dim: int = 1,
     max_horizon: int = 64,
     dino_dim: int | None = None,
@@ -92,6 +107,7 @@ def initialize_flux2_fact_model(
         action_dim=action_dim,
         state_dim=state_dim,
         reward_dim=reward_dim,
+        success_dim=success_dim,
         q_dim=q_dim,
         max_horizon=max_horizon,
         dino_dim=dino_dim,
@@ -106,6 +122,7 @@ def load_flux2_fact_checkpoint(
     action_dim: int,
     state_dim: int,
     reward_dim: int = 1,
+    success_dim: int = 1,
     q_dim: int = 1,
     max_horizon: int = 64,
     dino_dim: int | None = None,
@@ -128,6 +145,7 @@ def load_flux2_fact_checkpoint(
             action_dim=action_dim,
             state_dim=state_dim,
             reward_dim=reward_dim,
+            success_dim=success_dim,
             q_dim=q_dim,
             max_horizon=max_horizon,
             dino_dim=dino_dim,
@@ -168,7 +186,9 @@ def load_flux2_fact_trained_checkpoint(
     action_dim: int | None = None,
     state_dim: int | None = None,
     reward_dim: int | None = None,
+    success_dim: int | None = None,
     q_dim: int | None = None,
+    reward_head_type: str | None = None,
     max_horizon: int | None = None,
     dino_dim: int | None = None,
     pred_action_bidirectional: bool | None = None,
@@ -183,18 +203,35 @@ def load_flux2_fact_trained_checkpoint(
     if not path.is_file():
         raise FileNotFoundError(f"RoboNana checkpoint not found: {path}")
     device = torch.device(device)
-    model_config = resolve_checkpoint_config(
+    has_recorded_config = config_path is not None or discover_model_config(path) is not None
+    source_config = resolve_checkpoint_config(
         path,
         config_path=config_path,
         params=params,
         action_dim=action_dim,
         state_dim=state_dim,
         reward_dim=reward_dim,
+        success_dim=None if has_recorded_config else success_dim,
         q_dim=q_dim,
+        reward_head_type=None if has_recorded_config else reward_head_type,
         max_horizon=max_horizon,
         dino_dim=dino_dim,
         pred_action_bidirectional=pred_action_bidirectional,
     )
+    model_config = replace(
+        source_config,
+        success_dim=(source_config.success_dim if success_dim is None else int(success_dim)),
+        reward_head_type=(
+            source_config.reward_head_type
+            if reward_head_type is None
+            else str(reward_head_type)
+        ),
+    )
+    if model_config.reward_head_type != "direct" or model_config.success_dim != 1:
+        raise ValueError(
+            "current RoboNana requires reward_head_type='direct' and success_dim=1; "
+            "pass those explicit target settings to warm-start a legacy flow-reward checkpoint"
+        )
     state_dict = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
 
     with torch.device("meta"):
@@ -203,6 +240,7 @@ def load_flux2_fact_trained_checkpoint(
             action_dim=model_config.action_dim,
             state_dim=model_config.state_dim,
             reward_dim=model_config.reward_dim,
+            success_dim=model_config.success_dim,
             q_dim=model_config.q_dim,
             max_horizon=model_config.max_horizon,
             dino_dim=model_config.dino_dim,
@@ -219,7 +257,7 @@ def load_flux2_fact_trained_checkpoint(
     if legacy_value_keys:
         warnings.warn(
             "Legacy RoboNana value_in/value_out weights are intentionally skipped; "
-            "reward_in/reward_out and q_in/q_out are newly initialized and no "
+            "direct reward/success and q_in/q_out are newly initialized and no "
             "time-to-go weights are mapped to Q.",
             UserWarning,
             stacklevel=2,
@@ -241,6 +279,40 @@ def load_flux2_fact_trained_checkpoint(
                 f"unexpected={sorted(incompatible.unexpected_keys)}"
             )
         for module_name in REWARD_Q_MODULE_NAMES:
+            module = getattr(model, module_name)
+            module.to_empty(device=device)
+            module.reset_parameters()
+        initialized_robot_parameters = tuple(sorted(expected_missing))
+    elif source_config.reward_head_type == "flow":
+        legacy_reward_keys = {
+            name
+            for name in state_dict
+            if name.startswith("reward_in.") or name.startswith("reward_out.")
+        }
+        warnings.warn(
+            "Legacy flow-matched reward_in/reward_out weights are intentionally skipped; "
+            "the direct reward query/head and success classifier are newly initialized. "
+            "Backbone, action, state, Q, image, and DINO weights are preserved.",
+            UserWarning,
+            stacklevel=2,
+        )
+        filtered_state_dict = {
+            name: tensor for name, tensor in state_dict.items() if name not in legacy_reward_keys
+        }
+        incompatible = model.load_state_dict(filtered_state_dict, strict=False, assign=True)
+        expected_missing = {
+            name
+            for name, _ in model.named_parameters()
+            if name.split(".", 1)[0] in DIRECT_REWARD_SUCCESS_MODULE_NAMES
+        }
+        actual_missing = set(incompatible.missing_keys)
+        if incompatible.unexpected_keys or actual_missing != expected_missing:
+            raise RuntimeError(
+                "flow-reward checkpoint does not match RoboNana outside reward/success: "
+                f"missing={sorted(actual_missing)}, "
+                f"unexpected={sorted(incompatible.unexpected_keys)}"
+            )
+        for module_name in DIRECT_REWARD_SUCCESS_MODULE_NAMES:
             module = getattr(model, module_name)
             module.to_empty(device=device)
             module.reset_parameters()

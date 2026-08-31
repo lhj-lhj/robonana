@@ -50,12 +50,16 @@ def main() -> int:
     parser.add_argument("--action-chunk", type=int, default=48)
     parser.add_argument("--horizon", type=int, default=24)
     parser.add_argument("--num-inference-steps", type=int, default=20)
+    parser.add_argument("--discount", type=float, default=0.999)
+    parser.add_argument("--reward-non-goal", type=float, default=-1.0)
+    parser.add_argument("--success-threshold", type=float, default=0.5)
     parser.add_argument(
         "--inference-mode",
         choices=tuple(mode.value for mode in InferenceMode),
         default=InferenceMode.ACTION.value,
         help=(
-            "action: Stage-1 only; action_reward_q: Stage-1 plus all horizon state/reward/Q; "
+            "action: Stage-1 only; action_reward_q: Stage-1 plus conditional horizon "
+            "state/reward/success/Q; "
             "world_all: supplied action_chunk plus all horizon state/reward/Q/image; "
             "world_horizon: supplied action_chunk and horizon plus one world image."
         ),
@@ -100,6 +104,9 @@ def main() -> int:
         action_chunk=args.action_chunk,
         horizon=args.horizon,
         num_inference_steps=args.num_inference_steps,
+        discount=args.discount,
+        reward_non_goal=args.reward_non_goal,
+        success_threshold=args.success_threshold,
         inference_mode=args.inference_mode,
         stage2_image_horizon_batch_size=args.stage2_image_horizon_batch_size,
         vae_decode_batch_size=args.vae_decode_batch_size,

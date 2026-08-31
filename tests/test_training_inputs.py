@@ -32,6 +32,8 @@ def test_flow_noise_target_reconstructs_clean_sample():
 def test_trainer_batch_contract_uses_reward_and_q_not_legacy_value():
     source = inspect.getsource(RoboNanaTrainer.forward_step)
     assert 'batch_dict["reward"]' in source
+    assert 'batch_dict["success"]' in source
+    assert "flow_noise(reward" not in source
     assert 'batch_dict["q"]' in source
     assert 'batch_dict["value"]' not in source
 
@@ -207,6 +209,7 @@ def test_online_policy_returns_raw_chunk_reward_q_contract(monkeypatch):
             future=torch.zeros(1, 6, 8),
             future_state=torch.zeros(1, 1, 2),
             reward=torch.tensor([[[-3.0]]]),
+            success=torch.tensor([[[-2.0]]]),
             q=torch.tensor([[[-7.0]]]),
         ),
     )
@@ -279,12 +282,15 @@ def test_online_reward_q_sampler_runs_full_world_path_reproducibly():
 
     assert first.future.shape == (1, 2, 8)
     assert first.reward.shape == (1, 1, 1)
+    assert first.success.shape == (1, 1, 1)
     assert first.q.shape == (1, 1, 1)
     assert torch.isfinite(first.future).all()
     assert torch.isfinite(first.reward).all()
+    assert torch.isfinite(first.success).all()
     assert torch.isfinite(first.q).all()
     torch.testing.assert_close(first.future, second.future)
     torch.testing.assert_close(first.reward, second.reward)
+    torch.testing.assert_close(first.success, second.success)
     torch.testing.assert_close(first.q, second.q)
 
 
@@ -332,9 +338,11 @@ def test_packed_stage2_samples_all_rewards_and_qs_without_future_image_tokens():
     assert result.future.shape == (1, 4, 0, 8)
     assert result.future_state.shape == (1, 4, 3)
     assert result.reward.shape == (1, 4, 1)
+    assert result.success.shape == (1, 4, 1)
     assert result.q.shape == (1, 4, 1)
     assert torch.isfinite(result.future_state).all()
     assert torch.isfinite(result.reward).all()
+    assert torch.isfinite(result.success).all()
     assert torch.isfinite(result.q).all()
 
 
@@ -354,6 +362,7 @@ def test_image_stage2_chunks_horizons_and_restores_order():
             future=horizons.float().reshape(1, count, 1, 1),
             future_state=horizons.float().reshape(1, count, 1),
             reward=horizons.float().reshape(1, count, 1),
+            success=torch.zeros(1, count, 1),
             q=-horizons.float().reshape(1, count, 1),
         )
 
@@ -370,6 +379,7 @@ def test_image_stage2_chunks_horizons_and_restores_order():
 
     assert calls == [[1, 2], [3, 4], [5]]
     assert result.reward.reshape(-1).tolist() == [1, 2, 3, 4, 5]
+    assert result.success.shape == (1, 5, 1)
     assert result.q.reshape(-1).tolist() == [-1, -2, -3, -4, -5]
 
 
@@ -388,6 +398,9 @@ def _mock_policy(mode: InferenceMode):
     policy.inference_mode = mode
     policy.return_chunk_q = False
     policy.return_stage2_image = False
+    policy.discount = 1.0
+    policy.reward_non_goal = -1.0
+    policy.success_threshold = 0.5
     policy.delta_mask = torch.tensor([False, False])
     policy.model = SimpleNamespace(reward_dim=1, q_dim=1)
     zeros = torch.zeros(2)
@@ -410,18 +423,19 @@ def _mock_policy(mode: InferenceMode):
     return policy
 
 
-def test_action_reward_q_mode_runs_stage1_then_all_horizons(monkeypatch):
+def test_action_reward_q_short_circuits_when_h48_is_not_terminal():
     policy = _mock_policy(InferenceMode.ACTION_REWARD_Q)
     policy._sample_action = lambda **kwargs: torch.zeros(1, 3, 2)
-    captured = {}
+    calls = []
 
     def sample_stage2(**kwargs):
-        captured.update(kwargs)
+        calls.append(kwargs["horizons"].tolist())
         return SimpleNamespace(
-            future=torch.empty(1, 3, 0, 8),
-            future_state=torch.zeros(1, 3, 2),
-            reward=torch.tensor([[[-1.0], [-2.0], [-3.0]]]),
-            q=torch.tensor([[[-4.0], [-4.0], [-4.0]]]),
+            future=torch.empty(1, 1, 0, 8),
+            future_state=torch.zeros(1, 1, 2),
+            reward=torch.tensor([[[-1.0]]]),
+            success=torch.tensor([[[-10.0]]]),
+            q=torch.tensor([[[-4.0]]]),
         )
 
     policy._sample_stage2 = sample_stage2
@@ -429,15 +443,52 @@ def test_action_reward_q_mode_runs_stage1_then_all_horizons(monkeypatch):
         {"observation.state": torch.zeros(2), "instruction": "move the object"}
     )
 
-    assert captured["include_image"] is False
-    assert captured["horizons"].tolist() == [1, 2, 3]
-    assert response["horizons"].tolist() == [1, 2, 3]
-    torch.testing.assert_close(response["rewards"], torch.tensor([-1.0, -2.0, -3.0]))
-    torch.testing.assert_close(response["qs"], torch.tensor([-4.0, -4.0, -4.0]))
-    assert response["chunk_reward"] == -2.0
+    assert calls == [[3]]
+    assert response["horizons"].tolist() == [3]
+    torch.testing.assert_close(response["reward_curve"], torch.tensor([-1.0, -1.0, -1.0]))
+    assert response["accumulated_reward"] == -3.0
+    assert response["terminal_horizon"] is None
+    assert response["reward_curve_evaluated"] is False
+    torch.testing.assert_close(response["qs"], torch.tensor([-4.0]))
+    assert response["chunk_reward"] == -1.0
     assert response["chunk_q"] == -4.0
     assert "future_latents" not in response
     assert "images" not in response
+
+
+def test_action_reward_q_expands_curve_and_finds_first_terminal():
+    policy = _mock_policy(InferenceMode.ACTION_REWARD_Q)
+    policy._sample_action = lambda **kwargs: torch.zeros(1, 3, 2)
+    calls = []
+
+    def sample_stage2(**kwargs):
+        horizons = kwargs["horizons"].tolist()
+        calls.append(horizons)
+        count = len(horizons)
+        if horizons == [3]:
+            success = torch.tensor([[[10.0]]])
+            reward = torch.tensor([[[0.0]]])
+        else:
+            success = torch.tensor([[[-10.0], [10.0]]])
+            reward = torch.tensor([[[-1.0], [0.0]]])
+        return SimpleNamespace(
+            future=torch.empty(1, count, 0, 8),
+            future_state=torch.zeros(1, count, 2),
+            reward=reward,
+            success=success,
+            q=torch.full((1, count, 1), -4.0),
+        )
+
+    policy._sample_stage2 = sample_stage2
+    response = policy.inference(
+        {"observation.state": torch.zeros(2), "instruction": "move the object"}
+    )
+
+    assert calls == [[3], [1, 2]]
+    assert response["horizons"].tolist() == [1, 2, 3]
+    assert response["terminal_horizon"] == 2
+    assert response["accumulated_reward"] == -1.0
+    assert response["reward_curve_evaluated"] is True
 
 
 def test_world_horizon_mode_requires_and_uses_external_action_and_horizon():
@@ -453,6 +504,7 @@ def test_world_horizon_mode_requires_and_uses_external_action_and_horizon():
             future=torch.zeros(1, 1, 2, 8),
             future_state=torch.zeros(1, 1, 2),
             reward=torch.zeros(1, 1, 1),
+            success=torch.zeros(1, 1, 1),
             q=torch.zeros(1, 1, 1),
         )
 

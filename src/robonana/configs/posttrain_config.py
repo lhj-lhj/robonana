@@ -212,6 +212,7 @@ def apply_iterative_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
         action_loss=10.0,
         future_state_loss=0.4,
         reward_loss=0.01,
+        success_loss=0.01,
         q_loss=0.001,
     )
     config["project_dir"] = os.environ.get(

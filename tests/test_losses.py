@@ -22,6 +22,7 @@ def test_joint_loss_adds_dino_only_when_target_is_present():
         action=zeros,
         future_state=zeros,
         reward=zeros,
+        success=zeros,
         q=zeros,
         dino=torch.ones(2, 3, 4),
     )
@@ -31,6 +32,7 @@ def test_joint_loss_adds_dino_only_when_target_is_present():
         action_target=zeros,
         future_state_target=zeros,
         reward_target=zeros,
+        success_target=zeros,
         q_target=zeros,
         dino_target=torch.zeros(2, 3, 4),
     )
@@ -40,6 +42,7 @@ def test_joint_loss_adds_dino_only_when_target_is_present():
         "action_loss",
         "future_state_loss",
         "reward_loss",
+        "success_loss",
         "q_loss",
         "dino_loss",
     }
@@ -52,6 +55,7 @@ def test_joint_loss_masks_zero_length_td_q_samples():
         action=zeros,
         future_state=zeros,
         reward=zeros,
+        success=zeros,
         q=torch.tensor([[[2.0]], [[100.0]]]),
         dino=None,
     )
@@ -61,6 +65,7 @@ def test_joint_loss_masks_zero_length_td_q_samples():
         action_target=zeros,
         future_state_target=zeros,
         reward_target=zeros,
+        success_target=zeros,
         q_target=zeros,
         q_loss_mask=torch.tensor([1.0, 0.0]),
     )

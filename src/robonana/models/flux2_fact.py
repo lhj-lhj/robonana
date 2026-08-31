@@ -22,6 +22,7 @@ class Flux2FACTOutput:
     action: Tensor
     future_state: Tensor
     reward: Tensor
+    success: Tensor
     q: Tensor
     dino: Tensor | None
     segments: SegmentMap
@@ -61,6 +62,7 @@ class Flux2FACTModel(Flux2):
         action_dim: int,
         state_dim: int,
         reward_dim: int = 1,
+        success_dim: int = 1,
         q_dim: int = 1,
         max_horizon: int = 64,
         dino_dim: int | None = None,
@@ -70,11 +72,12 @@ class Flux2FACTModel(Flux2):
         self.action_dim = action_dim
         self.state_dim = state_dim
         self.reward_dim = reward_dim
+        self.success_dim = success_dim
         self.q_dim = q_dim
         self.max_horizon = max_horizon
         self.dino_dim = None if dino_dim is None else int(dino_dim)
-        if self.reward_dim != 1 or self.q_dim != 1:
-            raise ValueError("reward_dim and q_dim must both be one scalar token")
+        if self.reward_dim != 1 or self.success_dim != 1 or self.q_dim != 1:
+            raise ValueError("reward_dim, success_dim, and q_dim must all be one scalar token")
         if not isinstance(pred_action_bidirectional, bool):
             raise TypeError("pred_action_bidirectional must be a bool")
         self.pred_action_bidirectional = pred_action_bidirectional
@@ -83,7 +86,10 @@ class Flux2FACTModel(Flux2):
 
         self.action_in = nn.Linear(action_dim, self.hidden_size, bias=False)
         self.state_in = nn.Linear(state_dim, self.hidden_size, bias=False)
-        self.reward_in = nn.Linear(reward_dim, self.hidden_size, bias=False)
+        # Reward and success are direct predictions, not flow-matched targets.
+        # Learned query tokens prevent either target from leaking into the input.
+        self.reward_token = nn.Embedding(1, self.hidden_size)
+        self.success_token = nn.Embedding(1, self.hidden_size)
         self.q_in = nn.Linear(q_dim, self.hidden_size, bias=False)
         self.horizon_embed = nn.Embedding(max_horizon + 1, self.hidden_size)
         self.segment_embed = nn.Embedding(8, self.hidden_size)
@@ -94,6 +100,7 @@ class Flux2FACTModel(Flux2):
         self.action_out = nn.Linear(self.hidden_size, action_dim, bias=False)
         self.state_out = nn.Linear(self.hidden_size, state_dim, bias=False)
         self.reward_out = nn.Linear(self.hidden_size, reward_dim, bias=False)
+        self.success_out = nn.Linear(self.hidden_size, success_dim, bias=False)
         self.q_out = nn.Linear(self.hidden_size, q_dim, bias=False)
         if self.dino_dim is not None:
             self.dino_in = nn.Linear(self.dino_dim, self.hidden_size)
@@ -297,6 +304,7 @@ class Flux2FACTModel(Flux2):
             "horizon": 1,
             "future_state": state_blocks[0].shape[1],
             "reward": reward_blocks[0].shape[1],
+            "success": reward_blocks[0].shape[1],
             "q": q_blocks[0].shape[1],
             "future_image": image_blocks[0].shape[1],
             "future_dino": 0 if dino_blocks[0] is None else dino_blocks[0].shape[1],
@@ -346,7 +354,12 @@ class Flux2FACTModel(Flux2):
                 [
                     with_segment(self.horizon_embed(horizon_matrix[:, index].long())[:, None], 4),
                     with_segment(self.state_in(state_blocks[index]), 5),
-                    with_segment(self.reward_in(reward_blocks[index]), 6),
+                    self.reward_token.weight[None].expand(
+                        batch_size, reward_blocks[index].shape[1], -1
+                    ),
+                    self.success_token.weight[None].expand(
+                        batch_size, reward_blocks[index].shape[1], -1
+                    ),
                     self.q_in(q_blocks[index]) + self.q_segment_embed.weight[0],
                     with_segment(self.img_in(image_blocks[index]), 7),
                 ]
@@ -374,6 +387,7 @@ class Flux2FACTModel(Flux2):
                     self._robot_ids(batch_size=batch_size, length=1, segment_id=5, device=device, dtype=id_dtype, time_ids=horizon_matrix[:, index, None]),
                     self._robot_ids(batch_size=batch_size, length=state_blocks[index].shape[1], segment_id=6, device=device, dtype=id_dtype),
                     self._robot_ids(batch_size=batch_size, length=reward_blocks[index].shape[1], segment_id=7, device=device, dtype=id_dtype),
+                    self._robot_ids(batch_size=batch_size, length=reward_blocks[index].shape[1], segment_id=9, device=device, dtype=id_dtype),
                     self._robot_ids(batch_size=batch_size, length=q_blocks[index].shape[1], segment_id=8, device=device, dtype=id_dtype),
                     image_id_blocks[index].to(device=device),
                 ]
@@ -414,6 +428,7 @@ class Flux2FACTModel(Flux2):
                     (block_lengths["horizon"], double_clean),
                     (block_lengths["future_state"], double_wm),
                     (block_lengths["reward"], double_wm),
+                    (block_lengths["success"], double_wm),
                     (block_lengths["q"], double_wm),
                     (block_lengths["future_image"], double_wm),
                     (block_lengths["future_dino"], double_wm),
@@ -455,6 +470,7 @@ class Flux2FACTModel(Flux2):
                     (block_lengths["horizon"], single_clean),
                     (block_lengths["future_state"], single_wm),
                     (block_lengths["reward"], single_wm),
+                    (block_lengths["success"], single_wm),
                     (block_lengths["q"], single_wm),
                     (block_lengths["future_image"], single_wm),
                     (block_lengths["future_dino"], single_wm),
@@ -483,6 +499,9 @@ class Flux2FACTModel(Flux2):
         reward_hidden = torch.stack(
             [hidden[:, block.reward] for block in segments.world_blocks], dim=1
         )
+        success_hidden = torch.stack(
+            [hidden[:, block.success] for block in segments.world_blocks], dim=1
+        )
         q_hidden = torch.stack(
             [hidden[:, block.q] for block in segments.world_blocks], dim=1
         )
@@ -495,15 +514,18 @@ class Flux2FACTModel(Flux2):
         ).reshape(*image_shape[:-1], self.img_in.in_features)
         state_output = self.state_out(state_hidden)
         reward_output = self.reward_out(reward_hidden)
+        success_output = self.success_out(success_hidden)
         q_output = self.q_out(q_hidden)
         if packed_world:
             state_output = state_output.squeeze(2)
             reward_output = reward_output.squeeze(2)
+            success_output = success_output.squeeze(2)
             q_output = q_output.squeeze(2)
         else:
             image_output = image_output[:, 0]
             state_output = state_output[:, 0]
             reward_output = reward_output[:, 0]
+            success_output = success_output[:, 0]
             q_output = q_output[:, 0]
             dino_hidden = dino_hidden[:, 0]
         return Flux2FACTOutput(
@@ -511,6 +533,7 @@ class Flux2FACTModel(Flux2):
             action=self.action_out(action_hidden),
             future_state=state_output,
             reward=reward_output,
+            success=success_output,
             q=q_output,
             dino=self.dino_out(dino_hidden) if self.dino_dim is not None and dino_hidden.shape[-2] else None,
             segments=segments,

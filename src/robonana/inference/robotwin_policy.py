@@ -77,6 +77,16 @@ def seeded_randn_like(reference: Tensor, seed: int | None) -> Tensor:
     )
 
 
+def discounted_reward_sum(rewards: Tensor, discount: float) -> Tensor:
+    """Discount and sum a one-dimensional per-horizon reward curve."""
+
+    rewards = rewards.float().reshape(-1)
+    if not 0.0 < float(discount) <= 1.0:
+        raise ValueError("discount must lie in (0, 1]")
+    powers = torch.arange(rewards.numel(), device=rewards.device, dtype=rewards.dtype)
+    return (rewards * float(discount) ** powers).sum()
+
+
 def observation_digest(observation: dict[str, Any]) -> str:
     """Return a compact digest for reproducibility diagnostics."""
 
@@ -188,6 +198,9 @@ class RoboNanaRobotWinPolicy:
         vae_decode_batch_size: int = 4,
         return_chunk_q: bool = False,
         return_stage2_image: bool = False,
+        discount: float = 0.999,
+        reward_non_goal: float = -1.0,
+        success_threshold: float = 0.5,
     ) -> None:
         self.flux_checkpoint_dir = Path(flux_checkpoint_dir).expanduser().resolve()
         self.model_device = torch.device(model_device)
@@ -206,6 +219,13 @@ class RoboNanaRobotWinPolicy:
         self.vae_decode_batch_size = int(vae_decode_batch_size)
         self.return_chunk_q = bool(return_chunk_q)
         self.return_stage2_image = bool(return_stage2_image)
+        self.discount = float(discount)
+        self.reward_non_goal = float(reward_non_goal)
+        self.success_threshold = float(success_threshold)
+        if not 0.0 < self.discount <= 1.0:
+            raise ValueError("discount must lie in (0, 1]")
+        if not 0.0 <= self.success_threshold <= 1.0:
+            raise ValueError("success_threshold must lie in [0, 1]")
         if self.return_stage2_image and not self.return_chunk_q:
             raise ValueError("return_stage2_image requires return_chunk_q Stage-2 sampling")
         if self.inference_mode is not InferenceMode.ACTION and (
@@ -230,6 +250,8 @@ class RoboNanaRobotWinPolicy:
             checkpoint,
             action_dim=action_dim,
             state_dim=state_dim,
+            success_dim=1,
+            reward_head_type="direct",
             max_horizon=max_horizon,
             device=self.model_device,
             dtype=self.dtype,
@@ -420,7 +442,7 @@ class RoboNanaRobotWinPolicy:
 
         future_noise = seeded_randn_like(future_template, stream_seed(1))
         future_state_noise = seeded_randn_like(future_state_template, stream_seed(2))
-        reward_noise = seeded_randn_like(reward_template, stream_seed(3))
+        reward_query = reward_template
         q_noise = seeded_randn_like(q_template, stream_seed(4))
         return sample_flux2_world(
             model=self.model,
@@ -432,7 +454,7 @@ class RoboNanaRobotWinPolicy:
             horizon_idx=horizon_matrix,
             future_noise=future_noise,
             future_state_noise=future_state_noise,
-            reward_noise=reward_noise,
+            reward_template=reward_query,
             q_noise=q_noise,
             schedule=self.schedule,
             grid_height=self.grid_height,
@@ -484,6 +506,7 @@ class RoboNanaRobotWinPolicy:
             future=torch.cat([chunk.future for chunk in chunks], dim=1),
             future_state=torch.cat([chunk.future_state for chunk in chunks], dim=1),
             reward=torch.cat([chunk.reward for chunk in chunks], dim=1),
+            success=torch.cat([chunk.success for chunk in chunks], dim=1),
             q=torch.cat([chunk.q for chunk in chunks], dim=1),
         )
 
@@ -512,6 +535,7 @@ class RoboNanaRobotWinPolicy:
             future=packed.future[:, 0],
             future_state=packed.future_state[:, 0, None],
             reward=packed.reward[:, 0, None],
+            success=packed.success[:, 0, None],
             q=packed.q[:, 0, None],
         )
 
@@ -631,8 +655,92 @@ class RoboNanaRobotWinPolicy:
         world_sample: WorldFlowSample | None = None
         horizons: Tensor | None = None
         include_image = False
+        conditional_reward_curve: Tensor | None = None
+        conditional_accumulated_reward: float | None = None
+        conditional_terminal_horizon: int | None = None
+        reward_curve_evaluated = False
         if self.inference_mode is InferenceMode.ACTION_REWARD_Q:
-            horizons = torch.arange(1, self.action_chunk + 1, device=self.model_device)
+            start = time.perf_counter()
+            # A terminal earlier than h=48 necessarily makes the clipped h=48
+            # state terminal too.  Query that endpoint first and only pay for
+            # the dense 1..48 reward/success curve when it can contain a goal.
+            terminal_check_horizons = torch.tensor(
+                [self.action_chunk], device=self.model_device, dtype=torch.long
+            )
+            terminal_check = self._sample_stage2(
+                context=context,
+                current=current,
+                state=normalized_state,
+                clean_action=sampled_action,
+                horizons=terminal_check_horizons,
+                include_image=False,
+                sampling_seed=sampling_seed,
+            )
+            terminal_probability = float(
+                terminal_check.success[0, 0].float().sigmoid().item()
+            )
+            if terminal_probability >= self.success_threshold:
+                prefix_horizons = torch.arange(
+                    1, self.action_chunk, device=self.model_device, dtype=torch.long
+                )
+                if prefix_horizons.numel():
+                    prefix = self._sample_stage2(
+                        context=context,
+                        current=current,
+                        state=normalized_state,
+                        clean_action=sampled_action,
+                        horizons=prefix_horizons,
+                        include_image=False,
+                        sampling_seed=sampling_seed,
+                    )
+                    world_sample = WorldFlowSample(
+                        future=torch.cat([prefix.future, terminal_check.future], dim=1),
+                        future_state=torch.cat(
+                            [prefix.future_state, terminal_check.future_state], dim=1
+                        ),
+                        reward=torch.cat([prefix.reward, terminal_check.reward], dim=1),
+                        success=torch.cat(
+                            [prefix.success, terminal_check.success], dim=1
+                        ),
+                        q=torch.cat([prefix.q, terminal_check.q], dim=1),
+                    )
+                else:
+                    world_sample = terminal_check
+                horizons = torch.arange(
+                    1, self.action_chunk + 1, device=self.model_device, dtype=torch.long
+                )
+                reward_curve_evaluated = True
+                probabilities = world_sample.success[0].float().reshape(-1).sigmoid()
+                terminal_indices = torch.where(probabilities >= self.success_threshold)[0]
+                conditional_terminal_horizon = (
+                    int(terminal_indices[0].item()) + 1
+                    if terminal_indices.numel()
+                    else self.action_chunk
+                )
+                conditional_reward_curve = world_sample.reward[0].float().reshape(-1)
+                conditional_accumulated_reward = float(
+                    discounted_reward_sum(
+                        conditional_reward_curve[:conditional_terminal_horizon],
+                        self.discount,
+                    ).item()
+                )
+            else:
+                world_sample = terminal_check
+                horizons = terminal_check_horizons
+                conditional_reward_curve = torch.full(
+                    (self.action_chunk,),
+                    self.reward_non_goal,
+                    device=self.model_device,
+                    dtype=torch.float32,
+                )
+                conditional_accumulated_reward = float(
+                    discounted_reward_sum(
+                        conditional_reward_curve,
+                        self.discount,
+                    ).item()
+                )
+            self._sync(self.model_device)
+            timing["stage2_sample_ms"] = (time.perf_counter() - start) * 1000.0
         elif self.inference_mode is InferenceMode.WORLD_ALL:
             horizons = torch.arange(1, self.action_chunk + 1, device=self.model_device)
             include_image = True
@@ -650,7 +758,7 @@ class RoboNanaRobotWinPolicy:
             horizons = torch.tensor([horizon_value], device=self.model_device)
             include_image = True
 
-        if horizons is not None:
+        if horizons is not None and world_sample is None:
             start = time.perf_counter()
             world_sample = self._sample_stage2(
                 context=context,
@@ -705,11 +813,13 @@ class RoboNanaRobotWinPolicy:
                 world_sample.future_state[0].float(), self.normalization, mode="zscore"
             ).cpu()
             rewards = world_sample.reward[0].float().reshape(-1).cpu()
+            success_probs = world_sample.success[0].float().reshape(-1).sigmoid().cpu()
             qs = world_sample.q[0].float().reshape(-1).cpu()
             response.update(
                 horizons=horizons.detach().cpu(),
                 future_states=future_states,
                 rewards=rewards,
+                success_probs=success_probs,
                 qs=qs,
             )
             if self.horizon in horizons.tolist():
@@ -722,6 +832,14 @@ class RoboNanaRobotWinPolicy:
                 return_horizon=int(horizons[selected_index].item()),
                 selected_index=selected_index,
             )
+            if conditional_reward_curve is not None:
+                response.update(
+                    reward_curve=conditional_reward_curve.detach().cpu(),
+                    reward_curve_horizons=torch.arange(1, self.action_chunk + 1),
+                    accumulated_reward=conditional_accumulated_reward,
+                    terminal_horizon=conditional_terminal_horizon,
+                    reward_curve_evaluated=reward_curve_evaluated,
+                )
             if include_image:
                 response["future_latents"] = world_sample.future[0].detach().cpu()
                 start = time.perf_counter()
@@ -731,12 +849,16 @@ class RoboNanaRobotWinPolicy:
         if legacy_world is not None:
             chunk_reward = float(legacy_world.reward[0, 0].float().reshape(-1)[0].item())
             chunk_q = float(legacy_world.q[0, 0].float().reshape(-1)[0].item())
+            success_probability = float(
+                legacy_world.success[0, 0].float().reshape(-1)[0].sigmoid().item()
+            )
             response.update(
                 chunk_reward=chunk_reward,
                 chunk_q=chunk_q,
                 return_horizon=self.horizon,
                 rewards=torch.tensor([chunk_reward], dtype=torch.float32),
                 qs=torch.tensor([chunk_q], dtype=torch.float32),
+                success_probs=torch.tensor([success_probability], dtype=torch.float32),
                 selected_index=0,
             )
         if legacy_stage2_image is not None:

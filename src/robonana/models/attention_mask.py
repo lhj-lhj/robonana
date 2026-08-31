@@ -9,11 +9,15 @@ import torch
 
 @dataclass(frozen=True)
 class WorldBlockMap:
-    """One isolated ``[H | S | R | Q | I | D]`` horizon-query block."""
+    """One isolated ``[H | S | R | U | Q | I | D]`` horizon-query block.
+
+    ``R`` is the direct reward scalar and ``U`` is the success logit.
+    """
 
     horizon: slice
     future_state: slice
     reward: slice
+    success: slice
     q: slice
     future_image: slice
     future_dino: slice
@@ -25,9 +29,9 @@ class SegmentMap:
 
     A single block preserves the training layout exactly::
 
-        [language | state | ref | A | G | H | S | R | Q | I | D]
+        [language | state | ref | A | G | H | S | R | U | Q | I | D]
 
-    Packed inference appends more mutually isolated ``[H | S | R | Q | I | D]``
+    Packed inference appends more mutually isolated ``[H | S | R | U | Q | I | D]``
     blocks without duplicating the clean prefix or action track.
     """
 
@@ -64,6 +68,10 @@ class SegmentMap:
         return self._single_block_slice("reward")
 
     @property
+    def success(self) -> slice:
+        return self._single_block_slice("success")
+
+    @property
     def q(self) -> slice:
         return self._single_block_slice("q")
 
@@ -87,6 +95,7 @@ class SegmentMap:
         horizon: int,
         future_state: int,
         reward: int,
+        success: int,
         q: int,
         future_image: int,
         future_dino: int = 0,
@@ -101,6 +110,7 @@ class SegmentMap:
             horizon=horizon,
             future_state=future_state,
             reward=reward,
+            success=success,
             q=q,
             future_image=future_image,
             future_dino=future_dino,
@@ -119,12 +129,13 @@ class SegmentMap:
         horizon: int,
         future_state: int,
         reward: int,
+        success: int,
         q: int,
         future_image: int,
         future_dino: int = 0,
     ) -> "SegmentMap":
         prefix_lengths = (language, state, ref_image, pred_action, gt_action)
-        block_lengths = (horizon, future_state, reward, q, future_image, future_dino)
+        block_lengths = (horizon, future_state, reward, success, q, future_image, future_dino)
         lengths = (*prefix_lengths, *block_lengths)
         if any(length < 0 for length in lengths):
             raise ValueError(f"segment lengths must be non-negative, got {lengths}")
@@ -177,7 +188,7 @@ def build_attention_bias(
     A is an isolated diffusion sink. New runs use bidirectional attention inside
     A to denoise the action chunk jointly; the default remains causal so legacy
     checkpoints without explicit mask metadata retain their original semantics.
-    G is always causal. Each H/S/R/Q/I/D block can read only the first
+    G is always causal. Each H/S/R/U/Q/I/D block can read only the first
     ``idx_h`` full-clean G tokens and its own within-block prefix. Packed world
     blocks cannot read one another. G and all future targets cannot read A.
     """
@@ -221,6 +232,7 @@ def build_attention_bias(
             block.horizon,
             block.future_state,
             block.reward,
+            block.success,
             block.q,
             block.future_image,
             block.future_dino,
@@ -231,16 +243,18 @@ def build_attention_bias(
         h = block.horizon
         s = block.future_state
         r = block.reward
+        u = block.success
         q = block.q
         i = block.future_image
         d = block.future_dino
         _allow(allowed, h, c, h)
         _allow(allowed, s, c, h, s)
         _allow(allowed, r, c, h, s, r)
-        _allow(allowed, q, c, h, s, r, q)
-        _allow(allowed, i, c, h, s, r, q, i)
+        _allow(allowed, u, c, h, s, r, u)
+        _allow(allowed, q, c, h, s, r, u, q)
+        _allow(allowed, i, c, h, s, r, u, q, i)
         # DINO is a trailing training-only auxiliary sink inside its block.
-        _allow(allowed, d, c, h, s, r, q, i, d)
+        _allow(allowed, d, c, h, s, r, u, q, i, d)
 
     if context_mask is not None:
         expected = (batch_size, segments.language.stop - segments.language.start)

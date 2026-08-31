@@ -561,6 +561,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         current_latent, future_latent = select_current_future_latents(frame_latents, frame_index, horizon_idx)
         context = self._context(record)
         success_terminal_h = bool(record.success and future_index == record.length - 1)
+        direct_reward_h = self.reward_goal if success_terminal_h else self.reward_non_goal
         time_limit_truncated_h = bool(
             not record.success
             and record.time_limit_truncated
@@ -576,8 +577,13 @@ class RoboTwinHDF5Dataset(BaseDataset):
             "action": torch.from_numpy(norm_action.copy()),
             "behavior_action": torch.from_numpy(norm_action.copy()),
             "future_state": torch.from_numpy(norm_future_state.copy()),
-            "reward": torch.tensor([reward_h], dtype=torch.float32),
+            # The model reward head predicts the one-step reward attached to
+            # the selected future state.  Keep reward_h separately because TD
+            # posttraining needs the real discounted reward accumulated from
+            # t through the clipped horizon.
+            "reward": torch.tensor([direct_reward_h], dtype=torch.float32),
             "reward_h": torch.tensor([reward_h], dtype=torch.float32),
+            "success": torch.tensor([float(success_terminal_h)], dtype=torch.float32),
             "q": torch.tensor([q_clean], dtype=torch.float32),
             "horizon_idx": torch.tensor(horizon_idx, dtype=torch.long),
             "delta": torch.tensor(delta_steps, dtype=torch.long),

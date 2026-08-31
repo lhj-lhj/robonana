@@ -13,6 +13,7 @@ def test_pred_action_is_bidirectional_gt_action_is_causal_and_targets_see_prefix
         horizon=1,
         future_state=1,
         reward=1,
+        success=1,
         q=1,
         future_image=3,
     )
@@ -51,6 +52,7 @@ def test_legacy_mask_default_keeps_both_action_tracks_causal():
         horizon=1,
         future_state=1,
         reward=1,
+        success=1,
         q=1,
         future_image=1,
     )
@@ -79,6 +81,7 @@ def test_padded_context_keys_are_blocked_without_all_masked_rows():
         horizon=1,
         future_state=1,
         reward=1,
+        success=1,
         q=1,
         future_image=1,
     )
@@ -108,6 +111,7 @@ def test_dino_is_trailing_one_way_auxiliary_sink():
         horizon=1,
         future_state=1,
         reward=1,
+        success=1,
         q=1,
         future_image=3,
         future_dino=4,
@@ -141,6 +145,7 @@ def test_packed_horizon_blocks_see_their_action_prefix_but_not_each_other():
         horizon=1,
         future_state=1,
         reward=1,
+        success=1,
         q=1,
         future_image=0,
     )
@@ -153,10 +158,10 @@ def test_packed_horizon_blocks_see_their_action_prefix_but_not_each_other():
     )[0, 0]
     first, second = seg.world_blocks
 
-    for query in (first.horizon, first.future_state, first.reward, first.q):
+    for query in (first.horizon, first.future_state, first.reward, first.success, first.q):
         assert torch.isfinite(bias[query, seg.gt_action.start]).all()
         assert torch.isneginf(bias[query, seg.gt_action.start + 1 : seg.gt_action.stop]).all()
-    for query in (second.horizon, second.future_state, second.reward, second.q):
+    for query in (second.horizon, second.future_state, second.reward, second.success, second.q):
         assert torch.isfinite(bias[query, seg.gt_action.start : seg.gt_action.start + 3]).all()
         assert torch.isneginf(bias[query, seg.gt_action.start + 3 : seg.gt_action.stop]).all()
 
@@ -176,6 +181,7 @@ def test_reward_q_follow_world_block_order_and_never_read_pred_action():
         horizon=1,
         future_state=1,
         reward=1,
+        success=1,
         q=1,
         future_image=1,
         future_dino=1,
@@ -190,10 +196,12 @@ def test_reward_q_follow_world_block_order_and_never_read_pred_action():
     )[0, 0]
 
     assert torch.isfinite(bias[seg.reward, seg.future_state]).all()
-    assert torch.isneginf(bias[seg.reward, seg.q]).all()
-    assert torch.isfinite(bias[seg.q, seg.reward]).all()
+    assert torch.isneginf(bias[seg.reward, seg.success]).all()
+    assert torch.isfinite(bias[seg.success, seg.reward]).all()
+    assert torch.isneginf(bias[seg.success, seg.q]).all()
+    assert torch.isfinite(bias[seg.q, seg.success]).all()
     assert torch.isneginf(bias[seg.q, seg.future_image]).all()
-    for query in (seg.reward, seg.q):
+    for query in (seg.reward, seg.success, seg.q):
         assert torch.isneginf(bias[query, seg.pred_action]).all()
         assert torch.isfinite(bias[query, seg.gt_action.start : seg.gt_action.start + 2]).all()
         assert torch.isneginf(bias[query, seg.gt_action.start + 2 : seg.gt_action.stop]).all()
