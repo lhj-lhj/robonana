@@ -11,6 +11,7 @@ flux_checkpoint=${ROBONANA_FLUX_CHECKPOINT_DIR:-${repo_root}/checkpoints/FLUX.2-
 stats_path=${ROBONANA_STATS_PATH:-${dataset_root}/robonana_norm_stats.json}
 model_python=${ROBONANA_MODEL_PYTHON:-/data3/hongjia/conda/envs/robonana/bin/python}
 robotwin_env=${ROBOTWIN_CONDA_ENV:-/data3/hongjia/conda/envs/robotwin2}
+robotwin_python=${ROBONANA_ROBOTWIN_PYTHON:-${robotwin_env}/bin/python}
 fact_conda_env=${FACT_CONDA_ENV:-$(dirname "$(dirname "${model_python}")")}
 gpu_csv=${ROBONANA_EVAL_GPUS:-0,1,2,3,4,5,6,7}
 port_base=${ROBONANA_PORT_BASE:-18000}
@@ -20,7 +21,7 @@ task_timeout_seconds=${ROBONANA_TASK_TIMEOUT_SECONDS:-86400}
 task_max_attempts=${ROBONANA_TASK_MAX_ATTEMPTS:-3}
 episode_timeout_seconds=${ROBONANA_EPISODE_TIMEOUT_SECONDS:-3600}
 episode_gpu_attempts=${ROBONANA_EPISODE_GPU_ATTEMPTS:-2}
-episode_cpu_fallback=${ROBONANA_EPISODE_CPU_FALLBACK:-1}
+episode_cpu_fallback=${ROBONANA_EPISODE_CPU_FALLBACK:-0}
 jobs_per_gpu=${ROBONANA_EVAL_JOBS_PER_GPU:-2}
 batch_wait_ms=${ROBONANA_EVAL_BATCH_WAIT_MS:-100}
 client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
@@ -50,7 +51,7 @@ if [[ ${#gpu_ids[@]} -eq 0 ]]; then
   exit 2
 fi
 for required in "${checkpoint}" "${stats_path}" "${deploy_policy}" "${model_python}" \
-  "${robotwin_env}/bin/python" "${client_python_wrapper}" "${isolated_task_runner}"; do
+  "${robotwin_python}" "${client_python_wrapper}" "${isolated_task_runner}"; do
   if [[ ! -f "${required}" ]]; then
     echo "Required file does not exist: ${required}" >&2
     exit 2
@@ -71,47 +72,62 @@ if [[ ${episode_cpu_fallback} != 0 && ${episode_cpu_fallback} != 1 ]]; then
   echo "ROBONANA_EPISODE_CPU_FALLBACK must be 0 or 1" >&2
   exit 2
 fi
-if ! "${robotwin_env}/bin/python" - <<'PY'
+if ! "${robotwin_python}" - <<'PY'
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 from pathlib import Path
-import re
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 spec = importlib.util.find_spec("sapien")
 if spec is None or spec.origin is None:
     raise SystemExit("SAPIEN is not installed in the RoboTwin environment")
-root = Path(spec.origin).resolve().parent
-loader = root / "_oidn_tricks.py"
-if not loader.is_file():
-    raise SystemExit(f"SAPIEN OIDN loader is missing: {loader}")
-versions = {
-    tuple(int(part) for part in version.split("."))
-    for version in re.findall(
-        r"libOpenImageDenoise(?:_core)?\.so\.(\d+\.\d+\.\d+)",
-        loader.read_text(encoding="utf-8"),
-    )
-}
-if not versions:
-    raise SystemExit(f"could not determine the SAPIEN OIDN version from {loader}")
-version = max(versions)
-if version < (2, 3, 3):
-    rendered = ".".join(str(part) for part in version)
+sapien_root = Path(spec.origin).resolve().parent
+library_root = (sapien_root / "../sapien.libs").resolve()
+manifest_path = library_root / "robonana_oidn_gpu_serial.json"
+if not manifest_path.is_file():
     raise SystemExit(
-        f"SAPIEN OIDN {rendered} does not support NVIDIA Blackwell; "
+        f"serialized GPU OIDN manifest is missing: {manifest_path}; "
         "run scripts/install_sapien_oidn_blackwell.sh"
     )
-suffix = ".".join(str(part) for part in version)
-library_dir = root / "oidn_library"
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+expected = {
+    "oidn_version": "2.4.1",
+    "sapien_version": "3.0.0.dev20260601+6a50b78b",
+    "schema_version": 1,
+    "svulkan_commit": "74d6529a6a213bfb84dee75035600b79eb7c3c44",
+}
+for key, value in expected.items():
+    if manifest.get(key) != value:
+        raise SystemExit(
+            f"serialized GPU OIDN manifest has {key}={manifest.get(key)!r}, expected {value!r}"
+        )
+svulkan = library_root / "libsvulkan2.so"
+if not svulkan.is_file() or sha256(svulkan) != manifest.get("libsvulkan2_sha256"):
+    raise SystemExit("libsvulkan2.so does not match the serialized GPU OIDN manifest")
+oidn_root = Path(manifest.get("oidn_library_dir", ""))
 required = [
-    library_dir / f"libOpenImageDenoise.so.{suffix}",
-    library_dir / f"libOpenImageDenoise_core.so.{suffix}",
-    library_dir / f"libOpenImageDenoise_device_cuda.so.{suffix}",
+    oidn_root / "libOpenImageDenoise.so.2.4.1",
+    oidn_root / "libOpenImageDenoise_core.so.2.4.1",
+    oidn_root / "libOpenImageDenoise_device_cuda.so.2.4.1",
 ]
 missing = [str(path) for path in required if not path.is_file()]
 if missing:
-    raise SystemExit("missing SAPIEN OIDN CUDA libraries: " + ", ".join(missing))
-print(f"SAPIEN OIDN preflight: CUDA-capable version {suffix}")
+    raise SystemExit("missing serialized GPU OIDN libraries: " + ", ".join(missing))
+print(
+    "SAPIEN preflight: serialized Vulkan/CUDA OIDN 2.4.1, "
+    f"svulkan={manifest['svulkan_commit'][:8]}"
+)
 PY
 then
   echo "OIDN preflight failed for ${robotwin_env}" >&2
@@ -233,7 +249,7 @@ run_worker() {
     "PYTHONPATH=${repo_root}/src"
     "ROBOTWIN_PATH=${robotwin_path}"
     "ROBOTWIN_CONDA_ENV=${robotwin_env}"
-    "ROBONANA_ROBOTWIN_PYTHON=${robotwin_env}/bin/python"
+    "ROBONANA_ROBOTWIN_PYTHON=${robotwin_python}"
     "CLIENT_PYTHON=${client_python_wrapper}"
     "FACT_CONDA_ENV=${fact_conda_env}"
     "DEPLOY_POLICY_PATH=${deploy_policy}"

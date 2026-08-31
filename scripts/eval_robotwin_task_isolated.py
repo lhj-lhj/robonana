@@ -342,7 +342,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed-group", type=int, default=0)
     parser.add_argument("--episode-timeout-seconds", type=int, default=3600)
     parser.add_argument("--gpu-attempts", type=int, default=2)
-    parser.add_argument("--cpu-fallback", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--cpu-fallback", action=argparse.BooleanOptionalAction, default=False)
     args = parser.parse_args()
     if args.test_num < 1 or args.episode_timeout_seconds < 1 or args.gpu_attempts < 1:
         parser.error("test-num, episode-timeout-seconds, and gpu-attempts must be positive")

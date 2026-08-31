@@ -61,6 +61,31 @@ def test_attempt_modes_keep_oidn_enabled_and_make_cpu_fallback_explicit() -> Non
     assert [mode.oidn_device for mode in isolated.attempt_modes(1, False)] == ["cuda"]
 
 
+def test_cpu_fallback_is_disabled_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    isolated = load_script("robotwin_task_isolated_defaults", "scripts/eval_robotwin_task_isolated.py")
+    launch_client = tmp_path / "launch_client.sh"
+    launch_client.touch()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval_robotwin_task_isolated.py",
+            "--task-name",
+            "move_stapler_pad",
+            "--task-config",
+            "demo_clean",
+            "--test-num",
+            "1",
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--launch-client",
+            str(launch_client),
+        ],
+    )
+
+    assert isolated.parse_args().cpu_fallback is False
+
+
 def test_ledger_requires_contiguous_episode_and_seed_chain(tmp_path: Path) -> None:
     isolated = load_script("robotwin_task_isolated_ledger", "scripts/eval_robotwin_task_isolated.py")
     ledger = tmp_path / "episodes.jsonl"

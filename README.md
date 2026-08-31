@@ -465,7 +465,8 @@ python scripts/rollout_dataset_world_all.py \
 The evaluation launcher follows the FACT RoboTwin protocol and has one execution
 path:
 
-- SAPIEN ray tracing with OIDN 2.3.3 CUDA denoising;
+- SAPIEN nightly ray tracing with OIDN 2.4.1 CUDA denoising and serialized
+  Vulkan/CUDA hand-offs;
 - Stage-1 action diffusion only;
 - 48 actions executed per policy request;
 - one shared dynamically batched action server per GPU;
@@ -473,10 +474,11 @@ path:
 - per-task and aggregate success rates plus native episode MP4s.
 
 The default is two concurrent RoboTwin clients per GPU with a 100 ms batching
-window. Each episode has its own watchdog. A stalled CUDA/OIDN attempt is
-terminated and retried from the same seed; after two CUDA attempts, only that
-episode falls back to OIDN on CPU. The denoiser is never disabled, accepted
-seeds are never silently skipped, and completed episodes survive task restarts.
+window. Each episode has its own watchdog. A failed CUDA/OIDN attempt is
+terminated and retried from the same seed. All retries remain on CUDA; exhausting
+them marks an infrastructure error instead of silently changing the renderer.
+The denoiser is never disabled, accepted seeds are never silently skipped, and
+completed episodes survive task restarts.
 
 ```bash
 export ROBONANA_TRAINED_CHECKPOINT=$PWD/experiments/<run>/models/<checkpoint>/transformer/diffusion_pytorch_model.bin
@@ -486,7 +488,6 @@ export ROBONANA_EVAL_JOBS_PER_GPU=2
 export ROBONANA_EVAL_BATCH_WAIT_MS=100
 export ROBONANA_EPISODE_TIMEOUT_SECONDS=3600
 export ROBONANA_EPISODE_GPU_ATTEMPTS=2
-export ROBONANA_EPISODE_CPU_FALLBACK=1
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
 
@@ -506,12 +507,28 @@ success ledger plus `attempts.jsonl` with timeout/fallback diagnostics. An
 `ERROR` row is infrastructure failure or timeout and must be rerun; it is never
 counted as a 0% policy result.
 
-On Blackwell, install the pinned OIDN CUDA runtime once in the RoboTwin
-environment. The launcher rejects older versions and a missing CUDA plugin:
+On Blackwell, install the pinned SAPIEN nightly plus the serialized GPU OIDN
+runtime once in the RoboTwin environment. The build root is persistent because
+the patched renderer records runtime paths to its exact dependency build. The
+launcher verifies the install manifest, renderer checksum, svulkan commit, and
+all CUDA OIDN libraries before starting an evaluation:
 
 ```bash
-bash scripts/install_sapien_oidn_blackwell.sh /path/to/robotwin2
+CUDA_PATH=/usr/local/cuda-13.0 \
+CMAKE_BIN=/path/to/cmake \
+bash scripts/install_sapien_oidn_blackwell.sh \
+  /path/to/robotwin2 \
+  /persistent/path/robonana-sapien-oidn
 export ROBOTWIN_CONDA_ENV=/path/to/robotwin2
+```
+
+The low-memory renderer test exercises the same Vulkan-to-CUDA OIDN transfer
+without loading the RoboNana policy:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 OIDN_DEFAULT_DEVICE=cuda \
+PYTHONPATH=$PWD/src ROBONANA_SAPIEN_RENDER_DEVICE=cuda:0 \
+/path/to/robotwin2/bin/python scripts/stress_sapien_oidn.py --frames 1000
 ```
 
 ## Failure rollout collection
