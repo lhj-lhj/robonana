@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,6 +49,26 @@ def main(usr_args):
         "start_seed": 100_007,
         "success": 1,
     }
+
+
+def test_bootstrap_retains_only_policy_static_cameras() -> None:
+    bootstrap = load_script(
+        "robotwin_eval_bootstrap_cameras", "scripts/robotwin_eval_bootstrap.py"
+    )
+    camera_bundle = SimpleNamespace(
+        static_camera_name=["head_camera", "front_camera"],
+        static_camera_list=["head", "front"],
+        static_camera_config=["head_config", "front_config"],
+        head_camera_id=0,
+    )
+
+    removed = bootstrap._retain_static_cameras(camera_bundle, ("head_camera",))
+
+    assert removed == ("front_camera",)
+    assert camera_bundle.static_camera_name == ["head_camera"]
+    assert camera_bundle.static_camera_list == ["head"]
+    assert camera_bundle.static_camera_config == ["head_config"]
+    assert camera_bundle.head_camera_id == 0
 
 
 def test_attempt_modes_keep_oidn_enabled_and_make_cpu_fallback_explicit() -> None:

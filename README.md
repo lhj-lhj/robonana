@@ -469,6 +469,7 @@ path:
   Vulkan/CUDA hand-offs;
 - Stage-1 action diffusion only;
 - 48 actions executed per policy request;
+- only the three policy inputs are rendered: left wrist, right wrist, and head;
 - one shared dynamically batched action server per GPU;
 - one fresh SAPIEN process per accepted episode with deterministic seed handoff;
 - per-task and aggregate success rates plus native episode MP4s.
@@ -488,6 +489,7 @@ export ROBONANA_EVAL_JOBS_PER_GPU=2
 export ROBONANA_EVAL_BATCH_WAIT_MS=100
 export ROBONANA_EPISODE_TIMEOUT_SECONDS=3600
 export ROBONANA_EPISODE_GPU_ATTEMPTS=2
+export ROBONANA_ROBOTWIN_STATIC_CAMERAS=head_camera
 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 ```
 

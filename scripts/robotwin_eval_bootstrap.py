@@ -20,6 +20,57 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _retain_static_cameras(camera_bundle: Any, allowed_names: tuple[str, ...]) -> tuple[str, ...]:
+    names = list(camera_bundle.static_camera_name)
+    cameras = list(camera_bundle.static_camera_list)
+    configs = list(camera_bundle.static_camera_config)
+    if not (len(names) == len(cameras) == len(configs)):
+        raise RuntimeError("RoboTwin static camera lists have inconsistent lengths")
+    missing = [name for name in allowed_names if name not in names]
+    if missing:
+        raise RuntimeError(f"requested RoboTwin static cameras are missing: {missing}")
+    keep = [index for index, name in enumerate(names) if name in allowed_names]
+    removed = tuple(name for name in names if name not in allowed_names)
+    camera_bundle.static_camera_name = [names[index] for index in keep]
+    camera_bundle.static_camera_list = [cameras[index] for index in keep]
+    camera_bundle.static_camera_config = [configs[index] for index in keep]
+    camera_bundle.head_camera_id = (
+        camera_bundle.static_camera_name.index("head_camera")
+        if "head_camera" in camera_bundle.static_camera_name
+        else None
+    )
+    return removed
+
+
+def _install_static_camera_filter() -> None:
+    raw = os.environ.get("ROBONANA_ROBOTWIN_STATIC_CAMERAS", "").strip()
+    if not raw:
+        return
+    allowed_names = tuple(dict.fromkeys(name.strip() for name in raw.split(",") if name.strip()))
+    if not allowed_names:
+        raise RuntimeError("ROBONANA_ROBOTWIN_STATIC_CAMERAS resolved to an empty list")
+
+    from envs.camera.camera import Camera
+
+    if getattr(Camera, "_robonana_static_camera_filter", None) == allowed_names:
+        return
+    if hasattr(Camera, "_robonana_static_camera_filter"):
+        raise RuntimeError("RoboTwin static camera filter was already configured differently")
+    original_load_camera = Camera.load_camera
+
+    def load_camera(camera_bundle, scene):
+        result = original_load_camera(camera_bundle, scene)
+        removed = _retain_static_cameras(camera_bundle, allowed_names)
+        print(
+            f"[RoboNana SAPIEN] static_cameras={allowed_names} removed={removed}",
+            flush=True,
+        )
+        return result
+
+    Camera.load_camera = load_camera
+    Camera._robonana_static_camera_filter = allowed_names
+
+
 def _run_one_isolated_episode(entrypoint: Path, start_seed: int, metadata_path: Path) -> None:
     """Run exactly one accepted RoboTwin episode from an explicit seed.
 
@@ -30,6 +81,7 @@ def _run_one_isolated_episode(entrypoint: Path, start_seed: int, metadata_path: 
     """
 
     namespace = runpy.run_path(str(entrypoint), run_name="_robonana_robotwin_eval")
+    _install_static_camera_filter()
     parse_args = namespace.get("parse_args_and_config")
     main = namespace.get("main")
     original_eval = namespace.get("eval_policy")

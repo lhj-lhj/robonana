@@ -24,6 +24,7 @@ episode_gpu_attempts=${ROBONANA_EPISODE_GPU_ATTEMPTS:-2}
 episode_cpu_fallback=${ROBONANA_EPISODE_CPU_FALLBACK:-0}
 jobs_per_gpu=${ROBONANA_EVAL_JOBS_PER_GPU:-2}
 batch_wait_ms=${ROBONANA_EVAL_BATCH_WAIT_MS:-100}
+static_camera_csv=${ROBONANA_ROBOTWIN_STATIC_CAMERAS:-head_camera}
 client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
 isolated_task_runner=${repo_root}/scripts/eval_robotwin_task_isolated.py
 
@@ -263,6 +264,7 @@ run_worker() {
     "PYTHONUNBUFFERED=1"
     "LOW_FREQUENCY_RGB=0"
     "SKIP_ACTION_RENDER_SYNC=0"
+    "ROBONANA_ROBOTWIN_STATIC_CAMERAS=${static_camera_csv}"
     # cuda:0 is this rank's sole logical device after CUDA_VISIBLE_DEVICES isolation.
     "ROBONANA_SAPIEN_RENDER_DEVICE=cuda:0"
   )
