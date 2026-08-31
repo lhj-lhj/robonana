@@ -13,6 +13,7 @@ from typing import Any, Iterator
 import h5py
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from fact_datasets.datasets.base_dataset import BaseDataset
@@ -232,6 +233,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         language_cache_size: int = 8,
         hdf5_cache_size: int = 4,
         dino_online: bool = False,
+        dino_image_size: tuple[int, int] | list[int] | None = None,
         discount: float = 0.999,
         reward_non_goal: float = -1.0,
         reward_goal: float = 0.0,
@@ -257,6 +259,11 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self.language_cache_size = int(language_cache_size)
         self.hdf5_cache_size = int(hdf5_cache_size)
         self.dino_online = bool(dino_online)
+        self.dino_image_size = (
+            None
+            if dino_image_size is None
+            else tuple(int(value) for value in dino_image_size)
+        )
         self.discount = float(discount)
         self.reward_non_goal = float(reward_non_goal)
         self.reward_goal = float(reward_goal)
@@ -281,6 +288,11 @@ class RoboTwinHDF5Dataset(BaseDataset):
             raise ValueError("eval_horizons must be non-empty and lie in [1, max_horizon]")
         if min(self.latent_cache_size, self.language_cache_size, self.hdf5_cache_size) < 1:
             raise ValueError("all cache sizes must be at least one")
+        if self.dino_image_size is not None and (
+            len(self.dino_image_size) != 2
+            or any(value <= 0 for value in self.dino_image_size)
+        ):
+            raise ValueError("dino_image_size must be (height, width) with positive values")
         if not 0.0 < self.discount <= 1.0:
             raise ValueError("discount must lie in (0, 1]")
         if self.q_target_mode not in {"mc_success", "td_posttrain"}:
@@ -451,8 +463,24 @@ class RoboTwinHDF5Dataset(BaseDataset):
                 raise KeyError(f"online DINO requires {dataset_key} in {record.source}")
             with Image.open(BytesIO(bytes(handle[dataset_key][future_index]))) as image:
                 array = np.asarray(image.convert("RGB"), dtype=np.uint8).copy()
-            images[view_key] = torch.from_numpy(array).permute(2, 0, 1)
+            images[view_key] = self._standardize_dino_image(
+                torch.from_numpy(array).permute(2, 0, 1)
+            )
         return images
+
+    def _standardize_dino_image(self, image: torch.Tensor) -> torch.Tensor:
+        """Give mixed replay pools one collatable online-DINO image shape."""
+
+        if self.dino_image_size is None or tuple(image.shape[-2:]) == self.dino_image_size:
+            return image
+        resized = F.interpolate(
+            image.unsqueeze(0).float(),
+            size=self.dino_image_size,
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        )
+        return resized.squeeze(0).round().clamp_(0, 255).to(torch.uint8)
 
     def _locate(self, index: int) -> tuple[EpisodeRecord, int]:
         if index < 0 or index >= len(self):

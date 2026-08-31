@@ -130,3 +130,11 @@ def test_online_dino_decodes_only_the_horizon_selected_three_view_frame(tmp_path
     ]
     assert len(decoded_timestamps) == 3
     assert all(row[1].tolist() == [0.2] for row in decoded_timestamps)
+
+    dataset.dino_image_size = (8, 6)
+    resized = dataset._get_data(0)["future_dino_images"]
+    assert [tuple(image.shape) for image in resized.values()] == [
+        (3, 8, 6),
+        (3, 8, 6),
+        (3, 8, 6),
+    ]

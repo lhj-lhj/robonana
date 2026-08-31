@@ -41,6 +41,7 @@ def _replay_dataset_config(
         episode_filter=episode_filter,
         pool_name=pool_name,
         dino_online=dino_online,
+        dino_image_size=(480, 640) if dino_online else None,
         allow_empty=pool_name in {
             "collected_success_replay",
             "historical_failure_replay",
@@ -81,6 +82,7 @@ def apply_iterative_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
         discount=0.999,
         reward_non_goal=-1.0,
         reward_goal=0.0,
+        dino_image_size=(480, 640) if original.get("dino_online", False) else None,
     )
     stats_path = Path(
         os.environ.get("ROBONANA_REPLAY_STATS_PATH", str(original["stats_path"]))

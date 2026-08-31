@@ -17,6 +17,7 @@ def test_posttrain_config_builds_four_separate_pool_views(monkeypatch, tmp_path)
                     "_class_name": "RoboTwinHDF5Dataset",
                     "data_path": str(tmp_path / "original"),
                     "stats_path": str(tmp_path / "stats.json"),
+                    "dino_online": True,
                 },
                 "sampler": {},
             }
@@ -37,6 +38,7 @@ def test_posttrain_config_builds_four_separate_pool_views(monkeypatch, tmp_path)
     assert pools[1]["require_final_observation"] is True
     assert pools[2]["require_final_observation"] is True
     assert pools[3]["require_final_observation"] is True
+    assert all(pool["dino_image_size"] == (480, 640) for pool in pools)
     assert config["dataloaders"]["train"]["sampler"]["pool_weights"] == {
         "original_success": 0.25,
         "collected_success_replay": 0.25,

@@ -228,5 +228,7 @@ class RoboTwinLeRobotDataset(RoboTwinHDF5Dataset):
             )
             if decoded.shape[0] != 1 or decoded.ndim != 4 or decoded.shape[-1] != 3:
                 raise RuntimeError(f"unexpected decoded frame shape {decoded.shape}: {video_path}")
-            images[view_key] = torch.from_numpy(decoded[0].copy()).permute(2, 0, 1)
+            images[view_key] = self._standardize_dino_image(
+                torch.from_numpy(decoded[0].copy()).permute(2, 0, 1)
+            )
         return images
