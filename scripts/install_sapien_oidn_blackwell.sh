@@ -21,8 +21,8 @@ python_bin=${env_prefix}/bin/python
 cmake_bin=${CMAKE_BIN:-cmake}
 cuda_path=${CUDA_PATH:-/usr/local/cuda}
 cuda_arch=${CMAKE_CUDA_ARCHITECTURES:-100}
-source_dir=${build_root}/sapien-vulkan-2-${svulkan_commit:0:8}
-build_dir=${build_root}/build-${svulkan_commit:0:8}
+source_dir=${SVULKAN_SOURCE_DIR:-${build_root}/sapien-vulkan-2-${svulkan_commit:0:8}}
+build_dir=${SVULKAN_BUILD_DIR:-${build_root}/build-${svulkan_commit:0:8}}
 patch_file=${repo_root}/patches/sapien/0001-serialize-oidn-vulkan-cuda.patch
 
 for executable in "${python_bin}" "${cmake_bin}" ninja git "${cuda_path}/bin/nvcc"; do

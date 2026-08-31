@@ -522,6 +522,10 @@ bash scripts/install_sapien_oidn_blackwell.sh \
 export ROBOTWIN_CONDA_ENV=/path/to/robotwin2
 ```
 
+`SVULKAN_SOURCE_DIR` and `SVULKAN_BUILD_DIR` may point to an existing exact
+checkout/build; the installer still verifies the pinned commit, reapplies or
+verifies the repository patch, and rebuilds the required targets.
+
 The low-memory renderer test exercises the same Vulkan-to-CUDA OIDN transfer
 without loading the RoboNana policy:
 
