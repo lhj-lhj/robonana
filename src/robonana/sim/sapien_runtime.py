@@ -61,6 +61,20 @@ def configure_sapien_runtime(
         original_set_denoiser("oidn")
 
     sapien_module.render.set_ray_tracing_denoiser = set_selected_denoiser
+    if os.environ.get("ROBONANA_SAPIEN_TRACE_CAMERAS", "0") == "1":
+        camera_class = pysapien.render.RenderCameraComponent
+        original_take_picture = camera_class.take_picture
+
+        def take_picture_with_trace(camera) -> None:
+            entity = getattr(camera, "entity", None)
+            camera_name = getattr(entity, "name", "") if entity is not None else ""
+            if not camera_name and entity is not None and hasattr(entity, "get_name"):
+                camera_name = entity.get_name()
+            print(f"[RoboNana SAPIEN] take_picture begin camera={camera_name!r}", flush=True)
+            original_take_picture(camera)
+            print(f"[RoboNana SAPIEN] take_picture end camera={camera_name!r}", flush=True)
+
+        camera_class.take_picture = take_picture_with_trace
     print(
         f"[RoboNana SAPIEN] render_device={selected_device} denoiser=oidn",
         flush=True,
