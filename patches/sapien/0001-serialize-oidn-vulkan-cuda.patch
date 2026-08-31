@@ -1,0 +1,57 @@
+diff --git a/src/renderer/denoiser_oidn.cpp b/src/renderer/denoiser_oidn.cpp
+index c85ec9a..a1f219d 100644
+--- a/src/renderer/denoiser_oidn.cpp
++++ b/src/renderer/denoiser_oidn.cpp
+@@ -153,12 +153,20 @@ void DenoiserOidn::denoise(core::Image &color, core::Image *albedo, core::Image
+ 
+   mCommandBufferIn->end();
+ 
+-  core::Context::Get()->getQueue().submit(mCommandBufferIn.get(), {}, {}, {}, mSem.get(),
+-                                          ++mSemValue, {});
++  auto &queue = core::Context::Get()->getQueue();
++  queue.submit(mCommandBufferIn.get(), {}, {}, {}, mSem.get(), ++mSemValue, {});
++  // Keep the Vulkan -> CUDA hand-off strictly serial. Without this wait the
++  // following CUDA wait can form a cross-API dependency cycle with the prior
++  // frame's Vulkan output copy on recent Blackwell drivers.
++  queue.waitIdle();
+ 
+   cudaExternalSemaphoreWaitParams waitParams{};
+   waitParams.params.fence.value = mSemValue;
+-  cudaWaitExternalSemaphoresAsync(&mCudaSem, &waitParams, 1, mCudaStream);
++  if (!checkCudaRuntime(
++          cudaWaitExternalSemaphoresAsync(&mCudaSem, &waitParams, 1, mCudaStream),
++          "Failed to wait for the Vulkan input copy") ||
++      !checkCudaRuntime(cudaStreamSynchronize(mCudaStream),
++                        "Failed to synchronize the Vulkan input copy")) {
++    throw std::runtime_error("OIDN Vulkan-to-CUDA synchronization failed");
++  }
+ 
+   // run
+   // mFilter.executeAsync();
+@@ -173,7 +181,14 @@ void DenoiserOidn::denoise(core::Image &color, core::Image *albedo, core::Image
+   cudaExternalSemaphoreSignalParams sigParams{};
+   sigParams.flags = 0;
+   sigParams.params.fence.value = ++mSemValue;
+-  cudaSignalExternalSemaphoresAsync(&mCudaSem, &sigParams, 1, mCudaStream);
++  if (!checkCudaRuntime(
++          cudaSignalExternalSemaphoresAsync(&mCudaSem, &sigParams, 1, mCudaStream),
++          "Failed to signal the Vulkan output copy") ||
++      !checkCudaRuntime(cudaStreamSynchronize(mCudaStream),
++                        "Failed to synchronize the Vulkan output signal")) {
++    throw std::runtime_error("OIDN CUDA-to-Vulkan synchronization failed");
++  }
+ 
+   mCommandBufferOut->reset();
+   mCommandBufferOut->begin({vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+@@ -182,8 +197,9 @@ void DenoiserOidn::denoise(core::Image &color, core::Image *albedo, core::Image
+   mCommandBufferOut->end();
+ 
+   vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eTransfer;
+-  core::Context::Get()->getQueue().submit(mCommandBufferOut.get(), mSem.get(), waitStage,
+-                                          mSemValue, {}, {}, {});
++  queue.submit(mCommandBufferOut.get(), mSem.get(), waitStage, mSemValue, {}, {}, {});
++  // The command buffer is reset on the next frame, so it must no longer be in flight.
++  queue.waitIdle();
+ }
+ 
+ DenoiserOidn::~DenoiserOidn() {
