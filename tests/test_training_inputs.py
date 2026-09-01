@@ -525,3 +525,37 @@ def test_world_horizon_mode_requires_and_uses_external_action_and_horizon():
     assert response["horizons"].tolist() == [3]
     assert response["future_latents"].shape == (1, 2, 8)
     assert response["images"].shape == (1, 3, 1, 4, 8)
+
+
+def test_world_all_can_skip_future_image_tokens_and_decode():
+    policy = _mock_policy(InferenceMode.WORLD_ALL)
+    captured = {}
+
+    def sample_stage2(**kwargs):
+        captured.update(kwargs)
+        count = len(kwargs["horizons"])
+        return SimpleNamespace(
+            future=torch.empty(1, count, 0, 8),
+            future_state=torch.zeros(1, count, 2),
+            reward=torch.zeros(1, count, 1),
+            success=torch.zeros(1, count, 1),
+            q=torch.zeros(1, count, 1),
+        )
+
+    policy._sample_stage2 = sample_stage2
+    policy._decode_stage2_images = lambda future: (_ for _ in ()).throw(
+        AssertionError("image-free WORLD_ALL must not decode")
+    )
+    response = policy.inference(
+        {
+            "observation.state": torch.zeros(2),
+            "instruction": "move the object",
+            "action_chunk": torch.full((3, 2), 0.25),
+            "include_image": False,
+        }
+    )
+
+    assert captured["include_image"] is False
+    assert response["horizons"].tolist() == [1, 2, 3]
+    assert "future_latents" not in response
+    assert "images" not in response

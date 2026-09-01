@@ -66,3 +66,66 @@ def annotate_rollout_frame(
     draw.rectangle((0, 0, image.width, 22), fill=(0, 0, 0))
     draw.text((6, 5), label, fill=(255, 255, 255))
     return image
+
+
+def recorded_frame_chunk_horizon(
+    frame_index: int,
+    *,
+    action_chunk: int,
+) -> tuple[int | None, int]:
+    """Map an observation frame to the action chunk that predicted it.
+
+    Frame zero is the initial observation and has no preceding action.  For
+    later frames, chunk ``c`` starts from observation ``c * action_chunk`` and
+    predicts the next ``action_chunk`` observations at horizons ``1..T``.
+    """
+
+    frame_index = int(frame_index)
+    action_chunk = int(action_chunk)
+    if frame_index < 0:
+        raise ValueError("frame_index cannot be negative")
+    if action_chunk <= 0:
+        raise ValueError("action_chunk must be positive")
+    if frame_index == 0:
+        return None, 0
+    preceding_transition = frame_index - 1
+    return preceding_transition // action_chunk, preceding_transition % action_chunk + 1
+
+
+def annotate_recorded_frame(
+    frame_uint8: torch.Tensor,
+    *,
+    group: str,
+    episode_index: int,
+    frame_index: int,
+    action_chunk: int,
+    reward: float | None,
+    q: float | None,
+) -> Image.Image:
+    """Overlay source identity and the per-frame Stage-2 return prediction."""
+
+    if frame_uint8.dtype != torch.uint8:
+        raise TypeError("annotate_recorded_frame expects uint8 input")
+    if frame_uint8.ndim != 3 or frame_uint8.shape[0] != 3:
+        raise ValueError("annotate_recorded_frame expects CHW RGB input")
+    chunk_index, horizon = recorded_frame_chunk_horizon(
+        frame_index,
+        action_chunk=action_chunk,
+    )
+    image = Image.fromarray(
+        frame_uint8.permute(1, 2, 0).contiguous().numpy(),
+        mode="RGB",
+    )
+    draw = ImageDraw.Draw(image)
+    identity = f"group={group} episode={episode_index:03d} frame={frame_index:04d}"
+    if chunk_index is None:
+        returns = "chunk=--- h=00 current-frame (no preceding action)"
+    else:
+        returns = (
+            f"chunk={chunk_index + 1:03d} h={horizon:02d}/{action_chunk:02d} "
+            f"reward_h={float(reward):.5f} Q_h={float(q):.5f}"
+        )
+    draw.rectangle((0, 0, image.width, 42), fill=(0, 0, 0))
+    draw.text((6, 4), identity, fill=(255, 255, 255))
+    draw.text((6, 22), returns, fill=(255, 255, 255))
+    return image

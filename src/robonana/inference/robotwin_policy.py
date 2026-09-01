@@ -743,7 +743,10 @@ class RoboNanaRobotWinPolicy:
             timing["stage2_sample_ms"] = (time.perf_counter() - start) * 1000.0
         elif self.inference_mode is InferenceMode.WORLD_ALL:
             horizons = torch.arange(1, self.action_chunk + 1, device=self.model_device)
-            include_image = True
+            # Offline return annotation needs the same packed h=1..T world
+            # query without paying for dense FLUX image tokens or VAE decode.
+            # Keep the public WORLD_ALL default unchanged for existing callers.
+            include_image = bool(observation.get("include_image", True))
         elif self.inference_mode is InferenceMode.WORLD_HORIZON:
             if "horizon" not in observation:
                 raise KeyError("world_horizon requires observation['horizon']")
