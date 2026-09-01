@@ -667,7 +667,11 @@ bash scripts/collect_prepare_robotwin_rollouts.sh \
 
 The metadata/index builder preserves all of those fields. Replay preprocessing
 must complete Qwen3/FLUX caches before posttraining; DINO remains online and is
-not cached.
+not cached. `ROBONANA_EVAL_RUN_DIR` can route the evaluation ledger/results to
+an experiment directory, while `EVAL_VIDEO_LOG=1` makes the same simulator pass
+also retain MP4s. The focused posttraining pipeline uses both options so its
+baseline success rate, videos, and trainable replay come from exactly the same
+episodes.
 
 ## Iterative posttraining
 
@@ -936,9 +940,10 @@ bounded two-step GPU smoke is:
 CUDA_VISIBLE_DEVICES=7 python scripts/smoke_posttraining.py --device cuda:0
 ```
 
-For the focused hanging-mug experiment, the resumable orchestration script runs
-the same 50-seed evaluation before and after one posttraining round, keeps the
-rollout replay outside the initial dataset, and writes `comparison.json`:
+For the focused hanging-mug experiment, the resumable orchestration script
+collects the baseline evaluation and rollout replay in one 50-seed simulator
+pass, runs the posttraining round, evaluates the resulting checkpoint, and
+writes `comparison.json`. The replay remains outside the initial dataset:
 
 ```bash
 export ROBONANA_PRETRAIN_CHECKPOINT=$PWD/experiments/robotwin_flux2_4b_dino_reward_success_q_from150k_plus10k/models/checkpoint_epoch_1_step_160000/transformer/diffusion_pytorch_model.bin
@@ -950,7 +955,11 @@ bash scripts/run_hanging_mug_posttrain_round.sh
 The default posttraining run uses physical GPUs 7 and 8 (`CUDA` indices 6 and
 7), local batch 4, serial OIDN evaluation on GPU 8, and the training-seen
 instruction policy. Completed stages are marked under the output `state/`
-directory so a relaunch does not repeat a finished 50-episode stage.
+directory so a relaunch does not repeat a finished episode. On a fresh round,
+`pretrain_eval.done` and `rollout_replay.done` are published together only after
+the replay caches are complete. A partially completed episode ledger resumes in
+place; run directories produced by the previous two-pass pipeline remain
+supported.
 
 ## Verification
 

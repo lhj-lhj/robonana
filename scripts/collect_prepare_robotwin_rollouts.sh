@@ -30,6 +30,8 @@ prepare_gpu_id=${ROBONANA_PREPARE_GPU_ID:-7}
 static_camera_csv=${ROBONANA_ROBOTWIN_STATIC_CAMERAS:-head_camera}
 port=${PORT:-8094}
 test_num=${TEST_NUM:-1}
+eval_run_dir=${ROBONANA_EVAL_RUN_DIR:-${dataset_root}/logs/isolated_collection}
+video_log=${EVAL_VIDEO_LOG:-0}
 
 for required_path in "${trained_checkpoint}" "${stats_source}" "${model_python}" \
   "${robotwin_python}" "${deploy_policy}" "${isolated_eval}"; do
@@ -76,9 +78,9 @@ env \
   ROBONANA_EVAL_JOBS_PER_GPU=1 \
   ROBONANA_EPISODE_CPU_FALLBACK=0 \
   ROBONANA_EVAL_SEED_GROUP="${seed}" \
-  ROBONANA_EVAL_RUN_DIR="${dataset_root}/logs/isolated_collection" \
+  ROBONANA_EVAL_RUN_DIR="${eval_run_dir}" \
   ROBONANA_PORT_BASE="${port}" \
-  EVAL_VIDEO_LOG=0 \
+  EVAL_VIDEO_LOG="${video_log}" \
   ROBONANA_ROBOTWIN_STATIC_CAMERAS="${static_camera_csv}" \
   ROBONANA_ROLLOUT_DATASET_ROOT="${dataset_root}" \
   ROBONANA_INITIAL_DATASET_ROOT="${initial_dataset_root}" \

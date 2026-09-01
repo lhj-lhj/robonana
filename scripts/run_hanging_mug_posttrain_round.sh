@@ -61,12 +61,9 @@ run_eval() {
     bash "${repo_root}/scripts/eval_robotwin_all_tasks_parallel.sh" demo_clean "${test_num}"
 }
 
-if [[ ! -f ${state_dir}/pretrain_eval.done ]]; then
-  run_eval "${pretrain_checkpoint}" "${pretrain_config}" "${pre_eval_dir}"
-  touch "${state_dir}/pretrain_eval.done"
-fi
-
-if [[ ! -f ${state_dir}/rollout_replay.done ]]; then
+collect_and_prepare_replay() {
+  local video_log=$1
+  local eval_run_dir=$2
   env \
     ROBONANA_MODEL_PYTHON="${model_python}" \
     ROBONANA_MODEL_CONFIG="${pretrain_config}" \
@@ -83,11 +80,34 @@ if [[ ! -f ${state_dir}/rollout_replay.done ]]; then
     ROBONANA_SIM_GPU_ID=7 \
     ROBONANA_PREPARE_GPU_ID=7 \
     ROBONANA_ROBOTWIN_STATIC_CAMERAS=head_camera \
+    ROBONANA_EVAL_RUN_DIR="${eval_run_dir}" \
+    EVAL_VIDEO_LOG="${video_log}" \
     TEST_NUM="${test_num}" \
     PORT=18720 \
     bash "${repo_root}/scripts/collect_prepare_robotwin_rollouts.sh" \
       hanging_mug demo_clean "${collection}" 0
+}
+
+# A fresh round evaluates and records replay in the same simulator episodes.
+# Both files are touched only after replay preprocessing succeeds. If the
+# command is relaunched after an interruption, the isolated episode ledger and
+# atomic HDF5 writer resume rather than duplicating completed episodes.
+if [[ ! -f ${state_dir}/pretrain_eval.done \
+  && ! -f ${state_dir}/rollout_replay.done ]]; then
+  collect_and_prepare_replay 1 "${pre_eval_dir}"
+  touch "${state_dir}/pretrain_eval.done"
   touch "${state_dir}/rollout_replay.done"
+else
+  # Backward compatibility for run directories created by the old two-pass
+  # pipeline, where exactly one of the two stages may already be complete.
+  if [[ ! -f ${state_dir}/pretrain_eval.done ]]; then
+    run_eval "${pretrain_checkpoint}" "${pretrain_config}" "${pre_eval_dir}"
+    touch "${state_dir}/pretrain_eval.done"
+  fi
+  if [[ ! -f ${state_dir}/rollout_replay.done ]]; then
+    collect_and_prepare_replay 0 "${replay_root}/logs/isolated_collection"
+    touch "${state_dir}/rollout_replay.done"
+  fi
 fi
 
 if [[ ! -f ${state_dir}/posttrain.done ]]; then
