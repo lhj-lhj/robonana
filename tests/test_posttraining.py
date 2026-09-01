@@ -285,6 +285,33 @@ def test_trainer_searches_both_failure_pools_and_keeps_behavior_world_condition(
     assert q.reshape(-1).tolist() == [0, 1, 2, 3]
     assert trainer._last_failure_timeout_observation_ids == ["latest-final"]
 
+    trainer._posttrain_metrics = {}
+    no_failure_batch = {
+        **batch,
+        "failure_episode_mask": torch.zeros(4),
+        "pool_id": torch.tensor([0, 1, 0, 1]),
+        "time_limit_truncated_h": torch.zeros(4),
+    }
+    trainer._prepare_posttrain_targets(
+        batch_dict=no_failure_batch,
+        context=torch.zeros(4, 1, 3),
+        context_mask=torch.ones(4, 1, dtype=torch.bool),
+        current=torch.zeros(4, 1, 8),
+        future=torch.zeros(4, 1, 8),
+        state=torch.zeros(4, 1, 2),
+        future_state=torch.zeros(4, 1, 2),
+        behavior_action=behavior,
+        reward=torch.full((4, 1, 1), -1.0),
+    )
+    candidate_metrics = {
+        name: value
+        for name, value in trainer._posttrain_metrics.items()
+        if name.startswith("posttrain/failure_")
+        or name.startswith("posttrain/candidate_search_")
+    }
+    assert len(candidate_metrics) == 7
+    assert all(value.item() == 0.0 for value in candidate_metrics.values())
+
 
 def _checkpoint_hook_trainer(model: torch.nn.Module):
     trainer = object.__new__(RoboNanaTrainer)

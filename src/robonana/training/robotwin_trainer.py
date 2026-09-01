@@ -844,6 +844,21 @@ class RoboNanaTrainer(Trainer):
         pred_action_target = behavior_action.clone()
         failure = dict(self.posttrain_config["failure_policy_improvement"])
         self._last_candidate_search = None
+        # Every distributed rank must reduce the same metric keys in the same
+        # order. A rank can legitimately receive no failure samples from the
+        # four-pool sampler, while another rank runs candidate search.
+        candidate_metric_names = (
+            "posttrain/failure_best_q_mean",
+            "posttrain/failure_candidate_q_mean",
+            "posttrain/failure_candidate_q_std",
+            "posttrain/failure_behavior_q_mean",
+            "posttrain/failure_best_minus_behavior_q",
+            "posttrain/candidate_search_ms",
+            "posttrain/candidate_search_peak_gib",
+        )
+        self._posttrain_metrics.update(
+            {name: reward.new_zeros(()) for name in candidate_metric_names}
+        )
         if bool(failure_mask.any()):
             result = search_failure_candidates(
                 online_model=self.model,
