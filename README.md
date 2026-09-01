@@ -541,6 +541,29 @@ num_workers: 7
 tasks: [hanging_mug]
 ```
 
+One scheduler job receives one `CUDA_VISIBLE_DEVICES` value; every worker for
+that task shares the selected simulator GPU. The outer scheduler distributes
+different tasks across `gpu_ids`. Tune `num_workers` for the per-GPU SAPIEN
+memory budget rather than assuming its workers are spread across the list.
+
+The H100 validation environment on west2 uses the official RoboTwin checkout
+at commit `30954692d06ba7e89f7a6b76064f4062c488fa81` and keeps its source
+unchanged. The non-interactive launcher needs the conda command, Python,
+ffmpeg, and the isolated GLVND runtime on its environment paths:
+
+```bash
+export PATH=/workspace/hongjia/.venvs/robotwin-h100-test/bin:\
+/workspace/.conda/condabin:/workspace/.conda/envs/dreamdojo/bin:$PATH
+export LD_LIBRARY_PATH=/workspace/hongjia/.runtime-libs/robotwin-glvnd/usr/lib/x86_64-linux-gnu\
+${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+```
+
+A two-worker `click_bell` infrastructure smoke completed two 400-step
+episodes with official RT+OIDN and wrote both MP4s. The zero-action smoke policy
+produced four true `batch_size=2` model calls; request skew flushed ten tail
+calls at `batch_size=1`. This validates the transport and simulator concurrency,
+not policy success or full-checkpoint H100 memory.
+
 ### FACT-compatible isolated-GPU path
 
 The existing launcher follows the FACT RoboTwin protocol:
