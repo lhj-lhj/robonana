@@ -17,6 +17,10 @@ RUN_NAME="${ROBONANA_RUN_NAME:-hanging_mug_return_overlay150_step1000_20260902}"
 OUTPUT_ROOT="${ROBONANA_OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/${RUN_NAME}}"
 PIPELINE_LOG="${OUTPUT_ROOT}/pipeline_status.txt"
 
+# Never inherit a stale editable install from a migrated environment.  The
+# pipeline must resolve RoboNana, FACT, and official FLUX from this checkout.
+export PYTHONPATH="${PROJECT_ROOT}/src:${PROJECT_ROOT}/third_party/FACT:${PROJECT_ROOT}/third_party/flux2_official/src${PYTHONPATH:+:${PYTHONPATH}}"
+
 mkdir -p "${OUTPUT_ROOT}/logs"
 exec > >(tee -a "${PIPELINE_LOG}") 2>&1
 
