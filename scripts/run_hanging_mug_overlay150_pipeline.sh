@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wait for the step-1000 evaluation capture, annotate 3x50 episodes, and upload.
+# Wait for an evaluation capture, annotate 50 expert + 50 pre + N post episodes, and upload.
 set -euo pipefail
 
 PROJECT_ROOT="${ROBONANA_PROJECT_ROOT:-/data3/hongjia/robonana}"
@@ -17,6 +17,19 @@ SKIP_HF_UPLOAD="${ROBONANA_SKIP_HF_UPLOAD:-0}"
 RUN_NAME="${ROBONANA_RUN_NAME:-hanging_mug_return_overlay150_step1000_20260902}"
 OUTPUT_ROOT="${ROBONANA_OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/${RUN_NAME}}"
 PIPELINE_LOG="${OUTPUT_ROOT}/pipeline_status.txt"
+EVAL_EPISODES="${ROBONANA_EVAL_EPISODES:-50}"
+EXPERT_EPISODES="${ROBONANA_EXPERT_EPISODES:-50}"
+PRE_EPISODES="${ROBONANA_PRE_EPISODES:-50}"
+POST_GROUP_NAME="${ROBONANA_POST_GROUP_NAME:-posttrain_eval_low_success}"
+COLLECTION_NAME="${ROBONANA_COLLECTION_NAME:-$(basename "${POST_ROOT}")}"
+EXPECTED_TOTAL=$((EXPERT_EPISODES + PRE_EPISODES + EVAL_EPISODES))
+
+for value in "${EVAL_EPISODES}" "${EXPERT_EPISODES}" "${PRE_EPISODES}"; do
+  if ! [[ "${value}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "episode counts must be positive integers" >&2
+    exit 2
+  fi
+done
 
 # Never inherit a stale editable install from a migrated environment.  The
 # pipeline must resolve RoboNana, FACT, and official FLUX from this checkout.
@@ -32,12 +45,12 @@ while true; do
   hdf5_count=0
   [[ -f "${capture_ledger}" ]] && ledger_count="$(wc -l < "${capture_ledger}")"
   [[ -d "${POST_ROOT}" ]] && hdf5_count="$(find "${POST_ROOT}" -type f -name '*.hdf5' | wc -l)"
-  echo "capture ledger=${ledger_count}/50 hdf5=${hdf5_count}/50 at=$(date --iso-8601=seconds)"
-  if [[ "${ledger_count}" -eq 50 && "${hdf5_count}" -eq 50 && -f "${POST_ROOT}/robonana_index.json" ]]; then
+  echo "capture ledger=${ledger_count}/${EVAL_EPISODES} hdf5=${hdf5_count}/${EVAL_EPISODES} at=$(date --iso-8601=seconds)"
+  if [[ "${ledger_count}" -eq "${EVAL_EPISODES}" && "${hdf5_count}" -eq "${EVAL_EPISODES}" && -f "${POST_ROOT}/robonana_index.json" ]]; then
     break
   fi
-  if ! pgrep -f "collect_prepare_robotwin_rollouts.sh hanging_mug demo_clean hanging_mug_posttrain_step1000_eval50_capture" >/dev/null; then
-    echo "status=failed reason=capture_process_exited_before_50"
+  if ! pgrep -f "collect_prepare_robotwin_rollouts.sh hanging_mug demo_clean ${COLLECTION_NAME}" >/dev/null; then
+    echo "status=failed reason=capture_process_exited_before_${EVAL_EPISODES}"
     exit 1
   fi
   sleep 60
@@ -50,7 +63,6 @@ common_args=(
   --stats-path "${INITIAL_ROOT}/robonana_norm_stats.json"
   --task-name hanging_mug
   --output-dir "${OUTPUT_ROOT}"
-  --expected-episodes 50
   --action-chunk 48
   --num-inference-steps 20
   --model-device cuda:0
@@ -62,14 +74,17 @@ run_group() {
   local group_name="$1"
   local dataset_format="$2"
   local dataset_root="$3"
+  local expected_episodes="$4"
   echo "status=annotating group=${group_name} started_at=$(date --iso-8601=seconds)"
   CUDA_VISIBLE_DEVICES=6 "${PYTHON}" scripts/annotate_recorded_robotwin_returns.py \
     "${common_args[@]}" --group-name "${group_name}" --dataset-format "${dataset_format}" \
+    --expected-episodes "${expected_episodes}" \
     --dataset-root "${dataset_root}" --shard-id 0 \
     > "${OUTPUT_ROOT}/logs/${group_name}_shard0.log" 2>&1 &
   local pid0=$!
   CUDA_VISIBLE_DEVICES=7 "${PYTHON}" scripts/annotate_recorded_robotwin_returns.py \
     "${common_args[@]}" --group-name "${group_name}" --dataset-format "${dataset_format}" \
+    --expected-episodes "${expected_episodes}" \
     --dataset-root "${dataset_root}" --shard-id 1 \
     > "${OUTPUT_ROOT}/logs/${group_name}_shard1.log" 2>&1 &
   local pid1=$!
@@ -84,15 +99,15 @@ run_group() {
 }
 
 cd "${PROJECT_ROOT}"
-run_group expert_clean lerobot "${INITIAL_ROOT}"
-run_group collected_pre_5of50 hdf5 "${PRE_ROOT}"
-run_group posttrain_eval_low_success hdf5 "${POST_ROOT}"
+run_group expert_clean lerobot "${INITIAL_ROOT}" "${EXPERT_EPISODES}"
+run_group collected_pre_5of50 hdf5 "${PRE_ROOT}" "${PRE_EPISODES}"
+run_group "${POST_GROUP_NAME}" hdf5 "${POST_ROOT}" "${EVAL_EPISODES}"
 
 cat "${OUTPUT_ROOT}"/manifest_*_shard_*.jsonl > "${OUTPUT_ROOT}/manifest.jsonl"
 video_count="$(find "${OUTPUT_ROOT}/videos" -maxdepth 1 -type f -name '*.mp4' | wc -l)"
 telemetry_count="$(find "${OUTPUT_ROOT}/telemetry" -maxdepth 1 -type f -name '*.json' | wc -l)"
 manifest_count="$(wc -l < "${OUTPUT_ROOT}/manifest.jsonl")"
-if [[ "${video_count}" -ne 150 || "${telemetry_count}" -ne 150 || "${manifest_count}" -ne 150 ]]; then
+if [[ "${video_count}" -ne "${EXPECTED_TOTAL}" || "${telemetry_count}" -ne "${EXPECTED_TOTAL}" || "${manifest_count}" -ne "${EXPECTED_TOTAL}" ]]; then
   echo "status=failed reason=count_mismatch videos=${video_count} telemetry=${telemetry_count} manifest=${manifest_count}"
   exit 1
 fi
