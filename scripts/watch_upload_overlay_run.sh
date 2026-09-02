@@ -40,19 +40,22 @@ if [[ "${video_count}" -ne "${EXPECTED_COUNT}" || "${telemetry_count}" -ne "${EX
   exit 1
 fi
 
+payload_root="${OUTPUT_ROOT}_hf_payload"
+if [[ -e "${payload_root}" ]]; then
+  echo "status=upload_failed reason=payload_path_already_exists path=${payload_root}"
+  exit 1
+fi
+mkdir -p "${payload_root}/videos" "${payload_root}/telemetry"
+cp -al "${OUTPUT_ROOT}/videos/." "${payload_root}/videos/"
+cp -al "${OUTPUT_ROOT}/telemetry/." "${payload_root}/telemetry/"
 (
-  cd "${OUTPUT_ROOT}"
-  find . -type f \
-    ! -name SHA256SUMS \
-    ! -name pipeline_status.txt \
-    ! -name hf_upload_status.json \
-    ! -name upload_watcher.log \
-    -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+  cd "${payload_root}"
+  find videos telemetry -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
 )
 
-archive="${OUTPUT_ROOT}.tar.zst"
+archive="${payload_root}.tar.zst"
 archive_sha="${archive}.sha256"
-tar --zstd -cf "${archive}" -C "$(dirname "${OUTPUT_ROOT}")" "$(basename "${OUTPUT_ROOT}")"
+tar --zstd -cf "${archive}" -C "$(dirname "${payload_root}")" "$(basename "${payload_root}")"
 sha256sum "${archive}" > "${archive_sha}"
 
 echo "status=uploading_hf repo=${HF_REPO} started_at=$(date --iso-8601=seconds)"
