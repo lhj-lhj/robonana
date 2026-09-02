@@ -13,6 +13,7 @@ import robonana.data.robotwin_lerobot as robotwin_lerobot  # noqa: E402
 from robonana.data.robotwin_lerobot import (  # noqa: E402
     RoboTwinLeRobotDataset,
     discover_lerobot_episode_records,
+    load_lerobot_episode_records,
 )
 from robonana.data.stats import compute_robotwin_lerobot_metadata  # noqa: E402
 from world_action_model.image_layouts import ROBOTWIN_VIEW_KEYS  # noqa: E402
@@ -82,6 +83,42 @@ def test_lerobot_metadata_has_full_source_contract(tmp_path):
     assert index["episodes"][0]["source"].endswith("episode_000000.parquet")
     assert stats["source_format"] == "lerobot-v2"
     assert stats["action_chunk"] == 4
+
+
+def test_global_lerobot_index_still_respects_task_globs(tmp_path):
+    root = tmp_path / "RoboTwin"
+    _write_dataset(root)
+    randomized = root / "Randomized" / "other_task"
+    (randomized / "meta").mkdir(parents=True)
+    (randomized / "data" / "chunk-000").mkdir(parents=True)
+    row = {"episode_index": 0, "length": 1, "tasks": ["other task"]}
+    (randomized / "meta" / "episodes.jsonl").write_text(
+        json.dumps(row) + "\n", encoding="utf-8"
+    )
+    pd.DataFrame(
+        {
+            "observation.state": [np.zeros(14, dtype=np.float32)],
+            "action": [np.zeros(14, dtype=np.float32)],
+            "frame_index": [0],
+            "timestamp": [0.0],
+        }
+    ).to_parquet(randomized / "data" / "chunk-000" / "episode_000000.parquet")
+
+    all_records = discover_lerobot_episode_records(root, ("Clean/*", "Randomized/*"))
+    index, _ = compute_robotwin_lerobot_metadata(
+        all_records, dataset_root=root, action_chunk=4
+    )
+    index_path = root / "robonana_index.json"
+    index_path.write_text(json.dumps(index), encoding="utf-8")
+
+    records = load_lerobot_episode_records(
+        root,
+        ("Clean/test_task",),
+        index_path,
+    )
+    assert len(records) == 1
+    assert records[0].task_name == "test_task"
+    assert records[0].task_dir == (root / "Clean" / "test_task").resolve()
 
 
 def test_online_dino_decodes_only_the_horizon_selected_three_view_frame(tmp_path, monkeypatch):

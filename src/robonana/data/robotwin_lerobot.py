@@ -105,13 +105,15 @@ def load_lerobot_episode_records(
     index_path: str | Path | None,
 ) -> list[EpisodeRecord]:
     root = Path(dataset_root).expanduser().resolve()
+    task_globs = tuple(str(value) for value in task_globs)
     path = Path(index_path).expanduser().resolve() if index_path else root / "robonana_index.json"
     if not path.is_file():
         return discover_lerobot_episode_records(root, task_globs)
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("source_format") != "lerobot-v2":
         return discover_lerobot_episode_records(root, task_globs)
-    return [
+    allowed_task_dirs = set(_task_dirs(root, task_globs))
+    records = [
         EpisodeRecord(
             task_name=str(row["task_name"]),
             task_dir=(root / row["task_dir"]).resolve(),
@@ -132,7 +134,13 @@ def load_lerobot_episode_records(
             ),
         )
         for row in payload["episodes"]
+        if (root / row["task_dir"]).resolve() in allowed_task_dirs
     ]
+    if not records:
+        raise FileNotFoundError(
+            f"No indexed RoboTwin LeRobot episodes matching {task_globs!r} under {root}"
+        )
+    return records
 
 
 def lerobot_episode_instruction(task_dir: str | Path, episode_index: int) -> str:

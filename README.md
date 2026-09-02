@@ -1,5 +1,8 @@
 # RoboNana
 
+For a concise, evidence-oriented handoff to a new agent, read
+[docs/AGENT_HANDOFF.md](docs/AGENT_HANDOFF.md) before running commands.
+
 RoboNana is a RoboTwin 2.0 world-action model built by extending FACT's data and
 training path with one shared FLUX.2 DiT. The repository keeps upstream FACT and
 FLUX.2 implementations external and contains only the adapters, masks, cache
