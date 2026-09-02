@@ -13,6 +13,7 @@ from robonana.data.robotwin_hdf5 import (
     RoboTwinMixtureSampler,
     RoboTwinPosttrainSampler,
     discounted_chunk_reward,
+    mc_episode_q_target,
     mac_success_targets,
 )
 
@@ -223,7 +224,15 @@ def test_mac_targets_clip_tail_and_terminal_has_zero_reward_and_q():
     assert q == 0.0
 
 
-def _posttrain_pool(tmp_path, pool_name, *, success, round_id=0, allow_empty=False):
+def _posttrain_pool(
+    tmp_path,
+    pool_name,
+    *,
+    success,
+    round_id=0,
+    allow_empty=False,
+    q_target_mode="td_posttrain",
+):
     root = tmp_path / pool_name
     task_dir = root / f"task_{pool_name}" / "robonana_rollout"
     (task_dir / "data").mkdir(parents=True)
@@ -252,12 +261,52 @@ def _posttrain_pool(tmp_path, pool_name, *, success, round_id=0, allow_empty=Fal
         task_glob="*/robonana_rollout",
         fixed_horizon=48,
         eval_horizons=(1,),
-        q_target_mode="td_posttrain",
+        q_target_mode=q_target_mode,
         episode_filter="success" if success else "failure",
         pool_name=pool_name,
         allow_empty=allow_empty,
         require_final_observation=pool_name != "original_success",
     )
+
+
+def test_mc_posttrain_failure_terminal_and_action_masks(tmp_path):
+    success = _posttrain_pool(
+        tmp_path,
+        "original_success",
+        success=True,
+        q_target_mode="mc_posttrain",
+    )
+    failure = _posttrain_pool(
+        tmp_path,
+        "latest_failure",
+        success=False,
+        q_target_mode="mc_posttrain",
+    )
+
+    assert success[3]["q"].item() == 0.0
+    assert success[3]["action_loss_mask"].item() == 1.0
+    assert failure[0]["q"].item() == pytest.approx(-1000.0)
+    assert failure[3]["q"].item() == pytest.approx(-1000.0)
+    assert failure[3]["q_loss_mask"].item() == 1.0
+    assert failure[3]["action_loss_mask"].item() == 0.0
+
+
+def test_mc_episode_q_target_uses_discounted_failure_terminal():
+    assert mc_episode_q_target(
+        frame_index=4,
+        episode_length=5,
+        success=False,
+    ) == pytest.approx(-1000.0)
+    assert mc_episode_q_target(
+        frame_index=0,
+        episode_length=5,
+        success=False,
+    ) == pytest.approx(-1000.0)
+    assert mc_episode_q_target(
+        frame_index=0,
+        episode_length=5,
+        success=True,
+    ) == pytest.approx(-sum(0.999**offset for offset in range(4)))
 
 
 def test_failure_timeout_uses_real_final_observation_and_zero_length_is_masked(tmp_path):

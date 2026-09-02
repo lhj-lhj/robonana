@@ -162,7 +162,7 @@ def test_observation_digest_tracks_inputs_not_dictionary_identity():
     )
 
 
-def test_online_policy_returns_raw_chunk_reward_q_contract(monkeypatch):
+def test_online_policy_decodes_binary_reward_logit_and_returns_q(monkeypatch):
     from robonana.inference.robotwin_policy import RoboNanaRobotWinPolicy
 
     zeros = torch.zeros(2)
@@ -178,6 +178,9 @@ def test_online_policy_returns_raw_chunk_reward_q_contract(monkeypatch):
     policy.return_stage2_image = True
     policy.delta_mask = torch.tensor([False, False])
     policy.model = SimpleNamespace(reward_dim=1, q_dim=1)
+    policy.reward_non_goal = -1.0
+    policy.reward_goal = 0.0
+    policy.success_threshold = 0.5
     policy.normalization = NormalizationTensors(
         state_mean=zeros,
         state_std=ones,
@@ -227,10 +230,13 @@ def test_online_policy_returns_raw_chunk_reward_q_contract(monkeypatch):
     )
 
     assert response["action"].shape == (3, 2)
-    assert response["chunk_reward"] == -3.0
+    assert response["chunk_reward"] == -1.0
     assert response["chunk_q"] == -7.0
     assert response["return_horizon"] == 24
-    torch.testing.assert_close(response["rewards"], torch.tensor([-3.0]))
+    torch.testing.assert_close(response["rewards"], torch.tensor([-1.0]))
+    torch.testing.assert_close(
+        response["reward_probs"], torch.sigmoid(torch.tensor([-3.0]))
+    )
     torch.testing.assert_close(response["qs"], torch.tensor([-7.0]))
     assert response["selected_index"] == 0
     assert response["images"].shape == (1, 3, 1, 4, 8)
@@ -400,6 +406,7 @@ def _mock_policy(mode: InferenceMode):
     policy.return_stage2_image = False
     policy.discount = 1.0
     policy.reward_non_goal = -1.0
+    policy.reward_goal = 0.0
     policy.success_threshold = 0.5
     policy.delta_mask = torch.tensor([False, False])
     policy.model = SimpleNamespace(reward_dim=1, q_dim=1)

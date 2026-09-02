@@ -400,6 +400,7 @@ def test_forward_uses_pseudo_only_for_pred_action_and_behavior_for_clean_world(m
     trainer.pixel_eval_interval = 0
     trainer._cur_step = 1
     trainer.posttrain_enabled = True
+    trainer.posttrain_q_target_mode = "td_posttrain"
     trainer._posttrain_metrics = {}
     behavior = torch.arange(2 * 48 * 2, dtype=torch.float32).reshape(2, 48, 2)
     pred_target = behavior.clone()

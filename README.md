@@ -708,6 +708,12 @@ that replaces it with the EMA TD target before flow noise is applied. Do not
 set `td_posttrain` on a pretraining config by itself, because the raw dataset
 placeholder is intentionally zero and is not a valid learning target.
 
+`q_target_mode="mc_posttrain"` is the minimal critic-calibration mode. It uses
+the recorded full-episode MC return, keeps Q as a scalar flow target, assigns
+successful terminals `Q=0` and failed terminals `Q=-1000`, and does not run
+EMA bootstrap or best-of-eight action search. Successful samples retain their
+recorded Stage-1 action loss; failure samples have zero action-loss weight.
+
 ### Four-pool replay sampler
 
 The initial RoboTwin dataset is never physically merged with collected replay.
@@ -848,9 +854,9 @@ $$
 
 The corresponding adapter/head predicts `v*`; inference integrates from
 `sigma=1` pure noise to `sigma=0` clean data with the shared multi-step Euler
-sampler. Q is therefore a scalar flow sample. Reward is a direct scalar
-regression target (`-1` nonterminal, `0` successful terminal), and success is a
-direct binary logit. Neither direct head receives its target as input. The
+sampler. Q is therefore a scalar flow sample. Reward and success are separate
+direct binary logits. Reward class 0 decodes to `-1`; class 1 decodes to the
+successful-terminal reward `0`. Neither direct head receives its target as input. The
 weighted training objective is
 
 $$
@@ -864,8 +870,9 @@ $$
 +0.1\mathcal L_{DINO}.
 $$
 
-The flow terms and direct reward use MSE; success uses binary cross entropy with
-logits. The action mask is enabled for both success and failure samples after
+The flow terms use MSE; direct reward and success use binary cross entropy with
+logits. Reward class 0 decodes to
+`-1` and class 1 decodes to the successful-terminal reward `0`. The action mask is enabled for both success and failure samples after
 the failure pseudo target has been selected; the Q mask excludes only
 `delta_steps=0`. No loss is backpropagated through candidate search, EMA
 next-action sampling, EMA next-Q sampling, or target construction.
@@ -915,6 +922,22 @@ bash scripts/run_robotwin_train.sh \
 bash scripts/run_robotwin_train.sh \
   --config robonana.configs.robotwin_flux2_800m_dino_posttrain.config
 ```
+
+For the two-source hanging-mug MC calibration experiment, restrict the original
+pool and select only the current collected replay root:
+
+```bash
+export ROBONANA_POSTTRAIN_Q_TARGET_MODE=mc_posttrain
+export ROBONANA_FAILURE_TERMINAL_Q=-1000
+export ROBONANA_POSTTRAIN_ORIGINAL_TASK_GLOBS=Clean/hanging_mug
+export ROBONANA_PIXEL_EVAL_INTERVAL=2000
+export ROBONANA_MAX_STEPS=4000
+```
+
+Its sampler allocates 50% of every batch to success and 50% to failure. The
+success half is split between the 50 original expert episodes and the five
+successful collected episodes; the failure half uses only the 45 failures in
+the selected current replay root. Historical failures receive zero weight.
 
 The posttraining W&B namespace reports pool counts, pseudo/success action sample
 counts, candidate Q mean/std, best and behavior Q, best-minus-behavior Q, TD

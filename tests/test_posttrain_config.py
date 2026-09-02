@@ -55,3 +55,43 @@ def test_posttrain_config_builds_four_separate_pool_views(monkeypatch, tmp_path)
     assert posttrain["td"]["bootstrap_failure_timeout"] is True
     assert config["train"]["q_target_mode"] == "td_posttrain"
     assert config["train"]["checkpoint_save_optimizer"] is True
+
+
+def test_mc_posttrain_uses_only_current_failures_and_balances_outcomes(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("ROBONANA_REPLAY_ROOT", str(tmp_path / "replay"))
+    monkeypatch.setenv("ROBONANA_POSTTRAIN_CHECKPOINT", str(tmp_path / "model.bin"))
+    monkeypatch.setenv("ROBONANA_POSTTRAIN_Q_TARGET_MODE", "mc_posttrain")
+    monkeypatch.setenv(
+        "ROBONANA_POSTTRAIN_ORIGINAL_TASK_GLOBS", "Clean/hanging_mug"
+    )
+    base = {
+        "project_dir": str(tmp_path / "experiment"),
+        "dataloaders": {
+            "train": {
+                "data_or_config": {
+                    "_class_name": "RoboTwinLeRobotDataset",
+                    "data_path": str(tmp_path / "original"),
+                    "stats_path": str(tmp_path / "stats.json"),
+                    "task_globs": ("Clean/*",),
+                    "dino_online": True,
+                },
+                "sampler": {},
+            }
+        },
+        "models": {},
+        "train": {"loss_weights": {}},
+    }
+
+    config = apply_iterative_posttrain_config(base)
+    pools = config["dataloaders"]["train"]["data_or_config"]
+    weights = config["dataloaders"]["train"]["sampler"]["pool_weights"]
+    assert all(pool["q_target_mode"] == "mc_posttrain" for pool in pools)
+    assert all(pool["failure_terminal_q"] == -1000.0 for pool in pools)
+    assert pools[0]["task_globs"] == ("Clean/hanging_mug",)
+    assert weights["historical_failure_replay"] == 0.0
+    assert weights["latest_failure"] == 0.5
+    assert weights["original_success"] + weights["collected_success_replay"] == 0.5
+    assert config["train"]["q_target_mode"] == "mc_posttrain"
+    assert config["train"]["posttrain"]["q_normalization"] == "none"

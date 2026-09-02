@@ -102,6 +102,42 @@ def mac_success_targets(
     return future_index, delta, float(reward_h), float(q_mc)
 
 
+def mc_episode_q_target(
+    *,
+    frame_index: int,
+    episode_length: int,
+    success: bool,
+    discount: float = 0.999,
+    reward_non_goal: float = -1.0,
+    reward_goal: float = 0.0,
+    failure_terminal_q: float = -1000.0,
+) -> float:
+    """Return the full-episode MC Q target from one recorded observation.
+
+    Successful trajectories terminate at ``reward_goal``. Failed trajectories
+    use an explicit terminal continuation value so irrecoverable final states
+    remain distinguishable from successful terminals.
+    """
+
+    frame_index = int(frame_index)
+    episode_length = int(episode_length)
+    discount = float(discount)
+    if episode_length <= 0:
+        raise ValueError("episode_length must be positive")
+    if not 0 <= frame_index < episode_length:
+        raise ValueError("frame_index must lie inside the episode")
+    if not 0.0 < discount <= 1.0:
+        raise ValueError("discount must lie in (0, 1]")
+    remaining = episode_length - 1 - frame_index
+    q_mc = discounted_chunk_reward(
+        remaining,
+        discount=discount,
+        reward_non_goal=reward_non_goal,
+    )
+    terminal_value = reward_goal if success else failure_terminal_q
+    return float(q_mc + discount**remaining * float(terminal_value))
+
+
 @dataclass(frozen=True)
 class EpisodeRecord:
     task_name: str
@@ -237,6 +273,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         discount: float = 0.999,
         reward_non_goal: float = -1.0,
         reward_goal: float = 0.0,
+        failure_terminal_q: float = -1000.0,
         q_target_mode: str = "mc_success",
         episode_filter: str | None = None,
         pool_name: str = "original_success",
@@ -267,6 +304,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self.discount = float(discount)
         self.reward_non_goal = float(reward_non_goal)
         self.reward_goal = float(reward_goal)
+        self.failure_terminal_q = float(failure_terminal_q)
         self.q_target_mode = str(q_target_mode)
         self.episode_filter = str(
             episode_filter
@@ -295,9 +333,9 @@ class RoboTwinHDF5Dataset(BaseDataset):
             raise ValueError("dino_image_size must be (height, width) with positive values")
         if not 0.0 < self.discount <= 1.0:
             raise ValueError("discount must lie in (0, 1]")
-        if self.q_target_mode not in {"mc_success", "td_posttrain"}:
+        if self.q_target_mode not in {"mc_success", "mc_posttrain", "td_posttrain"}:
             raise ValueError(
-                "q_target_mode must be 'mc_success' or 'td_posttrain'"
+                "q_target_mode must be 'mc_success', 'mc_posttrain', or 'td_posttrain'"
             )
         if self.episode_filter not in {"all", "success", "failure"}:
             raise ValueError("episode_filter must be all, success, or failure")
@@ -537,6 +575,16 @@ class RoboTwinHDF5Dataset(BaseDataset):
                 reward_non_goal=self.reward_non_goal,
                 reward_goal=self.reward_goal,
             )
+        elif self.q_target_mode == "mc_posttrain":
+            q_clean = mc_episode_q_target(
+                frame_index=frame_index,
+                episode_length=record.length,
+                success=record.success,
+                discount=self.discount,
+                reward_non_goal=self.reward_non_goal,
+                reward_goal=self.reward_goal,
+                failure_terminal_q=self.failure_terminal_q,
+            )
         else:
             # The trainer replaces this placeholder with a stop-gradient EMA TD target.
             q_clean = 0.0
@@ -626,7 +674,10 @@ class RoboTwinHDF5Dataset(BaseDataset):
                 1.0 if self.q_target_mode == "td_posttrain" else float(record.success),
                 dtype=torch.float32,
             ),
-            "q_loss_mask": torch.tensor(float(delta_steps > 0), dtype=torch.float32),
+            "q_loss_mask": torch.tensor(
+                1.0 if self.q_target_mode == "mc_posttrain" else float(delta_steps > 0),
+                dtype=torch.float32,
+            ),
             "failure_episode_mask": torch.tensor(float(not record.success), dtype=torch.float32),
             "pool_id": torch.tensor(POSTTRAIN_POOL_IDS[self.pool_name], dtype=torch.long),
             "task_id": torch.tensor(task_names.index(record.task_name), dtype=torch.long),

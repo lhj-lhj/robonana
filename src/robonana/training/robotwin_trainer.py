@@ -131,6 +131,11 @@ class RoboNanaTrainer(Trainer):
         self.dino_encoder_batch_size = 0
         self.posttrain_config = dict(self.kwargs.get("posttrain", {}))
         self.posttrain_enabled = bool(self.posttrain_config.get("enabled", False))
+        self.posttrain_q_target_mode = str(
+            self.posttrain_config.get(
+                "q_target_mode", self.kwargs.get("q_target_mode", "")
+            )
+        )
         self.full_model_ema: FullModelEMA | None = None
         self.ema_forward_autocast_dtype = torch.bfloat16
         self.current_collection_round = int(
@@ -144,8 +149,17 @@ class RoboNanaTrainer(Trainer):
             self._validate_posttrain_config()
 
     def _validate_posttrain_config(self) -> None:
-        if str(self.kwargs.get("q_target_mode", "")) != "td_posttrain":
-            raise ValueError("iterative posttraining requires q_target_mode='td_posttrain'")
+        configured_mode = str(self.kwargs.get("q_target_mode", ""))
+        if configured_mode != self.posttrain_q_target_mode:
+            raise ValueError("train and posttrain q_target_mode must match")
+        if configured_mode not in {"td_posttrain", "mc_posttrain"}:
+            raise ValueError(
+                "iterative posttraining requires q_target_mode='td_posttrain' or 'mc_posttrain'"
+            )
+        if configured_mode == "mc_posttrain":
+            if float(self.posttrain_config.get("failure_terminal_q", -1000.0)) != -1000.0:
+                raise ValueError("MC posttraining failure_terminal_q must be -1000")
+            return
         ema = dict(self.posttrain_config.get("ema", {}))
         if ema.get("storage_dtype") != "float32":
             raise ValueError("posttrain EMA storage_dtype must be float32")
@@ -174,7 +188,7 @@ class RoboNanaTrainer(Trainer):
             raise ValueError("failure time limits must bootstrap")
 
     def set_ema_models(self) -> None:
-        if not self.posttrain_enabled:
+        if not self.posttrain_enabled or self.posttrain_q_target_mode == "mc_posttrain":
             return super().set_ema_models()
         if self.with_ema:
             raise ValueError("disable FACT parameter-buffer EMA when full posttrain EMA is enabled")
@@ -1020,7 +1034,7 @@ class RoboNanaTrainer(Trainer):
             q_loss_mask = q_loss_mask.to(device=self.device)
 
         pred_action_target = behavior_action
-        if self.posttrain_enabled:
+        if self.posttrain_enabled and self.posttrain_q_target_mode == "td_posttrain":
             pred_action_target, q, action_loss_mask, q_loss_mask = (
                 self._prepare_posttrain_targets(
                     batch_dict=batch_dict,
@@ -1047,7 +1061,10 @@ class RoboNanaTrainer(Trainer):
         noisy_future, image_target = flow_noise(future, wm_timestep)
         noisy_future_state, future_state_target = flow_noise(future_state, wm_timestep)
         reward_query = torch.zeros_like(reward)
-        reward_target = reward
+        # The direct reward head is a Bernoulli classifier: class 1 means the
+        # selected future state is a successful terminal (reward 0), while
+        # class 0 means the per-step reward is -1.
+        reward_target = success
         noisy_q, q_target = flow_noise(q, wm_timestep)
         noisy_future_dino = None
         dino_target = None
@@ -1127,7 +1144,7 @@ class RoboNanaTrainer(Trainer):
             action_loss_mask=action_loss_mask,
             q_loss_mask=q_loss_mask,
         )
-        if self.posttrain_enabled:
+        if self.posttrain_enabled and self.posttrain_q_target_mode == "td_posttrain":
             failure_mask = batch_dict["failure_episode_mask"].to(
                 device=self.device, dtype=torch.float32
             )
@@ -1136,6 +1153,17 @@ class RoboNanaTrainer(Trainer):
                 action_target,
                 failure_mask,
             ).detach()
+        elif self.posttrain_enabled:
+            failure_mask = batch_dict["failure_episode_mask"].to(
+                device=self.device, dtype=torch.float32
+            )
+            self._posttrain_metrics.update(
+                {
+                    "posttrain/failure_fraction": failure_mask.mean(),
+                    "posttrain/action_loss_mask_fraction": action_loss_mask.float().mean(),
+                    "posttrain/mc_q_target_mean": q.float().mean(),
+                }
+            )
         return losses
 
     def parse_losses(self, losses: dict[str, Tensor] | Tensor) -> Tensor:

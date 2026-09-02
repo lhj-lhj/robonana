@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import torch
 
-from robonana.training.losses import joint_flow_loss, masked_mse
+from robonana.training.losses import joint_flow_loss, masked_bce_with_logits, masked_mse
 
 
 def test_failure_mask_removes_action_sample():
@@ -13,6 +13,13 @@ def test_failure_mask_removes_action_sample():
     assert loss.item() == 1.0
     assert prediction.grad[0].abs().sum() > 0
     assert prediction.grad[1].abs().sum() == 0
+
+
+def test_reward_is_binary_logit_loss():
+    logits = torch.tensor([[-2.0], [2.0]])
+    targets = torch.tensor([[0.0], [1.0]])
+    expected = torch.nn.functional.binary_cross_entropy_with_logits(logits, targets)
+    torch.testing.assert_close(masked_bce_with_logits(logits, targets), expected)
 
 
 def test_joint_loss_adds_dino_only_when_target_is_present():

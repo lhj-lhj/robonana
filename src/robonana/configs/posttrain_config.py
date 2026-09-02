@@ -23,6 +23,8 @@ def _replay_dataset_config(
     episode_filter: str,
     current_round: int,
     dino_online: bool,
+    q_target_mode: str,
+    failure_terminal_q: float,
 ) -> dict[str, Any]:
     config: dict[str, Any] = dict(
         _class_name="RoboTwinHDF5Dataset",
@@ -37,7 +39,8 @@ def _replay_dataset_config(
         discount=0.999,
         reward_non_goal=-1.0,
         reward_goal=0.0,
-        q_target_mode="td_posttrain",
+        q_target_mode=q_target_mode,
+        failure_terminal_q=failure_terminal_q,
         episode_filter=episode_filter,
         pool_name=pool_name,
         dino_online=dino_online,
@@ -70,11 +73,24 @@ def apply_iterative_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
     if current_round < 0:
         raise ValueError("ROBONANA_COLLECTION_ROUND cannot be negative")
 
+    q_target_mode = os.environ.get(
+        "ROBONANA_POSTTRAIN_Q_TARGET_MODE", "td_posttrain"
+    ).strip()
+    if q_target_mode not in {"td_posttrain", "mc_posttrain"}:
+        raise ValueError(
+            "ROBONANA_POSTTRAIN_Q_TARGET_MODE must be td_posttrain or mc_posttrain"
+        )
+    failure_terminal_q = float(
+        os.environ.get("ROBONANA_FAILURE_TERMINAL_Q", "-1000.0")
+    )
+    mc_posttrain = q_target_mode == "mc_posttrain"
+
     original = copy.deepcopy(config["dataloaders"]["train"]["data_or_config"])
     if isinstance(original, list):
         original = original[0]
     original.update(
-        q_target_mode="td_posttrain",
+        q_target_mode=q_target_mode,
+        failure_terminal_q=failure_terminal_q,
         episode_filter="success",
         pool_name="original_success",
         allow_empty=False,
@@ -84,6 +100,13 @@ def apply_iterative_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
         reward_goal=0.0,
         dino_image_size=(480, 640) if original.get("dino_online", False) else None,
     )
+    original_task_globs = os.environ.get(
+        "ROBONANA_POSTTRAIN_ORIGINAL_TASK_GLOBS", ""
+    ).strip()
+    if original_task_globs:
+        original["task_globs"] = tuple(
+            value.strip() for value in original_task_globs.split(",") if value.strip()
+        )
     stats_path = Path(
         os.environ.get("ROBONANA_REPLAY_STATS_PATH", str(original["stats_path"]))
     ).expanduser()
@@ -97,6 +120,8 @@ def apply_iterative_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
             episode_filter="success",
             current_round=current_round,
             dino_online=dino_online,
+            q_target_mode=q_target_mode,
+            failure_terminal_q=failure_terminal_q,
         ),
         _replay_dataset_config(
             replay_root=replay_root,
@@ -105,6 +130,8 @@ def apply_iterative_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
             episode_filter="failure",
             current_round=current_round,
             dino_online=dino_online,
+            q_target_mode=q_target_mode,
+            failure_terminal_q=failure_terminal_q,
         ),
         _replay_dataset_config(
             replay_root=replay_root,
@@ -113,18 +140,30 @@ def apply_iterative_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
             episode_filter="failure",
             current_round=current_round,
             dino_online=dino_online,
+            q_target_mode=q_target_mode,
+            failure_terminal_q=failure_terminal_q,
         ),
     ]
     config["dataloaders"]["train"]["data_or_config"] = pools
-    config["dataloaders"]["train"]["sampler"] = dict(
-        type="RoboTwinPosttrainSampler",
-        infinite=True,
-        pool_weights=dict(
+    pool_weights = (
+        dict(
+            original_success=5.0 / 11.0,
+            collected_success_replay=1.0 / 22.0,
+            historical_failure_replay=0.0,
+            latest_failure=0.5,
+        )
+        if mc_posttrain
+        else dict(
             original_success=0.25,
             collected_success_replay=0.25,
             historical_failure_replay=0.25,
             latest_failure=0.25,
-        ),
+        )
+    )
+    config["dataloaders"]["train"]["sampler"] = dict(
+        type="RoboTwinPosttrainSampler",
+        infinite=True,
+        pool_weights=pool_weights,
         redistribute_empty_historical_failure_to_latest=True,
         redistribute_empty_collected_success_to_original=True,
     )
@@ -143,7 +182,8 @@ def apply_iterative_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
         reward_goal=0.0,
         reward_normalization="none",
         q_normalization="none",
-        q_target_mode="td_posttrain",
+        q_target_mode=q_target_mode,
+        failure_terminal_q=failure_terminal_q,
         current_collection_round=current_round,
         ema=dict(
             decay=0.995,
@@ -157,10 +197,7 @@ def apply_iterative_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
             include_dino_encoder=False,
         ),
         data_mixture=dict(
-            original_success=0.25,
-            collected_success_replay=0.25,
-            historical_failure_replay=0.25,
-            latest_failure=0.25,
+            **pool_weights,
             redistribute_empty_historical_failure_to_latest=True,
             redistribute_empty_collected_success_to_original=True,
             task_balanced=True,
@@ -205,7 +242,8 @@ def apply_iterative_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
         discount=0.999,
         reward_non_goal=-1.0,
         reward_goal=0.0,
-        q_target_mode="td_posttrain",
+        q_target_mode=q_target_mode,
+        failure_terminal_q=failure_terminal_q,
         checkpoint_save_optimizer=True,
         resume=_env_flag("ROBONANA_RESUME", True),
     )

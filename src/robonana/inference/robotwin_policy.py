@@ -200,6 +200,7 @@ class RoboNanaRobotWinPolicy:
         return_stage2_image: bool = False,
         discount: float = 0.999,
         reward_non_goal: float = -1.0,
+        reward_goal: float = 0.0,
         success_threshold: float = 0.5,
     ) -> None:
         self.flux_checkpoint_dir = Path(flux_checkpoint_dir).expanduser().resolve()
@@ -221,6 +222,7 @@ class RoboNanaRobotWinPolicy:
         self.return_stage2_image = bool(return_stage2_image)
         self.discount = float(discount)
         self.reward_non_goal = float(reward_non_goal)
+        self.reward_goal = float(reward_goal)
         self.success_threshold = float(success_threshold)
         if not 0.0 < self.discount <= 1.0:
             raise ValueError("discount must lie in (0, 1]")
@@ -717,7 +719,12 @@ class RoboNanaRobotWinPolicy:
                     if terminal_indices.numel()
                     else self.action_chunk
                 )
-                conditional_reward_curve = world_sample.reward[0].float().reshape(-1)
+                reward_probabilities = world_sample.reward[0].float().reshape(-1).sigmoid()
+                conditional_reward_curve = torch.where(
+                    reward_probabilities >= self.success_threshold,
+                    torch.full_like(reward_probabilities, self.reward_goal),
+                    torch.full_like(reward_probabilities, self.reward_non_goal),
+                )
                 conditional_accumulated_reward = float(
                     discounted_reward_sum(
                         conditional_reward_curve[:conditional_terminal_horizon],
@@ -815,13 +822,19 @@ class RoboNanaRobotWinPolicy:
             future_states = denormalize_state(
                 world_sample.future_state[0].float(), self.normalization, mode="zscore"
             ).cpu()
-            rewards = world_sample.reward[0].float().reshape(-1).cpu()
+            reward_probs = world_sample.reward[0].float().reshape(-1).sigmoid().cpu()
+            rewards = torch.where(
+                reward_probs >= self.success_threshold,
+                torch.full_like(reward_probs, self.reward_goal),
+                torch.full_like(reward_probs, self.reward_non_goal),
+            )
             success_probs = world_sample.success[0].float().reshape(-1).sigmoid().cpu()
             qs = world_sample.q[0].float().reshape(-1).cpu()
             response.update(
                 horizons=horizons.detach().cpu(),
                 future_states=future_states,
                 rewards=rewards,
+                reward_probs=reward_probs,
                 success_probs=success_probs,
                 qs=qs,
             )
@@ -850,7 +863,14 @@ class RoboNanaRobotWinPolicy:
                 self._sync(self.vae_device)
                 timing["stage2_image_decode_ms"] = (time.perf_counter() - start) * 1000.0
         if legacy_world is not None:
-            chunk_reward = float(legacy_world.reward[0, 0].float().reshape(-1)[0].item())
+            reward_probability = float(
+                legacy_world.reward[0, 0].float().reshape(-1)[0].sigmoid().item()
+            )
+            chunk_reward = (
+                self.reward_goal
+                if reward_probability >= self.success_threshold
+                else self.reward_non_goal
+            )
             chunk_q = float(legacy_world.q[0, 0].float().reshape(-1)[0].item())
             success_probability = float(
                 legacy_world.success[0, 0].float().reshape(-1)[0].sigmoid().item()
@@ -860,6 +880,7 @@ class RoboNanaRobotWinPolicy:
                 chunk_q=chunk_q,
                 return_horizon=self.horizon,
                 rewards=torch.tensor([chunk_reward], dtype=torch.float32),
+                reward_probs=torch.tensor([reward_probability], dtype=torch.float32),
                 qs=torch.tensor([chunk_q], dtype=torch.float32),
                 success_probs=torch.tensor([success_probability], dtype=torch.float32),
                 selected_index=0,
