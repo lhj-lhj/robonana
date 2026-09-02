@@ -139,12 +139,13 @@ jq .dataloaders.train \
   /data3/hongjia/robonana/experiments/hanging_mug_mc_posttrain_100traj_from160k_4k/config.json
 ```
 
-**Do not use this run's step-4000 checkpoint as the intended single-task
-result.** It was trained before commit `c8c931f`, so its original-success pool
-silently contained all tasks from the global index. The downstream
-`robonana-mc4k-eval-overlay150` automation was paused after this diagnosis to
-avoid spending simulator time on an invalid comparison. Restarting a corrected
-run requires an explicit user decision.
+This run was trained before commit `c8c931f`, so its `original_success` pool
+contains all tasks from the global LeRobot index, while its collected-success
+and failure replay pools contain hanging_mug only. The user explicitly accepted
+this mixed-data lineage on 2026-09-03 and authorized continued use of the
+step-4000 checkpoint for hanging_mug evaluation. Do not describe it as a pure
+hanging_mug run, but do not reject the checkpoint for this reason. The
+`robonana-mc4k-eval-overlay150` automation is active again.
 
 Check status without changing the run:
 
