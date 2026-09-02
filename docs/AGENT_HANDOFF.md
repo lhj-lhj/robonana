@@ -1,9 +1,8 @@
 # RoboNana agent handoff and operational log
 
 Last verified: 2026-09-03 (Asia/Shanghai)  
-Local Git checkout at verification: `D:\Robotic\robonana`, branch `main`, commit
-`c44dd97f75386c9272fc4be97ae91faacc4bccd1` before the task-filter fix described
-below.
+Task-filter fix validated on 190: commit
+`c8c931fa1d7b38385cef71044af163484e4bdc0e`, branch `main`.
 
 This document is the first-read handoff for an agent with no conversation
 history. It records the current research objective, authoritative locations,
@@ -48,6 +47,11 @@ status must be verified at the start of every task.
 
 Do **not** use west1-58 or an old migration/validation worktree unless the user
 explicitly changes the authority. Do not assume local and server HEAD match:
+
+On 190 the `/workspace/datasets/fact-robotwin-v2` symlink currently resolves
+into `/data3/hongjia/robonana-migration/datasets/fact-robotwin-v2`. That target
+is retained **dataset storage**, not the source-code authority. Do not delete it
+as an "old repository". Source execution remains `/data3/hongjia/robonana`.
 
 ```powershell
 cd D:\Robotic\robonana
@@ -135,6 +139,13 @@ jq .dataloaders.train \
   /data3/hongjia/robonana/experiments/hanging_mug_mc_posttrain_100traj_from160k_4k/config.json
 ```
 
+**Do not use this run's step-4000 checkpoint as the intended single-task
+result.** It was trained before commit `c8c931f`, so its original-success pool
+silently contained all tasks from the global index. The downstream
+`robonana-mc4k-eval-overlay150` automation was paused after this diagnosis to
+avoid spending simulator time on an invalid comparison. Restarting a corrected
+run requires an explicit user decision.
+
 Check status without changing the run:
 
 ```bash
@@ -197,6 +208,17 @@ Regression test:
 
 ```text
 tests/test_robotwin_lerobot.py::test_global_lerobot_index_still_respects_task_globs
+```
+
+Validation evidence on 190 at commit `c8c931f`:
+
+```text
+python -m pytest -q tests/test_robotwin_lerobot.py tests/test_posttrain_config.py
+6 passed in 5.29s
+
+global LeRobot index: 50 distinct task names
+configured Clean/hanging_mug result: 50 records
+filtered task-name set: ['hanging_mug']
 ```
 
 Pixel eval currently stages the first sample on each rank and later maps
