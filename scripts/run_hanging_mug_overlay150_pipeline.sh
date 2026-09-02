@@ -13,6 +13,7 @@ FLUX_CHECKPOINT="${ROBONANA_FLUX_CHECKPOINT:-${PROJECT_ROOT}/checkpoints/FLUX.2-
 PYTHON="${ROBONANA_PYTHON:-/data3/hongjia/conda/envs/robonana/bin/python}"
 HF="${ROBONANA_HF:-/data3/hongjia/conda/envs/robonana/bin/hf}"
 HF_REPO="${ROBONANA_HF_REPO:-AvaX1/robonana-eval-videos}"
+SKIP_HF_UPLOAD="${ROBONANA_SKIP_HF_UPLOAD:-0}"
 RUN_NAME="${ROBONANA_RUN_NAME:-hanging_mug_return_overlay150_step1000_20260902}"
 OUTPUT_ROOT="${ROBONANA_OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/${RUN_NAME}}"
 PIPELINE_LOG="${OUTPUT_ROOT}/pipeline_status.txt"
@@ -94,6 +95,11 @@ manifest_count="$(wc -l < "${OUTPUT_ROOT}/manifest.jsonl")"
 if [[ "${video_count}" -ne 150 || "${telemetry_count}" -ne 150 || "${manifest_count}" -ne 150 ]]; then
   echo "status=failed reason=count_mismatch videos=${video_count} telemetry=${telemetry_count} manifest=${manifest_count}"
   exit 1
+fi
+
+if [[ "${SKIP_HF_UPLOAD}" == "1" ]]; then
+  echo "status=complete_local_only videos=${video_count} telemetry=${telemetry_count} manifest=${manifest_count} completed_at=$(date --iso-8601=seconds)"
+  exit 0
 fi
 
 (
