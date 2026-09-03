@@ -108,6 +108,36 @@ The canonical 4B+DINO pretraining and inference contracts remain documented in
 
 ## Current hanging-mug critic-calibration experiment
 
+### Corrected hanging-mug-only run (active 2026-09-03)
+
+```text
+experiment: /data3/hongjia/robonana/experiments/hanging_mug_mc_posttrain_550success_50replay_from160k_4k
+W&B: https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/wcgu55w3
+initialization: step160000 reward/success/Q checkpoint
+GPUs: 6,7
+per-GPU batch: 16
+gradient accumulation: 2
+global batch: 64
+steps: 4000
+pixel eval: every 2000 steps
+```
+
+Its physical data contract was checked before launch:
+
+```text
+original_success: Clean/hanging_mug 50 + Randomized/hanging_mug 500
+collected_success_replay: hanging_mug 5
+latest_failure: hanging_mug 45
+outcome sampling: 50% success / 50% failure
+failure action loss: disabled; all other enabled losses remain active
+```
+
+At launch, commit `406f80d` was checked out on 190. The first healthy log point
+was step 40/4000 at roughly 30.5 samples/s with about 31 GiB free on each B200.
+Always inspect the live log before reporting current progress.
+
+### Previous mixed-index run
+
 Experiment directory:
 
 ```text
