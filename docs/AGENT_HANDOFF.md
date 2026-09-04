@@ -1,6 +1,6 @@
 # RoboNana agent handoff and operational log
 
-Last verified: 2026-09-03 (Asia/Shanghai)  
+Last verified: 2026-09-04 (Asia/Shanghai)
 Task-filter fix validated on 190: commit
 `c8c931fa1d7b38385cef71044af163484e4bdc0e`, branch `main`.
 
@@ -108,7 +108,7 @@ The canonical 4B+DINO pretraining and inference contracts remain documented in
 
 ## Current hanging-mug critic-calibration experiment
 
-### Corrected hanging-mug-only run (active 2026-09-03)
+### Corrected hanging-mug-only run (completed 2026-09-03)
 
 ```text
 experiment: /data3/hongjia/robonana/experiments/hanging_mug_mc_posttrain_550success_50replay_from160k_4k
@@ -132,9 +132,33 @@ outcome sampling: 50% success / 50% failure
 failure action loss: disabled; all other enabled losses remain active
 ```
 
-At launch, commit `406f80d` was checked out on 190. The first healthy log point
-was step 40/4000 at roughly 30.5 samples/s with about 31 GiB free on each B200.
-Always inspect the live log before reporting current progress.
+At launch, commit `406f80d` was checked out on 190. Training completed at step
+4000 with launcher exit code 0 and produced the complete checkpoint at:
+
+```text
+/data3/hongjia/robonana/experiments/hanging_mug_mc_posttrain_550success_50replay_from160k_4k/models/checkpoint_epoch_2_step_4000
+```
+
+The subsequent 25-episode `demo_clean` evaluation completed with 9 successes
+and 16 failures, for a 36% success rate and no infrastructure errors. It wrote
+25 HDF5 episodes plus a complete index and normalization statistics under:
+
+```text
+evaluation: /data3/hongjia/robonana/outputs/hanging_mug_mc_posttrain_550success_step4000_eval25_capture
+rollouts: /data3/hongjia/robonana_rollouts/hanging_mug_mc_posttrain_550success_step4000_eval25_capture
+```
+
+The local-only return-overlay pipeline also completed with 125 videos, 125
+telemetry JSON files, and 125 manifest rows. The groups are 50 `expert_clean`,
+50 `collected_pre_5of50`, and 25 `mc_posttrain_550success_eval25` episodes:
+
+```text
+/data3/hongjia/robonana/outputs/hanging_mug_mc_posttrain_550success_step4000_overlay125_20260903
+```
+
+Its final status is `complete_local_only`; these artifacts were not uploaded to
+Hugging Face. Always inspect the live process and output state before reporting
+current progress or launching another run.
 
 ### Previous mixed-index run
 
