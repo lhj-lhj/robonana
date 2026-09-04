@@ -6,9 +6,14 @@ from typing import Any
 
 import numpy as np
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from world_action_model.image_layouts import ROBOTWIN_VIEW_KEYS
+
+
+RECORDED_VIDEO_SIZE = (320, 240)
+RECORDED_OVERLAY_HEIGHT = 42
+_RECORDED_OVERLAY_FONT = ImageFont.load_default()
 
 
 def decoded_frame_to_uint8(frame: torch.Tensor) -> torch.Tensor:
@@ -116,6 +121,8 @@ def annotate_recorded_frame(
         frame_uint8.permute(1, 2, 0).contiguous().numpy(),
         mode="RGB",
     )
+    if image.size != RECORDED_VIDEO_SIZE:
+        image = image.resize(RECORDED_VIDEO_SIZE, resample=Image.Resampling.BILINEAR)
     draw = ImageDraw.Draw(image)
     identity = f"group={group} episode={episode_index:03d} frame={frame_index:04d}"
     if chunk_index is None:
@@ -125,7 +132,10 @@ def annotate_recorded_frame(
             f"chunk={chunk_index + 1:03d} h={horizon:02d}/{action_chunk:02d} "
             f"reward_h={float(reward):.5f} Q_h={float(q):.5f}"
         )
-    draw.rectangle((0, 0, image.width, 42), fill=(0, 0, 0))
-    draw.text((6, 4), identity, fill=(255, 255, 255))
-    draw.text((6, 22), returns, fill=(255, 255, 255))
+    draw.rectangle(
+        (0, 0, image.width - 1, RECORDED_OVERLAY_HEIGHT - 1),
+        fill=(0, 0, 0),
+    )
+    draw.text((6, 4), identity, fill=(255, 255, 255), font=_RECORDED_OVERLAY_FONT)
+    draw.text((6, 22), returns, fill=(255, 255, 255), font=_RECORDED_OVERLAY_FONT)
     return image
