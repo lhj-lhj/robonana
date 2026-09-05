@@ -1258,7 +1258,7 @@ class RoboNanaTrainer(Trainer):
         return losses
 
     def forward_step(self, batch_dict: dict[str, Any]):
-        if self.mac_enabled:
+        if getattr(self, "mac_enabled", False):
             return self._forward_step_mac(batch_dict)
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
         current = batch_dict["current_latents"].to(device=self.device, dtype=self.dtype)

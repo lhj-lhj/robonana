@@ -161,7 +161,7 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
             ],
             dim=0,
         )
-        if self.inference_mode is InferenceMode.ACTION_Q_REJECTION:
+        if getattr(self, "inference_mode", InferenceMode.ACTION) is InferenceMode.ACTION_Q_REJECTION:
             noise_rows = []
             for batch_index, seed in enumerate(sampling_seeds):
                 candidates = []
