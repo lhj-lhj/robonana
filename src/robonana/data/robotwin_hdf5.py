@@ -569,7 +569,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         return self.records[episode_pos], int(index - self.episode_starts[episode_pos])
 
     def _sample_horizon(self) -> int:
-        if self.q_target_mode == "mac_v1":
+        if getattr(self, "q_target_mode", "legacy") == "mac_v1":
             return self.action_chunk
         if self.fixed_horizon:
             return self.fixed_horizon
