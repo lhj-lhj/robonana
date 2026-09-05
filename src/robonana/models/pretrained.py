@@ -16,7 +16,9 @@ from .checkpoint_config import (
     discover_model_config,
     resolve_checkpoint_config,
 )
-from .flux2_fact import Flux2FACTModel, MacFlux2FACTModel
+from .flux2_fact import Flux2FACTModel
+from .flux2_scalar_expert import initialize_scalar_expert_from_flux
+from .mac_flux2_fact import MacFlux2FACTModel
 
 
 ROBOT_MODULE_NAMES = (
@@ -55,10 +57,9 @@ OPTIONAL_DINO_MODULE_NAMES = (
     "dino_segment_embed",
 )
 MAC_MODULE_NAMES = (
-    "value_token",
-    "q_token",
-    "mac_segment_embed",
-    "value_out",
+    "actor_world_segment_embed",
+    "value_expert",
+    "q_expert",
 )
 
 
@@ -85,10 +86,14 @@ def robot_parameter_names(model: Flux2FACTModel) -> tuple[str, ...]:
 
 
 def configure_trainable_parameters(model: Flux2FACTModel, mode: str) -> tuple[str, ...]:
-    """Select either a full shared-DiT update or the low-memory wiring smoke mode."""
+    """Select the exact optimizer surface for legacy or two-phase MAC training."""
 
+    if isinstance(model, MacFlux2FACTModel):
+        if mode not in {"world_policy", "critic"}:
+            raise ValueError("mac_mot_v2 train_mode must be world_policy or critic")
+        return model.set_training_phase(mode)
     if mode not in {"full", "adapters"}:
-        raise ValueError(f"train mode must be 'full' or 'adapters', got {mode!r}")
+        raise ValueError(f"legacy train mode must be 'full' or 'adapters', got {mode!r}")
     robot_names = set(robot_parameter_names(model))
     for name, parameter in model.named_parameters():
         parameter.requires_grad_(mode == "full" or name in robot_names)
@@ -108,13 +113,14 @@ def initialize_flux2_fact_model(
     architecture_version: str = "legacy_v1",
     chunk_horizon: int = 48,
     value_dim: int = 1,
+    expert_hidden_dim: int | None = None,
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params,
 ) -> Flux2FACTModel:
     """Initialize a scratch RoboNana model from the official FLUX.2 modules."""
 
-    if architecture_version == "mac_v1":
+    if architecture_version == "mac_mot_v2":
         model = MacFlux2FACTModel(
             params,
             action_dim=action_dim,
@@ -125,6 +131,7 @@ def initialize_flux2_fact_model(
             q_dim=q_dim,
             value_dim=value_dim,
             dino_dim=dino_dim,
+            expert_hidden_dim=expert_hidden_dim,
         )
     elif architecture_version == "legacy_v1":
         model = Flux2FACTModel(
@@ -157,6 +164,7 @@ def load_flux2_fact_checkpoint(
     architecture_version: str = "legacy_v1",
     chunk_horizon: int = 48,
     value_dim: int = 1,
+    expert_hidden_dim: int | None = None,
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params | None = None,
@@ -170,7 +178,7 @@ def load_flux2_fact_checkpoint(
     params = Klein4BParams() if params is None else params
 
     with torch.device("meta"):
-        if architecture_version == "mac_v1":
+        if architecture_version == "mac_mot_v2":
             model = MacFlux2FACTModel(
                 params,
                 action_dim=action_dim,
@@ -181,6 +189,7 @@ def load_flux2_fact_checkpoint(
                 value_dim=value_dim,
                 chunk_horizon=chunk_horizon,
                 dino_dim=dino_dim,
+                expert_hidden_dim=expert_hidden_dim,
             ).to(dtype=dtype)
         elif architecture_version == "legacy_v1":
             model = Flux2FACTModel(
@@ -240,6 +249,7 @@ def load_flux2_fact_trained_checkpoint(
     architecture_version: str | None = None,
     chunk_horizon: int | None = None,
     value_dim: int | None = None,
+    expert_hidden_dim: int | None = None,
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params | None = None,
@@ -268,6 +278,7 @@ def load_flux2_fact_trained_checkpoint(
         architecture_version=architecture_version,
         chunk_horizon=chunk_horizon,
         value_dim=value_dim,
+        expert_hidden_dim=expert_hidden_dim,
     )
     model_config = replace(
         source_config,
@@ -288,7 +299,7 @@ def load_flux2_fact_trained_checkpoint(
     state_dict = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
 
     with torch.device("meta"):
-        if model_config.architecture_version == "mac_v1":
+        if model_config.architecture_version == "mac_mot_v2":
             model = MacFlux2FACTModel(
                 model_config.params,
                 action_dim=model_config.action_dim,
@@ -299,6 +310,7 @@ def load_flux2_fact_trained_checkpoint(
                 q_dim=model_config.q_dim,
                 value_dim=model_config.value_dim,
                 dino_dim=model_config.dino_dim,
+                expert_hidden_dim=model_config.expert_hidden_dim,
             ).to(dtype=dtype)
         else:
             model = Flux2FACTModel(
@@ -320,7 +332,7 @@ def load_flux2_fact_trained_checkpoint(
         if name.startswith("value_in.") or name.startswith("value_out.")
     )
     initialized_robot_parameters: tuple[str, ...] = ()
-    if model_config.architecture_version == "mac_v1":
+    if model_config.architecture_version == "mac_mot_v2":
         incompatible = model.load_state_dict(state_dict, strict=True, assign=True)
         if incompatible.missing_keys or incompatible.unexpected_keys:
             raise RuntimeError(
@@ -439,6 +451,7 @@ def load_mac_from_legacy_checkpoint(
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params | None = None,
+    expert_hidden_dim: int | None = None,
 ) -> tuple[MacFlux2FACTModel, PretrainedLoadReport]:
     """Warm-start MAC from 120k while excluding obsolete project heads.
 
@@ -470,6 +483,7 @@ def load_mac_from_legacy_checkpoint(
             value_dim=value_dim,
             chunk_horizon=chunk_horizon,
             dino_dim=dino_dim,
+            expert_hidden_dim=expert_hidden_dim,
         ).to(dtype=dtype)
 
     target_state = model.state_dict()
@@ -518,6 +532,8 @@ def load_mac_from_legacy_checkpoint(
     if meta_parameters:
         raise RuntimeError(f"parameters remained on the meta device: {meta_parameters}")
     model.to(device=device, dtype=dtype)
+    copied_v, resized_v = initialize_scalar_expert_from_flux(model.value_expert, model)
+    copied_q, resized_q = initialize_scalar_expert_from_flux(model.q_expert, model)
     checkpoint_parameters = sum(tensor.numel() for tensor in state_dict.values())
     initialized = tuple(sorted(name for name in missing if name in dict(model.named_parameters())))
     target_config = replace(
@@ -532,15 +548,17 @@ def load_mac_from_legacy_checkpoint(
         dino_dim=None if dino_dim is None else int(dino_dim),
         pred_action_bidirectional=True,
         legacy_value_dim=None,
-        architecture_version="mac_v1",
+        architecture_version="mac_mot_v2",
         chunk_horizon=int(chunk_horizon),
         value_dim=int(value_dim),
+        expert_hidden_dim=int(model.expert_hidden_dim),
         source=f"MAC migration from {Path(config_path).expanduser().resolve()}",
     )
     warnings.warn(
-        "Loaded the legacy 120k FLUX/action/state/image weights into mac_v1; "
+        "Loaded the legacy 120k FLUX/action/state/image weights into mac_mot_v2; "
         f"skipped {len(skipped)} obsolete project tensors and initialized "
-        f"{len(initialized)} MAC tensors.",
+        f"{len(initialized)} MAC tensors. ImageWAM-style expert init: "
+        f"V copied/resized={copied_v}/{resized_v}, Q={copied_q}/{resized_q}.",
         UserWarning,
         stacklevel=2,
     )

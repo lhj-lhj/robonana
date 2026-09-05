@@ -9,30 +9,34 @@ FLUX.2 implementations external and contains only the adapters, masks, cache
 contracts, losses, training hooks, and RoboTwin integration needed by the current
 experiment.
 
-## Current fixed-48 MAC experiment (`mac_v1`)
+## Current fixed-48 MAC experiment (`mac_mot_v2`)
 
 The maintained RL entrypoint is
 `robonana.configs.robotwin_flux2_4b_mac_from120k.config`. It uses a fixed
-48-step action chunk, one H=1 learned-world rollout per update, deterministic
-scalar Value/Q heads, one query that emits 48 binary reward logits, an always-on
-FP32 EMA model, M=8 action candidates during training, and M=32 Q-rejection
-sampling during environment inference.
+48-step action chunk, one H=1 learned-world rollout per critic batch,
+deterministic scalar Value/Q MoT experts, one query that emits 48 binary reward
+logits, a target/EMA copy of the Value expert only, M=8 candidates during
+training, and M=32 Q-rejection sampling during environment inference.
 
 The exact MAC token order is:
 
 ```text
-[language | state | current_image_vae | Value | pred_action |
- gt_action_full_clean | Q | reward | success | future_state | future_image_vae]
+[language | state | current_image_vae | pred_action | clean_action_chunk |
+ reward | success | future_state | future_image_vae]
 ```
 
-There is no `idx_h` token in `mac_v1`; `future_state` and `future_image_vae`
-always refer to the clipped `t+48` observation. See
+There is no `idx_h` token in `mac_mot_v2`; `future_state` and
+`future_image_vae` always refer to the clipped `t+48` observation. Value and Q
+are not tokens in this sequence. Their one-query experts read detached
+per-layer K/V from the frozen FLUX backbone: Value uses
+`[language,state,current_image]`, while Q additionally uses the complete clean
+48-action chunk. See
 [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact non-leaking attention
 dependencies.
 
 The first MAC round warm-starts from the immutable 120k run. Its loader keeps
 the official FLUX.2 backbone and shape-compatible action/state/image adapters,
-but explicitly skips old horizon/segment/DINO/Value and other project heads.
+but explicitly skips old horizon/segment/DINO/Value/Q and other project heads.
 Later MAC rounds use exact `trained` loading from the prior MAC run and its
 saved `config.json`.
 
@@ -128,89 +132,35 @@ DINO is a final one-way auxiliary sink, so earlier tokens cannot depend on it.
 Inference omits the DINO suffix and uses the unchanged action and future-image
 samplers.
 
-### What reward, success, accumulated reward, and Q mean
+### Reward, success, Value, and Q semantics
 
-The two scalar heads have different semantics. Let the sampled current frame be
-`t`, let the requested horizon be `h = idx_h`, and define
+In the retained `legacy_v1` pretraining path, `idx_h` is still sampled from
+`1..48`; its reward/success/Q targets keep their historical meanings for
+checkpoint compatibility.
 
-$$
-t_h = \min(t+h, T-1), \qquad
-\delta = \sum_{j=t}^{t_h-1}\mathrm{transition\_valid}_j.
-$$
+The maintained `mac_mot_v2` path always uses a complete 48-step chunk. Its
+world model predicts 48 Bernoulli reward logits and one endpoint-success logit.
+For logit `ell_j`, the expected step reward is
+`-1 + sigmoid(ell_j)`, and the discounted chunk reward is
 
-For an original successful demonstration every transition is valid, so
-`delta = t_h - t`. Replay episodes use the stored `transition_valid` vector so
-clipped padding and a reset observation never count as real robot transitions.
-`future_state`, future FLUX-AE latent, and future DINO target are all the single
-observation at `t_h`; they are not the last element of the fixed 48-action
-chunk.
+```text
+R_chunk = sum(j=0..47, gamma^j * (-1 + sigmoid(ell_j)))
+```
 
-RoboNana uses `gamma = 0.999`. The model's direct `reward_h` output is attached
-to the selected future state: `-1` for a nonterminal state and `0` for the true
-successful terminal state. `success_h` is a redundant Bernoulli logit for that
-same terminal event. This intentional duplication provides an explicit
-terminal detector while retaining a scalar reward interface for later tasks
-with non-binary rewards.
+Value and Q are deterministic scalar regressors, not flow variables and not
+probabilities. Value sees only language, state, and the current FLUX-AE image.
+Q sees the same context plus the complete clean 48-step action chunk. Larger Q
+is better because the step rewards are non-positive.
 
-The dataset separately preserves the accumulated prefix reward (the batch
-field remains named `reward_h`) for TD target construction. It is the discounted
-real reward over the valid behavior-action prefix that reaches `t_h`:
+Critic training follows the original one-rollout MAC target split:
 
-$$
-R_t^{(\delta)} = \sum_{k=0}^{\delta-1}\gamma^{k} r_{t+k}.
-$$
+```text
+V target = R_chunk + gamma^48 * nonterminal * target_value(next_state)
+Q target = R_chunk + gamma^48 * nonterminal * online_value(next_state)
+```
 
-With the current constant step cost this is `0` when `delta=0`, otherwise
-
-$$
-R_t^{(\delta)} = -\frac{1-\gamma^{\delta}}{1-\gamma}.
-$$
-
-For example, a nonterminal `h=48` target still has direct reward `-1` and
-success target `0`, while its accumulated TD prefix reward is `-46.889103` when
-all 48 transitions are valid. At a clipped successful terminal, direct reward
-is `0` and success is `1`; clipped padding adds no transitions to the accumulated
-prefix reward.
-
-The meaning of `Q` depends on the training stage, while its token, adapter,
-head, flow-matching path, and inference API remain unchanged:
-
-#### Successful-demonstration pretraining
-
-The target is the complete Monte Carlo return from the current frame under the
-recorded behavior-policy continuation:
-
-$$
-Q_t^{\mathrm{MC}} =
-\sum_{k=0}^{T-1-t}\gamma^{k} r_{t+k}.
-$$
-
-For a fixed `t`, different sampled horizons can change the direct reward/success
-label and the accumulated prefix reward, but the MC-Q label is the same. At the
-successful final frame, direct reward and Q are zero and success is one.
-
-#### Iterative posttraining
-
-The target is a bootstrapped action-chunk Q:
-
-$$
-y_t^{Q} = R_t^{(\delta)} +
-\gamma^{\delta} (1-d_h^{\mathrm{success}})
-Q_{\bar{\theta}}(s_{t_h},\pi_{\bar{\theta}}(s_{t_h}); h=48).
-$$
-
-The current Q token is conditioned on the current observation and the first
-`h` tokens of the full-clean **recorded behavior action** track `G`. Thus it
-means: discounted return for executing that real action prefix, followed by
-the EMA policy continuation used to build the TD target. A successful
-terminal stops the bootstrap; a failure timeout does not.
-
-No scalar is min-max normalized or the old time-to-go target. Q is not a
-calibrated success probability; under the negative step cost a larger Q (less
-negative and closer to zero) is preferred. Scalar outputs are `[B, 1, 1]` for
-one horizon and `[B, K, 1]` for `K` packed horizons. Inference exposes direct
-`rewards`, sigmoid `success_probs`, and sampled `qs` after flattening the last
-singleton dimension.
+Both targets are stop-gradient. Only the Value expert has a target/EMA copy;
+there is no target Q and no EMA FLUX.
 
 See [docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact upstream reuse
 boundary.
@@ -235,7 +185,6 @@ The supported entrypoint roles are:
 | canonical pretraining | `robonana.configs.robotwin_flux2_4b_dino.config` | frozen DINOv3 targets and DINO flow loss enabled |
 | canonical inference | `scripts/inference_server_robotwin.py` with the trained 4B checkpoint | no DINO encoder, target tokens, sampling, or output |
 | fixed-48 MAC RL | `robonana.configs.robotwin_flux2_4b_mac_from120k.config` | DINO disabled; deterministic V/Q plus binary chunk reward |
-| iterative posttraining | `robonana.configs.robotwin_flux2_4b_dino_posttrain.config` | same training-only DINO supervision |
 | test/smoke only | `robonana.configs.robotwin_flux2_800m_dino.config` | smaller scratch backbone for fast validation |
 
 “No-DINO inference” describes the execution graph, not a second loosely loaded
@@ -365,23 +314,6 @@ steps (`16 x 8 x 2 = 256` global batch). AdamW applies `2e-5` to the pretrained
 FLUX backbone and `1e-4` to RoboNana heads, token embeddings, and DINO adapters;
 both groups share the same warmup/cosine multiplier.
 
-To warm-start the direct reward/success heads from the existing 150k reward/Q
-checkpoint while preserving the trained FLUX, action, state, Q, image, and DINO
-weights, run the continuation. On two B200s, local batch 16 gives global batch
-32 while leaving safe activation headroom:
-
-```bash
-export ROBONANA_GPU_IDS=6,7
-export ROBONANA_BATCH_SIZE=16
-export ROBONANA_ADDITIONAL_STEPS=10000
-bash scripts/run_robotwin_train.sh \
-  --config robonana.configs.robotwin_flux2_4b_dino_reward_success_q_from150k.config
-```
-
-The old flow-matched `reward_in/reward_out` tensors are explicitly skipped with
-a warning; the direct reward query/head and success query/head are newly
-initialized. This is an initialization run, not an optimizer-state resume.
-
 The 800M scratch+DINO path must always be requested explicitly and is intended
 only for tests, smoke runs, and small ablations:
 
@@ -404,12 +336,13 @@ never guessed from checkpoint tensor shapes.
 
 ## Inference modes
 
-`scripts/inference_server_robotwin.py --inference-mode <mode>` exposes four
-strict graphs:
+`scripts/inference_server_robotwin.py --inference-mode <mode>` exposes the
+legacy first-stage/world graphs plus the maintained MAC rejection graph:
 
 | mode | action source | Stage-2 horizons | future image |
 |---|---|---|---|
 | `action` | Stage-1 diffusion | none | none |
+| `action_q_rejection` | M Stage-1 samples, online-Q argmax | none | none |
 | `action_reward_q` | Stage-1 diffusion | `h=T` first; expand `1..T` only if `success_T` is positive | omitted |
 | `world_all` | request `action_chunk` | all `1..T` in packed horizon batches | FLUX latent + decoded pixels |
 | `world_horizon` | request `action_chunk` | request scalar `horizon` | FLUX latent + decoded pixels |
@@ -709,403 +642,116 @@ episodes.
 
 ## Fixed-48 MAC training and selected-policy loop
 
-For each real batch, the shared model learns the behavior-conditioned future
-image/state, 48 binary reward labels, and terminal-success label. Action BC is
-masked to successful episodes only. The trainer then samples M=8 independent
-BC chunks, selects the largest deterministic `Q(s,a)`, and performs one learned
-world transition. If reward logits are `ell_0..ell_47`, the imagined per-step
-reward and one-chunk return are
+One training round has two serial phases. The launcher never trains both
+surfaces with the same optimizer:
+
+1. `world_policy`: train the single FLUX actor/world model on real replay.
+   Successful samples train action BC. Failed samples have zero action-loss
+   weight. Both outcomes always train reward, success, future-state, and
+   future-image losses.
+2. `critic`: freeze every FLUX actor/world parameter, perform exactly one
+   fresh H=1 learned-world rollout, and train only the online Value and Q
+   experts. After a successful optimizer step, update the FP32 target Value
+   expert. There is no target Q and no EMA copy of FLUX.
+
+The actor/world sequence is:
+
+```text
+[language | state | current_image_vae | pred_action | clean_action_chunk |
+ reward | success | future_state | future_image_vae]
+```
+
+The learned cascade is
+`reward -> success -> future_state -> future_image_vae`. Each Value/Q expert
+owns one learned query and follows ImageWAM's slim-FLUX cached-attention
+structure. Per-layer K/V comes from the frozen main FLUX. Value caches
+`[language,state,current_image]`; Q additionally caches the complete clean
+action chunk. The expert implementation and initialization cite the pinned
+ImageWAM source revision directly in
+`src/robonana/models/flux2_scalar_expert.py`.
+
+For one imagined selected action, let
 
 $$
 \hat r_j=-1+\operatorname{sigmoid}(\ell_j),\qquad
-\hat R_{48}=\sum_{j=0}^{47}\gamma^j\hat r_j.
+\hat R_{48}=\sum_{j=0}^{47}\gamma^j\hat r_j,
 $$
 
-With H=1, the detached target used by deterministic Value and Q is
+and let the hard nonterminal mask be zero when the predicted endpoint success
+probability is at least 0.5. The detached regression targets are
 
 $$
-y=\hat R_{48}+\gamma^{48}
-  \left(1-\operatorname{sigmoid}(\hat u)\right)
-  V_{\bar\theta}(\hat s_{t+48}),
+y^V=\hat R_{48}+\gamma^{48}m\,
+V_{\bar\phi}(\hat s_{t+48}),\qquad
+y^Q=\hat R_{48}+\gamma^{48}m\,
+V_{\phi}(\hat s_{t+48}).
 $$
 
-where `bar(theta)` is the always-on FP32 EMA. This follows the official MAC
-first-rollout critic update: the initial observation comes from the real batch,
-while the selected action, reward, and next observation are imagined. Value/Q
-are normalized only at the regression boundary by `return_scale=1000`; neither
-is sampled as a flow token.
+This matches the original MAC implementation: online Q is trained against the
+online Value bootstrap, and only Value has a Polyak target. Code comments link
+the corresponding MAC source lines.
 
-The first round defaults to the immutable 120k source:
+The first round migrates from the immutable step-120000 checkpoint:
+
+```text
+experiments/robotwin_flux2_4b_dino_grouped_lr_A_bidir_G_causal_bs256_120k/
+  models/checkpoint_epoch_6_step_120000/transformer/diffusion_pytorch_model.bin
+```
+
+The loader reconstructs that checkpoint from its saved experiment
+`config.json`, whitelists FLUX plus compatible action/state/image adapters,
+skips every old project head, and initializes each slim expert from FLUX using
+ImageWAM's axis-wise interpolation and alpha scaling. Later rounds load the
+preceding `mac_mot_v2` checkpoint exactly.
+
+Run a complete resumable hanging-mug round with:
 
 ```bash
 export ROBONANA_REPLAY_ROOT=/data3/hongjia/robonana_rollouts/hanging_mug_round0_from160k
 export ROBONANA_COLLECTION_ROUND=0
 export ROBONANA_PROJECT_DIR=$PWD/experiments/hanging_mug_mac_round0
-
-bash scripts/run_robotwin_train.sh \
-  --config robonana.configs.robotwin_flux2_4b_mac_from120k.config
+export ROBONANA_MAC_WORLD_POLICY_STEPS=10000
+export ROBONANA_MAC_CRITIC_STEPS=10000
+bash scripts/run_hanging_mug_mac_round.sh
 ```
 
-The default source is
-`experiments/robotwin_flux2_4b_dino_grouped_lr_A_bidir_G_causal_bs256_120k`
-at step 120000. Override it only with both
-`ROBONANA_MAC_PRETRAIN_CHECKPOINT` and `ROBONANA_MAC_PRETRAIN_CONFIG`.
+The script runs the two training phases in order, evaluates the resulting
+critic checkpoint with M=1 and M=32 on the same seeds, collects the M=32
+selected-policy trajectories, refreshes their caches, and writes
+`comparison.json`. Stage completion is recorded under `state/`, so relaunch
+does not repeat completed work. For later rounds it also carries the preceding
+critic's `target_value_expert.safetensors` through the intervening frozen-expert
+world phase, preserving the Value Polyak trajectory.
 
-Environment inference must use Q rejection sampling:
+Environment inference uses online-Q rejection sampling:
 
 ```bash
 export ROBONANA_INFERENCE_MODE=action_q_rejection
 export ROBONANA_REJECTION_CANDIDATE_COUNT=32
-export ROBONANA_Q_RETURN_SCALE=1000
 ```
 
-The rollout writer records all candidate Q values, the selected index, selected
-Q, and Q margin. The four-pool loader sends selected successful trajectories
-back into action BC and uses both successful and failed selected trajectories
-for world/reward/success learning. Failed trajectories have zero action-BC
-weight.
-
-`scripts/run_hanging_mug_mac_round.sh` packages one resumable round: train,
-same-seed M=1 evaluation, M=32 Q-rejection evaluation/collection, cache refresh,
-and `comparison.json`. It appends the M=32 trajectories to the cumulative
-replay with `round_id+1`, so the next invocation closes the BC feedback loop.
-It does not overwrite the 120k source or existing replay episodes.
-
-For a later round, load the previous MAC checkpoint exactly:
-
-```bash
-export ROBONANA_COLLECTION_ROUND=1
-export ROBONANA_MAC_INITIALIZATION=trained
-export ROBONANA_MAC_SOURCE_CHECKPOINT=/path/to/round0/transformer/diffusion_pytorch_model.bin
-export ROBONANA_MAC_SOURCE_CONFIG=/path/to/round0/config.json
-bash scripts/run_hanging_mug_mac_round.sh
-```
-
-## Legacy iterative posttraining
-
-The remainder of this section documents the older `td_posttrain` and
-`mc_posttrain` paths retained for comparison. They use the legacy variable-
-horizon/Q-flow contract and must not be mixed with `mac_v1` checkpoints.
-
-Posttraining changes the source of the Q label and adds policy improvement on
-failed data; it does not add a second network architecture. The online model
-`theta` and target model `theta_bar` are complete copies of the same shared
-FLUX.2+RoboNana model. One round has the following data flow:
-
-```text
-theta_k checkpoint
-  -> collect RoboTwin success/failure rollouts into a separate replay root
-  -> write aligned RGB/state/executed-action/final-observation metadata
-  -> build Qwen3 context + FLUX-AE caches and robonana_index.json
-  -> train theta_(k+1) from four logical pools with EMA theta_bar
-  -> save online, optimizer, scheduler, trainer, EMA, and round state
-```
-
-The implementation remains on the existing FACT/FLUX paths:
-
-| responsibility | maintained implementation |
-|---|---|
-| rollout schema and atomic episode publication | `src/robonana/data/rollout_writer.py` |
-| horizon clipping, valid-transition count, reward/MC labels, replay views, four-pool sampler | `src/robonana/data/robotwin_hdf5.py` |
-| shared action/world Flow-Euler samplers | `src/robonana/sampling.py` |
-| FP32 EMA, best-of-eight search, detached TD target | `src/robonana/training/posttraining.py` |
-| batch wiring, flow corruption, losses, metrics, checkpoint/resume | `src/robonana/training/robotwin_trainer.py` |
-| fixed posttraining contract for both model sizes | `src/robonana/configs/posttrain_config.py` |
-| 4B and 800M entry configs | `src/robonana/configs/robotwin_flux2_4b_dino_posttrain.py`, `src/robonana/configs/robotwin_flux2_800m_dino_posttrain.py` |
-
-`q_target_mode="mc_success"` selects pretraining labels from successful
-demonstrations. `q_target_mode="td_posttrain"` makes the dataset emit a
-placeholder Q; the two posttraining entry configs also enable the trainer path
-that replaces it with the EMA TD target before flow noise is applied. Do not
-set `td_posttrain` on a pretraining config by itself, because the raw dataset
-placeholder is intentionally zero and is not a valid learning target.
-
-`q_target_mode="mc_posttrain"` is the minimal critic-calibration mode. It uses
-the recorded full-episode MC return, keeps Q as a scalar flow target, assigns
-successful terminals `Q=0` and failed terminals `Q=-1000`, and does not run
-EMA bootstrap or best-of-eight action search. Successful samples retain their
-recorded Stage-1 action loss; failure samples have zero action-loss weight.
-
-### Four-pool replay sampler
-
-The initial RoboTwin dataset is never physically merged with collected replay.
-The training dataset is a `ConcatDataset` of four `RoboTwinHDF5Dataset` views,
-and every local batch receives deterministic pool quotas:
-
-| pool id | logical pool | nominal batch share | contents |
-|---:|---|---:|---|
-| 0 | `original_success` | 25% | original successful demonstrations |
-| 1 | `collected_success_replay` | 25% | successful policy rollouts from every round |
-| 2 | `historical_failure_replay` | 25% | failures with `round_id < current_round` |
-| 3 | `latest_failure` | 25% | failures with `round_id == current_round` |
-
-Within each pool the sampler selects task uniformly, then episode uniformly
-within that task, then frame uniformly within that episode. This prevents large
-tasks or long episodes from silently dominating. Fractional quotas are rounded
-with stable largest-remainder allocation. If collected success is empty, its
-25% moves to original success. If historical failure is empty, its 25% moves to
-latest failure. Any other requested-but-empty pool is a hard error. Advancing
-`ROBONANA_COLLECTION_ROUND` reclassifies previous latest failures as historical
-without copying or deleting their files.
-
-Each loaded sample preserves both the current frame and the reset-pre final
-observation required for timeout bootstrap. The important batch fields are:
-
-| field | meaning |
-|---|---|
-| `behavior_action` | normalized 48-step action chunk actually executed in the stored trajectory |
-| `future_state`, `future_latents`, `future_dino_images` | real observation target at clipped `t_h` |
-| `reward`, `success` | direct `-1/0` reward and terminal-success label at `t_h` |
-| `reward_h` | real discounted prefix reward `R_t^(delta)` |
-| `delta_steps` | count of valid environment transitions, excluding clipped padding/reset |
-| `success_terminal_h` | 1 only when `t_h` is the true successful terminal |
-| `time_limit_truncated_h` | 1 when a failed rollout reaches its time limit |
-| `failure_episode_mask` | selects failure-only best-of-eight action distillation |
-| `q_loss_mask` | 1 iff `delta_steps > 0` |
-
-### Failure-only action improvement
-
-Success samples keep the recorded behavior chunk as the Stage-1 action-flow
-target. For each historical or latest failure sample, the following search is
-performed without gradients:
-
-$$
-a_i \sim \pi_\theta(\cdot\mid s_t),\quad i=1,\ldots,8,
-$$
-
-$$
-q_i = Q_{\bar{\theta}}(s_t,a_i;h=48), \qquad i=1,\ldots,8.
-$$
-
-$$
-q_{i_{\mathrm{best}}} = \max_{1\leq i\leq 8} q_i, \qquad
-a^{\mathrm{pseudo}}=a_{i_{\mathrm{best}}}.
-$$
-
-The eight action-noise tensors are independent, while the future-state and Q
-noise used by the EMA world sampler is shared across candidates. Reward and
-success are direct heads and therefore have no sampling noise.
-This common-random-number comparison reduces ranking variance. The existing
-state/reward/success/Q-only Stage-2 path is used, so candidate ranking creates no
-future-image or DINO tokens and does not invoke the VAE.
-
-The best candidate always becomes the noisy predicted-action track `A` target
-for that failure sample. The behavior action is not inserted as a ninth
-candidate, and there is no advantage, confidence, or uncertainty gate. The
-full-clean `G` track always remains the action actually executed in the replay
-trajectory. Consequently:
-
-| prediction/loss | success sample target | failure sample target | conditioning action `G` |
-|---|---|---|---|
-| predicted action | recorded behavior | best-of-8 pseudo action | recorded behavior |
-| future state/image/DINO | recorded future | recorded future | recorded behavior prefix |
-| future-state reward/success | recorded one-state reward and success label | recorded one-state reward and success label | recorded behavior prefix |
-| current Q | EMA TD target | EMA TD target | recorded behavior prefix |
-
-This separation is deliberate: failed data improves the action generator while
-the world and critic targets stay aligned with transitions that actually
-occurred.
-
-### EMA TD target
-
-For every sample from all four pools, the trainer replaces the dataset's Q
-placeholder with a detached TD target. At `s_(t_h)`, EMA first samples one
-48-step continuation action and then samples its Q through the no-image world
-path:
-
-$$
-a' \sim \pi_{\bar\theta}(\cdot\mid s_{t_h}), \qquad
-Q' = Q_{\bar\theta}(s_{t_h},a';h=48).
-$$
-
-The target is
-
-$$
-y_t^{Q} = R_t^{(\delta)} +
-\gamma^{\delta} b_h Q', \qquad
-b_h = 1-d_h^{\mathrm{success}}, \qquad \gamma=0.999.
-$$
-
-Terminal handling is strict:
-
-| case at `t_h` | `b_h` | Q loss | interpretation |
-|---|---:|---:|---|
-| ordinary transition | 1 | enabled | bootstrap from EMA continuation |
-| successful terminal | 0 | enabled when `delta>0` | target is exactly `reward_h` |
-| failed time-limit truncation | 1 | enabled when `delta>0` | bootstrap from stored reset-pre final observation |
-| clipped `delta_steps=0` sample | either | disabled | no fabricated zero-length TD constraint |
-
-Only a successful terminal stops bootstrap. A timeout is a truncation, not a
-terminal success, and the collector must therefore save the final observation
-before reset. The target is computed under `torch.no_grad()` and is independent
-of whether a future version supplies MC, TD, or another scalar target to the
-same Q flow head.
-
-The full-model EMA is rank-local, stored in FP32, excluded from DDP and the
-optimizer, run in eval/no-grad mode with BF16 autocast, and updated only after a
-finite, non-skipped optimizer step:
-
-$$
-\bar\theta \leftarrow 0.995\,\bar\theta + 0.005\,\theta.
-$$
-
-Gradient-accumulation micro-steps do not update EMA. If any rank observes a
-non-finite accumulated loss, every rank cancels that optimizer, scheduler, and
-EMA step together.
-
-### Joint training objective
-
-Actions, future FLUX latents, future state, Q, and DINO targets use the same
-rectified-flow corruption. For clean target `x`, Gaussian noise `epsilon`, and
-sampled noise level `sigma`:
-
-$$
-x_\sigma=(1-\sigma)x+\sigma\epsilon, \qquad
-v^{*}=\epsilon-x.
-$$
-
-The corresponding adapter/head predicts `v*`; inference integrates from
-`sigma=1` pure noise to `sigma=0` clean data with the shared multi-step Euler
-sampler. Q is therefore a scalar flow sample. Reward and success are separate
-direct binary logits. Reward class 0 decodes to `-1`; class 1 decodes to the
-successful-terminal reward `0`. Neither direct head receives its target as input. The
-weighted training objective is
-
-$$
-\mathcal L =
-1.0\mathcal L_{image}
-+10.0\mathcal L_{action}
-+0.4\mathcal L_{state}
-+0.01\mathcal L_{reward}
-+0.01\mathcal L_{success}
-+0.001\mathcal L_Q
-+0.1\mathcal L_{DINO}.
-$$
-
-The flow terms use MSE; direct reward and success use binary cross entropy with
-logits. Reward class 0 decodes to
-`-1` and class 1 decodes to the successful-terminal reward `0`. The action mask is enabled for both success and failure samples after
-the failure pseudo target has been selected; the Q mask excludes only
-`delta_steps=0`. No loss is backpropagated through candidate search, EMA
-next-action sampling, EMA next-Q sampling, or target construction.
-
-### Interpreting Q during inference
-
-`action_reward_q`, `world_all`, and `world_horizon` return direct `rewards`,
-`success_probs`, and sampled `qs` together with the matching `horizons` tensor.
-For a supplied action chunk and horizon `h`:
-
-- the reward entry estimates the one-state reward at the selected future state,
-  while `success_probs` estimates whether that state is a successful terminal;
-- the corresponding Q entry estimates that prefix return plus the learned EMA-policy
-  continuation after the predicted `s_(t+h)`;
-- larger Q is better because step rewards are non-positive;
-- Q must not be interpreted as a probability or added to `reward_h` again—the
-  current Q target already contains `reward_h`;
-- ranking candidate chunks uses `Q(h=48)` directly.
-
-The optimized `action_reward_q` path queries `h=48` first. If its success
-probability is below threshold, it skips horizons 1 through 47 and analytically
-accumulates 48 nonterminal rewards. Only when `success_48` is positive does it
-query all horizons to locate the first predicted terminal and construct the
-discounted accumulated-reward curve.
-
-Before posttraining, Q has the MC-success semantics described in
-[What the reward and Q outputs mean](#what-the-reward-and-q-outputs-mean).
-After posttraining, it has the bootstrapped behavior-prefix semantics above.
-The checkpoint lineage must therefore be recorded when comparing Q values.
-
-### Launch, monitoring, and exact resume
-
-Launch one round from the trained `theta_k` checkpoint:
-
-```bash
-export ROBONANA_REPLAY_ROOT=/path/to/separate/rollout-replay
-export ROBONANA_POSTTRAIN_CHECKPOINT=/path/to/theta_k/transformer/diffusion_pytorch_model.bin
-export ROBONANA_POSTTRAIN_MODEL_CONFIG=/path/to/theta_k/config.json
-export ROBONANA_COLLECTION_ROUND=0
-export ROBONANA_PROJECT_DIR=$PWD/experiments/robotwin_posttrain_round0
-
-# Canonical pretrained Klein 4B + DINO lineage
-bash scripts/run_robotwin_train.sh \
-  --config robonana.configs.robotwin_flux2_4b_dino_posttrain.config
-
-# Test/smoke-only 800M + DINO lineage
-bash scripts/run_robotwin_train.sh \
-  --config robonana.configs.robotwin_flux2_800m_dino_posttrain.config
-```
-
-For the two-source hanging-mug MC calibration experiment, restrict the original
-pool and select only the current collected replay root:
-
-```bash
-export ROBONANA_POSTTRAIN_Q_TARGET_MODE=mc_posttrain
-export ROBONANA_FAILURE_TERMINAL_Q=-1000
-export ROBONANA_POSTTRAIN_ORIGINAL_TASK_GLOBS=Clean/hanging_mug
-export ROBONANA_PIXEL_EVAL_INTERVAL=2000
-export ROBONANA_MAX_STEPS=4000
-```
-
-Its sampler allocates 50% of every batch to success and 50% to failure. The
-success half is split between the 50 original expert episodes and the five
-successful collected episodes; the failure half uses only the 45 failures in
-the selected current replay root. Historical failures receive zero weight.
-
-The posttraining W&B namespace reports pool counts, pseudo/success action sample
-counts, candidate Q mean/std, best and behavior Q, best-minus-behavior Q, TD
-reward/delta/discount/next-Q/target statistics, terminal/timeout/bootstrap
-fractions, Q-mask coverage, EMA update count and online distance, plus candidate
-search and TD target time/peak memory.
-
-Each checkpoint contains the normal online model, optimizer, scheduler, and
-trainer state plus:
-
-```text
-ema_model.safetensors  complete FP32 EMA model state
-ema_state.json         decay, update count, dtype, and collection round
-posttrain_config.json  exact data-mixture/search/TD settings
-```
-
-Resume restores all of them. Loading an older online-only RoboNana checkpoint
-emits the normal load report and initializes EMA by an exact online copy; it
-does not guess or silently synthesize model architecture parameters. The
-bounded two-step GPU smoke is:
-
-```bash
-CUDA_VISIBLE_DEVICES=7 python scripts/smoke_posttraining.py --device cuda:0
-```
-
-For the focused hanging-mug experiment, the resumable orchestration script
-collects the baseline evaluation and rollout replay in one 50-seed simulator
-pass, runs the posttraining round, evaluates the resulting checkpoint, and
-writes `comparison.json`. The replay remains outside the initial dataset:
-
-```bash
-export ROBONANA_PRETRAIN_CHECKPOINT=$PWD/experiments/robotwin_flux2_4b_dino_reward_success_q_from150k_plus10k/models/checkpoint_epoch_1_step_160000/transformer/diffusion_pytorch_model.bin
-export ROBONANA_PRETRAIN_MODEL_CONFIG=$PWD/experiments/robotwin_flux2_4b_dino_reward_success_q_from150k_plus10k/config.json
-export ROBONANA_POSTTRAIN_STEPS=1000
-bash scripts/run_hanging_mug_posttrain_round.sh
-```
-
-The default posttraining run uses physical GPUs 7 and 8 (`CUDA` indices 6 and
-7), local batch 4, serial OIDN evaluation on GPU 8, and the training-seen
-instruction policy. Completed stages are marked under the output `state/`
-directory so a relaunch does not repeat a finished episode. On a fresh round,
-`pretrain_eval.done` and `rollout_replay.done` are published together only after
-the replay caches are complete. A partially completed episode ledger resumes in
-place; run directories produced by the previous two-pass pipeline remain
-supported.
+The policy samples M independent BC action chunks, evaluates deterministic
+online Q for every candidate, and executes the argmax. Candidate Q values,
+selected index, selected Q, and margin are stored in rollout HDF5. On the next
+round, selected successful trajectories participate in action BC; selected
+failures continue to train the world model but never the action loss.
+
+The removed full-model-EMA, scalar-Q flow, `td_posttrain`, and
+`mc_posttrain` launch paths are intentionally unsupported. Only the
+first-stage `legacy_v1` variable-`idx_h` path remains for checkpoint and
+pretraining compatibility.
 
 ## Verification
 
-Executable validation is performed only on `pyromind-west1-58` from a checkout
-under `/workspace/hongjia/robonana`:
+Executable validation is performed on `hongjia@208.64.254.190` from the
+canonical checkout `/data3/hongjia/robonana`:
 
 ```bash
 bash scripts/verify_remote.sh
 
-# Optional real DINO weight/GPU test
-ROBONANA_TEST_REAL_DINO=1 bash scripts/verify_remote.sh
+# Real 120k migration and frozen-FLUX critic gradient test
+python scripts/validate_mac_mot_v2_checkpoint.py --checkpoint <120k-bin> \
+  --model-config <120k-config.json> --device cuda:0 --smoke-forward
 ```
 
 Data, caches, checkpoints, outputs, logs, credentials, and upstream source trees

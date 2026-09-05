@@ -53,14 +53,27 @@ def test_mac_migration_from_120k_loads_compatible_weights_only(tmp_path):
             params=_tiny_params(),
         )
 
-    assert model.architecture_version == "mac_v1"
+    assert model.architecture_version == "mac_mot_v2"
     assert model.reward_out.weight.shape == (48, model.hidden_size)
     torch.testing.assert_close(model.action_in.weight, source.action_in.weight)
     torch.testing.assert_close(model.state_out.weight, source.state_out.weight)
     assert "action_in.weight" in report.loaded_parameter_names
     assert "q_out.weight" in report.skipped_checkpoint_parameters
     assert "horizon_embed.weight" in report.skipped_checkpoint_parameters
-    assert any(name.startswith("value_token.") for name in report.initialized_robot_parameters)
+    assert any(name.startswith("value_expert.") for name in report.initialized_robot_parameters)
+    assert any(name.startswith("q_expert.") for name in report.initialized_robot_parameters)
+    assert not hasattr(model, "value_token")
+    assert not hasattr(model, "q_token")
+    # Tiny test dimensions match exactly, so ImageWAM-style initialization is
+    # an exact copy of the loaded FLUX image branch for both experts.
+    torch.testing.assert_close(
+        model.value_expert.double_blocks[0].img_attn.qkv.weight,
+        model.double_blocks[0].img_attn.qkv.weight,
+    )
+    torch.testing.assert_close(
+        model.q_expert.single_blocks[0].linear1.weight,
+        model.single_blocks[0].linear1.weight,
+    )
 
 
 def _tiny_params():

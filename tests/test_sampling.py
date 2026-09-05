@@ -14,7 +14,7 @@ from robonana.sampling import (
 
 
 class _FakeMacModel:
-    architecture_version = "mac_v1"
+    architecture_version = "mac_mot_v2"
     chunk_horizon = 48
     action_dim = 2
 
@@ -32,14 +32,23 @@ class _FakeMacModel:
             if clean_action.shape[1]
             else torch.zeros(batch, 1, device=device)
         )
+        value = torch.full((batch, 1), self.value, device=device, dtype=dtype)
+        if kwargs.get("critic_kind") == "both":
+            return value, q.to(device=device, dtype=dtype)
         return SimpleNamespace(
             action=torch.zeros_like(action),
             image=torch.zeros_like(kwargs["noisy_future_latents"]),
             future_state=torch.zeros_like(kwargs["noisy_future_state"]),
             reward=torch.zeros(batch, 48, device=device, dtype=dtype),
-            success=torch.zeros(batch, 1, device=device, dtype=dtype),
-            q=q.to(device=device, dtype=dtype),
-            value=torch.full((batch, 1), self.value, device=device, dtype=dtype),
+            success=torch.full((batch, 1), -20.0, device=device, dtype=dtype),
+            q=None,
+            value=None,
+        )
+
+    def predict_value(self, *, context, expert=None, **kwargs):
+        value = self.value if expert is None else expert.value
+        return torch.full(
+            (context.shape[0], 1), value, device=context.device, dtype=context.dtype
         )
 
 
@@ -74,11 +83,11 @@ def test_q_rejection_returns_argmax_candidate():
 
 def test_h1_imaginary_target_uses_binary_reward_curve_and_ema_value():
     online = _FakeMacModel()
-    ema = _FakeMacModel(value=0.1)
+    target_value = SimpleNamespace(value=0.1)
     discount = 0.9
     rollout = generate_mac_imaginary_rollout_h1(
         online_model=online,
-        ema_model=ema,
+        target_value_expert=target_value,
         context=torch.zeros(1, 1, 3),
         current_latents=torch.zeros(1, 1, 4),
         state=torch.zeros(1, 1, 2),
@@ -96,11 +105,21 @@ def test_h1_imaginary_target_uses_binary_reward_curve_and_ema_value():
         grid_width=1,
     )
     expected_reward = -0.5 * sum(discount**step for step in range(48))
-    expected = expected_reward + discount**48 * 0.5 * 100.0
+    expected_value = expected_reward + discount**48 * 100.0
     torch.testing.assert_close(
-        rollout.target_return, torch.tensor([[expected]]), atol=1e-5, rtol=1e-5
+        rollout.value_target_return,
+        torch.tensor([[expected_value]]),
+        atol=1e-5,
+        rtol=1e-5,
     )
-    assert not rollout.target_return.requires_grad
+    torch.testing.assert_close(
+        rollout.q_target_return,
+        torch.tensor([[expected_reward]]),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    assert not rollout.value_target_return.requires_grad
+    assert not rollout.q_target_return.requires_grad
 
 
 def test_flow_euler_schedule_runs_from_pure_noise_to_clean():

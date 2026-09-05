@@ -36,19 +36,20 @@ def test_rollout_collector_separates_policy_and_simulator_gpus() -> None:
     assert "ROBONANA_ROBOTWIN_STATIC_CAMERAS" in script
 
 
-def test_hanging_mug_fresh_round_combines_eval_and_replay_collection() -> None:
+def test_hanging_mug_round_serializes_world_then_critic_then_collection() -> None:
     script = (
         Path(__file__).resolve().parents[1]
         / "scripts"
-        / "run_hanging_mug_posttrain_round.sh"
+        / "run_hanging_mug_mac_round.sh"
     ).read_text(encoding="utf-8")
 
-    combined_guard = (
-        "if [[ ! -f ${state_dir}/pretrain_eval.done \\\n"
-        "  && ! -f ${state_dir}/rollout_replay.done ]]; then"
+    assert "ROBONANA_MAC_PHASE=world_policy" in script
+    assert "ROBONANA_MAC_PHASE=critic" in script
+    assert "target_value_expert.safetensors" in script
+    assert 'ROBONANA_MAC_TARGET_VALUE_CHECKPOINT="${target_value_checkpoint}"' in script
+    assert script.index('touch "${state_dir}/world_policy.done"') < script.index(
+        'touch "${state_dir}/critic.done"'
     )
-    assert combined_guard in script
-    assert 'collect_and_prepare_replay 1 "${pre_eval_dir}"' in script
-    assert script.index('touch "${state_dir}/pretrain_eval.done"') < script.index(
-        'touch "${state_dir}/rollout_replay.done"'
+    assert script.index('touch "${state_dir}/critic.done"') < script.index(
+        "run_ranked_eval 1"
     )

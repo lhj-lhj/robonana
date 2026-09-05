@@ -279,16 +279,16 @@ class RoboNanaRobotWinPolicy:
         self.model.eval().requires_grad_(False)
         if (
             self.inference_mode is InferenceMode.ACTION_Q_REJECTION
-            and getattr(self.model, "architecture_version", None) != "mac_v1"
+            and getattr(self.model, "architecture_version", None) != "mac_mot_v2"
         ):
-            raise ValueError("action_q_rejection requires a mac_v1 checkpoint")
+            raise ValueError("action_q_rejection requires a mac_mot_v2 checkpoint")
         if (
-            getattr(self.model, "architecture_version", None) == "mac_v1"
+            getattr(self.model, "architecture_version", None) == "mac_mot_v2"
             and self.inference_mode
             not in {InferenceMode.ACTION, InferenceMode.ACTION_Q_REJECTION}
         ):
             raise ValueError(
-                "mac_v1 live inference currently supports action or action_q_rejection"
+                "mac_mot_v2 live inference supports action or action_q_rejection"
             )
         self.vae = AutoencoderKLFlux2.from_pretrained(
             self.flux_checkpoint_dir,

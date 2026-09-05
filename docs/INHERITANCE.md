@@ -1,129 +1,120 @@
-# Inheritance and reuse map
+# RoboNana inheritance and model boundary
 
-## Runtime graph
+RoboNana keeps one official FLUX.2 backbone and adds robot-specific adapters,
+world heads, masks, and deterministic critic experts. It does not vendor or
+fork FACT, FLUX.2, MAC, or ImageWAM source.
 
-```text
-RoboTwinLeRobotDataset (initial FACT RoboTwin-v2)
-  or RoboTwinHDF5Dataset (separate policy rollouts)
-  -> FACT sampler + DefaultCollator + Trainer
-    -> Flux2FACTModel or MacFlux2FACTModel (subclasses official Flux2)
-      -> existing Flux2.double_blocks
-      -> existing Flux2.single_blocks
-      -> existing Flux2.final_layer for image output
-      -> small action/state/Value/reward/success/Q heads
-```
+## Upstream reuse
 
-## Reused without copying
-
-| Upstream | Reused code | RoboNana extension |
+| Upstream | Reused directly | RoboNana-owned extension |
 |---|---|---|
-| FACT | sampler registry and `DefaultCollator` | LeRobot-v2 initial-data adapter and raw-HDF5 rollout adapter |
-| FACT | `Trainer` loop, Accelerate/DeepSpeed, optimizer, checkpoint and logging | FLUX-specific forward/eval hooks |
-| FLUX.2 | `Flux2`, image/text projections, RoPE and modulation | `Flux2FACTModel` / `MacFlux2FACTModel` subclasses |
-| FLUX.2 | all `DoubleStreamBlock` parameters | masked forward using existing private helpers |
-| FLUX.2 | all `SingleStreamBlock` parameters | masked forward using existing private helpers |
-| FLUX.2 | image `final_layer` | action/state/Value/reward/success/Q heads |
+| FACT | collator, trainer lifecycle, Accelerate/DeepSpeed integration | RoboTwin loaders, losses, eval and checkpoint hooks |
+| FLUX.2 | text/image projections, RoPE, modulation, double/single blocks, image final layer | action/state projections, token layout and attention masks |
+| MAC | one-rollout targets, online-Q action selection, Value-only target update | fixed-48 RoboTwin reward and world-model wiring |
+| ImageWAM | MoT expert shape, `prepare_qkv -> mixed attention -> apply_post`, slim initialization policy | one-query deterministic scalar Value/Q experts |
 
-The adapters add action/state projections, learned query and segment tokens,
-and small output heads. There is no MoT, ActionDiT, or second transformer
-backbone.
+Pinned ImageWAM reference:
 
-## Current fixed-chunk MAC token order
+- https://github.com/yuyangalin/ImageWAM/tree/5d4a341ed20a95cdb08f0293f3d44778b9a9e05a
+- https://github.com/yuyangalin/ImageWAM/blob/5d4a341ed20a95cdb08f0293f3d44778b9a9e05a/src/imagewam/models/backbones/action_dit_flux2.py
+- https://github.com/yuyangalin/ImageWAM/blob/5d4a341ed20a95cdb08f0293f3d44778b9a9e05a/src/imagewam/models/backbones/mot.py#L612-L745
+- https://github.com/yuyangalin/ImageWAM/blob/5d4a341ed20a95cdb08f0293f3d44778b9a9e05a/scripts/flux2/preprocess_action_dit_flux2.py
+
+Original MAC reference:
+
+- https://github.com/kwanyoungpark/MAC/blob/main/agents/mac.py#L191-L217
+- https://github.com/kwanyoungpark/MAC/blob/main/agents/mac.py#L262-L318
+
+The implementation files repeat these links next to the adapted logic.
+
+## Maintained `mac_mot_v2` model
+
+The actor/world FLUX sequence is exactly:
 
 ```text
-[language | state | current image VAE | Value | predicted action |
- clean action chunk | Q | reward | success | future state | future image VAE]
+[language | state | current_image_vae | pred_action | clean_action_chunk |
+ reward | success | future_state | future_image_vae]
 ```
 
-`mac_v1` has one fixed 48-step chunk and no `idx_h` token. The maintained MAC
-training config disables DINO. The model implementation can append an optional
-training-only DINO sink after `future image VAE`, but no earlier output may read
-it.
+It has a fixed action horizon of 48 and no `idx_h`, Value, Q, or DINO token.
+With `C=[language,state,current_image]`, `A=pred_action`, and
+`G=clean_action_chunk`, the shared-FLUX dependencies are:
 
-The mask is applied in every reused FLUX.2 double-stream and single-stream
-block. With `C = [language, state, current image]`, `A = predicted action`, and
-`G = clean action chunk`, the allowed dependencies are:
-
-| query | readable keys |
+| Query | Readable keys |
 |---|---|
-| `Value` | `C` and its own query token |
-| `A` | `C` and all 48 `A` tokens |
-| `G` | `C` and all 48 `G` tokens |
-| `Q` | `C`, all 48 `G` tokens, and its own query token |
-| `reward` | `C`, all 48 `G` tokens, and reward |
-| `success` | `C`, all 48 `G` tokens, reward, and success |
-| `future state` | `C`, all 48 `G` tokens, reward, success, and future state |
-| `future image` | `C`, all 48 `G` tokens, reward, success, future state, and future image |
+| `C` | `C` |
+| `A` | `C,A` |
+| `G` | `C,G` |
+| reward | `C,G,reward` |
+| success | `C,G,reward,success` |
+| future state | `C,G,reward,success,future state` |
+| future image | `C,G,reward,success,future state,future image` |
 
-Reward, success, future state, and future image cannot read Value, predicted
-action, or Q. Q cannot read reward, success, or either future. Value cannot
-read either action track. Value and Q are deterministic scalar heads; they are
-not flow-corrupted or sampled.
+The predicted-action track is never readable by the clean world path. The
+world cascade is therefore
+`reward -> success -> future_state -> future_image_vae`.
 
-## Legacy checkpoint token order
+## Deterministic MoT critics
 
-Old `legacy_v1` checkpoints retain their variable-horizon layout for strict
-loading and historical inference:
+Value and Q are independent slim experts; each owns exactly one learned query
+and produces one scalar. They do not receive noise, timesteps, action-flow
+tokens, reward/success tokens, or future targets.
 
-```text
-[language | state | current image | A | G |
- H | S | R | U | Q | I | optional DINO]
-```
+During critic training the complete actor/world FLUX is frozen and runs under
+`torch.no_grad()`. At every double- and single-stream layer, RoboNana caches
+the frozen FLUX K/V before the backbone residual update. The matching expert
+layer prepares its query Q/K/V, concatenates frozen prefix K/V with its own K/V,
+computes attention only for the expert query, and applies the expert residual
+path. This is the ImageWAM MoT information-flow pattern specialized to a
+deterministic scalar.
 
-Those checkpoints may pack isolated horizon blocks and use `G_1..G_idx_h`.
-They must never be silently interpreted as `mac_v1`.
+- Value FLUX prefix: `[language,state,current_image]`.
+- Q FLUX prefix: `[language,state,current_image,clean_action_chunk]`.
+- No expert output or gradient is fed back into FLUX.
+- No Q target or Q EMA exists.
+- The only target network is an FP32 copy of `value_expert`.
 
-## Offline/online feature path
+The 4B default expert width is 1024. Its attention retains the main FLUX head
+count and per-head width; MLP/residual width is slimmed to 1024. Expert
+initialization follows ImageWAM's preprocessing policy: exact tensor copy when
+shapes match, axis-wise linear interpolation otherwise, and fan-in alpha
+scaling when the final input width changes. The learned query remains new.
 
-```text
-RoboTwin instruction -> official FLUX.2 Qwen3Embedder.forward -> language_context.pt
-RoboTwin HDF5 cameras -> FACT build_robotwin_three_view_tensor -> FLUX.2 AE -> frame tokens
-```
+## Two serial optimization phases
 
-The cache adds no alternative preprocessing geometry. It calls FACT's existing
-three-view layout helper and reproduces the official FLUX.2 Klein VAE
-patchify/BatchNorm sequence. For MAC, one episode tensor is indexed as both
-`current_latent[t]` and `future_latent[min(t + 48, T - 1)]`; `future_state`
-comes from that same endpoint.
+`world_policy` trains FLUX plus actor/world adapters on real data. The action
+loss is multiplied by the recorded success mask; failures still train all
+world losses.
 
-One reward query emits 48 Bernoulli logits. Valid non-goal steps are class 0
-(`-1`), the absorbing suffix after a successful terminal is class 1 (`0`), and
-clipped timeout padding is masked out. The success query predicts termination
-at the chunk endpoint. The scalar chunk return is derived from these 48 logits;
-it is not directly regressed.
-
-## MAC posttraining reuse
-
-MAC does not add a policy, target-Q class, action expert, or second world
-backbone. `FullModelEMA` is an always-on FP32, eval-only deep copy of the same
-trainable `MacFlux2FACTModel`; frozen Qwen and FLUX AE modules live outside it.
-Candidate generation and Q evaluation use the same samplers as environment
-inference.
+`critic` freezes every non-expert parameter. It samples online-policy action
+candidates, uses online Q to select one, performs exactly one learned-world
+transition, and minimizes deterministic MSE for online V and online Q. The
+targets are stop-gradient:
 
 ```text
-four separate dataset views, fixed future = t + 48
-  -> online shared FLUX trains real image/state/reward/success targets
-  -> action BC is enabled only on successful trajectories
-  -> sample M=8 independent action chunks from the online BC flow
-  -> deterministic online Q selects the argmax candidate
-  -> learned world model rolls that selected chunk forward once (H=1)
-  -> EMA Value bootstraps the detached imagined return
-  -> deterministic online Value and Q regress that return
-  -> optimizer + scheduler -> FP32 full-model EMA Polyak update
+V target = R_chunk + gamma^48 * nonterminal * target_value(next_state)
+Q target = R_chunk + gamma^48 * nonterminal * online_value(next_state)
 ```
 
-At environment inference, M=32 independent BC chunks are ranked by the same
-deterministic Q and only the argmax chunk is executed. The rollout writer stores
-candidate Q values and the selected index. On the next training round, selected
-successful trajectories enter action BC; selected failures train the learned
-world/reward/success targets but have zero action-BC weight. The reset-pre final
-row remains `transition_valid=false` and cannot create a reset edge.
+Only a successful optimizer step updates target Value by Polyak averaging.
 
-## 120k migration boundary
+## Checkpoint boundary
 
-`load_mac_from_legacy_checkpoint` reconstructs the immutable source from its
-saved `config.json`. It whitelists the official FLUX.2 backbone plus compatible
-action/state/image adapters. Legacy horizon/segment/DINO/Value and other project
-heads are skipped even if a tensor shape happens to match; new MAC query tokens
-and heads are initialized explicitly. Once a `mac_v1` checkpoint exists, later
-rounds must use exact `trained` loading with that run's `config.json`.
+The first `mac_mot_v2` run migrates from the immutable 120k
+`legacy_v1` checkpoint. The migration whitelist includes the official FLUX
+backbone and shape-compatible image/action/state adapters. It explicitly skips
+old horizon, segment, Q-flow, Value-token, DINO, and other project heads, even
+when a shape happens to match. Both new experts are then initialized from the
+loaded FLUX weights.
+
+Subsequent `mac_mot_v2` rounds use exact trained loading with their saved
+`config.json`. The target Value expert is stored separately from the online
+model. A full-model EMA file and target-Q file are invalid for this
+architecture.
+
+## Retained legacy boundary
+
+`legacy_v1` remains only for first-stage variable-`idx_h` pretraining,
+strict loading, and historical inference. Its token order and losses are not
+silently reinterpreted as `mac_mot_v2`. The older full-model-EMA,
+`td_posttrain`, `mc_posttrain`, and Q-flow RL paths have been removed.

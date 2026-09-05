@@ -29,6 +29,7 @@ class RoboNanaCheckpointConfig:
     chunk_horizon: int
     value_dim: int
     source: str
+    expert_hidden_dim: int | None = None
 
 
 def _model_section(payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -106,8 +107,8 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
             "(or the explicit legacy value_dim marker)"
         )
     architecture_version = str(models.get("architecture_version", "legacy_v1"))
-    if architecture_version not in {"legacy_v1", "mac_v1"}:
-        raise ValueError("models.architecture_version must be legacy_v1 or mac_v1")
+    if architecture_version not in {"legacy_v1", "mac_mot_v2"}:
+        raise ValueError("models.architecture_version must be legacy_v1 or mac_mot_v2")
     chunk_horizon = int(models.get("chunk_horizon", models["max_horizon"]))
     value_dim = int(models.get("value_dim", 1))
     reward_head_type = str(models.get("reward_head_type", "flow"))
@@ -116,15 +117,15 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
             "models.reward_head_type must be 'flow', 'direct', or 'binary_chunk'"
         )
     success_dim = int(models.get("success_dim", 0))
-    if architecture_version == "mac_v1":
+    if architecture_version == "mac_mot_v2":
         if chunk_horizon != 48 or int(models["max_horizon"]) != chunk_horizon:
-            raise ValueError("mac_v1 requires chunk_horizon=max_horizon=48")
+            raise ValueError("mac_mot_v2 requires chunk_horizon=max_horizon=48")
         if reward_head_type != "binary_chunk" or reward_dim != chunk_horizon:
             raise ValueError(
-                "mac_v1 requires a binary_chunk reward head with one logit per chunk step"
+                "mac_mot_v2 requires a binary_chunk reward head with one logit per chunk step"
             )
         if success_dim != 1 or q_dim != 1 or value_dim != 1:
-            raise ValueError("mac_v1 success, Q, and Value dimensions must be one")
+            raise ValueError("mac_mot_v2 success, Q, and Value dimensions must be one")
     else:
         if reward_dim != 1 or q_dim != 1:
             raise ValueError("legacy reward_dim and q_dim must both be one scalar token")
@@ -152,6 +153,11 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
         chunk_horizon=chunk_horizon,
         value_dim=value_dim,
         source=str(path),
+        expert_hidden_dim=(
+            None
+            if architecture_version == "legacy_v1"
+            else int(models.get("expert_hidden_dim", 1024))
+        ),
     )
 
 
@@ -172,6 +178,7 @@ def resolve_checkpoint_config(
     architecture_version: str | None = None,
     chunk_horizon: int | None = None,
     value_dim: int | None = None,
+    expert_hidden_dim: int | None = None,
 ) -> RoboNanaCheckpointConfig:
     """Resolve an exact architecture; never infer structure from model tensors."""
 
@@ -224,8 +231,11 @@ def resolve_checkpoint_config(
                 ),
                 value_dim=1 if value_dim is None else int(value_dim),
                 source="explicit model metadata",
+                expert_hidden_dim=(
+                    None if expert_hidden_dim is None else int(expert_hidden_dim)
+                ),
             )
-            if resolved.architecture_version == "mac_v1":
+            if resolved.architecture_version == "mac_mot_v2":
                 if (
                     resolved.reward_head_type != "binary_chunk"
                     or resolved.reward_dim != resolved.chunk_horizon
@@ -233,7 +243,7 @@ def resolve_checkpoint_config(
                     or resolved.q_dim != 1
                     or resolved.value_dim != 1
                 ):
-                    raise ValueError("invalid explicit mac_v1 model metadata")
+                    raise ValueError("invalid explicit mac_mot_v2 model metadata")
             elif resolved.reward_dim != 1 or resolved.q_dim != 1:
                 raise ValueError("legacy reward_dim and q_dim must both be one scalar token")
             return resolved
@@ -276,6 +286,11 @@ def resolve_checkpoint_config(
             else resolved.chunk_horizon
         ),
         value_dim=int(value_dim) if value_dim is not None else resolved.value_dim,
+        expert_hidden_dim=(
+            int(expert_hidden_dim)
+            if expert_hidden_dim is not None
+            else resolved.expert_hidden_dim
+        ),
     )
     if resolved.architecture_version == "legacy_v1" and (
         resolved.reward_dim != 1 or resolved.q_dim != 1

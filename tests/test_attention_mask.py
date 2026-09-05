@@ -5,18 +5,17 @@ from robonana.models.attention_mask import (
     SegmentMap,
     build_attention_bias,
     build_mac_attention_bias,
+    build_mac_critic_prefix_bias,
 )
 
 
-def test_mac_mask_enforces_deterministic_critics_and_world_cascade():
+def test_mac_mask_contains_only_actor_world_cascade():
     seg = MacSegmentMap.from_lengths(
         language=2,
         state=1,
         ref_image=2,
-        value=1,
         pred_action=4,
         clean_action=4,
-        q=1,
         reward=1,
         success=1,
         future_state=1,
@@ -30,23 +29,38 @@ def test_mac_mask_enforces_deterministic_critics_and_world_cascade():
     )[0, 0]
 
     context = seg.clean_condition
-    assert torch.isfinite(bias[seg.value, context]).all()
-    for forbidden in (seg.pred_action, seg.clean_action, seg.q, seg.reward):
-        assert torch.isneginf(bias[seg.value, forbidden]).all()
-    assert torch.isfinite(bias[seg.q, seg.clean_action]).all()
-    for forbidden in (seg.value, seg.pred_action, seg.reward, seg.success, seg.future_state):
-        assert torch.isneginf(bias[seg.q, forbidden]).all()
     assert torch.isfinite(bias[seg.reward, seg.clean_action]).all()
-    assert torch.isneginf(bias[seg.reward, seg.q]).all()
     assert torch.isfinite(bias[seg.success, seg.reward]).all()
     assert torch.isneginf(bias[seg.success, seg.future_state]).all()
     assert torch.isfinite(bias[seg.future_state, seg.reward]).all()
     assert torch.isfinite(bias[seg.future_state, seg.success]).all()
     assert torch.isfinite(bias[seg.future_image, seg.future_state]).all()
     for world in (seg.reward, seg.success, seg.future_state, seg.future_image):
-        assert torch.isneginf(bias[world, seg.value]).all()
         assert torch.isneginf(bias[world, seg.pred_action]).all()
-        assert torch.isneginf(bias[world, seg.q]).all()
+
+
+def test_mac_value_prefix_has_no_action_and_q_prefix_has_full_action():
+    value_bias, value_keys = build_mac_critic_prefix_bias(
+        language_length=2,
+        state_length=1,
+        image_length=2,
+        action_length=0,
+        batch_size=1,
+        dtype=torch.float32,
+        device="cpu",
+    )
+    q_bias, q_keys = build_mac_critic_prefix_bias(
+        language_length=2,
+        state_length=1,
+        image_length=2,
+        action_length=48,
+        batch_size=1,
+        dtype=torch.float32,
+        device="cpu",
+    )
+    assert value_bias.shape[-1] == value_keys.shape[-1] == 5
+    assert q_bias.shape[-1] == q_keys.shape[-1] == 53
+    assert torch.isfinite(q_bias).all()
 
 
 def test_pred_action_is_bidirectional_gt_action_is_causal_and_targets_see_prefix():

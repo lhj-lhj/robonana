@@ -45,11 +45,8 @@ from robonana.training.losses import (
 )
 from robonana.training.optimizer import build_optimizer_param_groups
 from robonana.training.posttraining import (
-    FullModelEMA,
-    TDTargetResult,
-    build_td_targets,
+    ValueExpertEMA,
     evaluating,
-    search_failure_candidates,
 )
 from robonana.training.visualization import (
     decode_flux2_tokens,
@@ -149,103 +146,100 @@ class RoboNanaTrainer(Trainer):
                 "q_target_mode", self.kwargs.get("q_target_mode", "")
             )
         )
-        self.mac_enabled = self.posttrain_q_target_mode == "mac_v1"
-        self.full_model_ema: FullModelEMA | None = None
+        self.mac_enabled = self.posttrain_q_target_mode == "mac_mot_v2"
+        self.mac_phase = str(self.posttrain_config.get("phase", "world_policy"))
+        self.target_value_ema: ValueExpertEMA | None = None
         self.ema_forward_autocast_dtype = torch.bfloat16
         self.current_collection_round = int(
             self.posttrain_config.get("current_collection_round", 0)
         )
         self._posttrain_metrics: dict[str, Tensor] = {}
-        self._last_candidate_search = None
-        self._last_td_target: TDTargetResult | None = None
-        self._last_failure_timeout_observation_ids: list[str] = []
         if self.posttrain_enabled:
             self._validate_posttrain_config()
 
     def _validate_posttrain_config(self) -> None:
         configured_mode = str(self.kwargs.get("q_target_mode", ""))
+        if configured_mode != "mac_mot_v2":
+            raise ValueError(
+                "the maintained RL path is mac_mot_v2; legacy TD/MC posttraining was removed"
+            )
         if configured_mode != self.posttrain_q_target_mode:
             raise ValueError("train and posttrain q_target_mode must match")
-        if configured_mode not in {"td_posttrain", "mc_posttrain", "mac_v1"}:
-            raise ValueError(
-                "iterative posttraining requires td_posttrain, mc_posttrain, or mac_v1"
-            )
-        if configured_mode == "mac_v1":
-            if self.posttrain_config.get("algorithm") != "mac_v1":
-                raise ValueError("mac_v1 posttraining requires algorithm='mac_v1'")
-            if int(self.posttrain_config.get("chunk_horizon", 0)) != 48:
-                raise ValueError("mac_v1 posttraining requires chunk_horizon=48")
-            imagination = dict(self.posttrain_config.get("imagination", {}))
-            if int(imagination.get("rollout_chunks", 0)) != 1:
-                raise ValueError("the first mac_v1 implementation supports H=1 only")
-            if int(imagination.get("candidate_count", 0)) <= 0:
-                raise ValueError("mac_v1 imagination candidate_count must be positive")
-            if float(self.posttrain_config.get("return_scale", 0.0)) <= 0:
-                raise ValueError("mac_v1 return_scale must be positive")
-            ema = dict(self.posttrain_config.get("ema", {}))
-            if ema.get("storage_dtype") != "float32":
-                raise ValueError("posttrain EMA storage_dtype must be float32")
-            if ema.get("forward_autocast_dtype") != "bfloat16":
-                raise ValueError("posttrain EMA forward dtype must be bfloat16")
-            return
-        if configured_mode == "mc_posttrain":
-            if float(self.posttrain_config.get("failure_terminal_q", -1000.0)) != -1000.0:
-                raise ValueError("MC posttraining failure_terminal_q must be -1000")
-            return
+        if self.posttrain_config.get("algorithm") != "mac_mot_v2":
+            raise ValueError("mac_mot_v2 posttraining requires algorithm='mac_mot_v2'")
+        if self.mac_phase not in {"world_policy", "critic"}:
+            raise ValueError("mac_mot_v2 phase must be world_policy or critic")
+        if int(self.posttrain_config.get("chunk_horizon", 0)) != 48:
+            raise ValueError("mac_mot_v2 requires chunk_horizon=48")
+        imagination = dict(self.posttrain_config.get("imagination", {}))
+        if int(imagination.get("rollout_chunks", 0)) != 1:
+            raise ValueError("mac_mot_v2 supports exactly one imaginary rollout chunk")
+        if int(imagination.get("candidate_count", 0)) <= 0:
+            raise ValueError("mac_mot_v2 candidate_count must be positive")
+        if imagination.get("candidate_selection") != "argmax_q":
+            raise ValueError("mac_mot_v2 candidate selection must be argmax_q")
+        if imagination.get("fresh_each_batch") is not True:
+            raise ValueError("mac_mot_v2 requires a fresh imaginary rollout per batch")
+        if imagination.get("stop_gradient_target") is not True:
+            raise ValueError("mac_mot_v2 critic targets must be stop-gradient")
+        if float(self.posttrain_config.get("return_scale", 0.0)) <= 0:
+            raise ValueError("mac_mot_v2 return_scale must be positive")
         ema = dict(self.posttrain_config.get("ema", {}))
         if ema.get("storage_dtype") != "float32":
-            raise ValueError("posttrain EMA storage_dtype must be float32")
+            raise ValueError("target Value EMA storage_dtype must be float32")
         if ema.get("forward_autocast_dtype") != "bfloat16":
-            raise ValueError("posttrain EMA forward dtype must be bfloat16")
-        failure = dict(self.posttrain_config.get("failure_policy_improvement", {}))
-        required = {
-            "candidate_policy": "online",
-            "candidate_count": 8,
-            "candidate_horizon": 48,
-            "candidate_selection": "argmax",
-            "use_behavior_candidate": False,
-            "use_advantage_gate": False,
-            "use_confidence_gate": False,
-            "use_uncertainty_gate": False,
-        }
-        for name, expected in required.items():
-            if failure.get(name) != expected:
-                raise ValueError(f"posttrain failure_policy_improvement.{name} must be {expected!r}")
-        td = dict(self.posttrain_config.get("td", {}))
-        if td.get("next_action_policy") != "ema" or td.get("target_q_model") != "ema":
-            raise ValueError("posttrain TD action and Q targets must both use EMA")
-        if td.get("bootstrap_success_terminal") is not False:
-            raise ValueError("success terminals must not bootstrap")
-        if td.get("bootstrap_failure_timeout") is not True:
-            raise ValueError("failure time limits must bootstrap")
+            raise ValueError("target Value forward dtype must be bfloat16")
+        if ema.get("target") != "value_expert_only":
+            raise ValueError("mac_mot_v2 EMA target must be value_expert_only")
 
     def set_ema_models(self) -> None:
-        if not self.posttrain_enabled or self.posttrain_q_target_mode == "mc_posttrain":
+        if not self.mac_enabled:
             return super().set_ema_models()
         if self.with_ema:
-            raise ValueError("disable FACT parameter-buffer EMA when full posttrain EMA is enabled")
+            raise ValueError("disable FACT EMA for mac_mot_v2")
+        if self.mac_phase == "world_policy":
+            return
         if len(self.models) != 1:
-            raise ValueError("iterative posttraining requires one shared Flux2FACTModel")
+            raise ValueError("mac_mot_v2 requires one shared model")
         ema = dict(self.posttrain_config["ema"])
-        self.full_model_ema = FullModelEMA(
-            self.models[0],
+        self.target_value_ema = ValueExpertEMA(
+            self.models[0].value_expert,
             decay=float(ema["decay"]),
             update_every_optimizer_steps=int(ema["update_every_optimizer_steps"]),
             start_step=int(ema["start_step"]),
             device=self.device,
         )
+        initial_checkpoint = str(ema.get("initial_checkpoint", "")).strip()
+        initial_state = str(ema.get("initial_state", "")).strip()
+        if initial_checkpoint:
+            target_path = Path(initial_checkpoint).expanduser()
+            if not target_path.is_file():
+                raise FileNotFoundError(
+                    f"target Value initialization checkpoint not found: {target_path}"
+                )
+            self.target_value_ema.load_state_dict(
+                load_file(str(target_path), device="cpu")
+            )
+            if initial_state:
+                state_path = Path(initial_state).expanduser()
+                if not state_path.is_file():
+                    raise FileNotFoundError(
+                        f"target Value initialization state not found: {state_path}"
+                    )
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                self.target_value_ema.update_count = int(state.get("update_count", 0))
 
     def prepare(self, dataloaders: Any, models: Any, optimizers: Any, schedulers: Any) -> None:
         super().prepare(dataloaders, models, optimizers, schedulers)
-        if self.full_model_ema is not None:
+        if self.target_value_ema is not None:
             for optimizer in self.optimizers:
-                self.full_model_ema.assert_not_in_optimizer(optimizer)
+                self.target_value_ema.assert_not_in_optimizer(optimizer)
             if self.is_main_process:
                 self.logger.info(
-                    "Initialized full FP32 EMA: decay=%.6f updates=%d parameters=%d",
-                    self.full_model_ema.decay,
-                    self.full_model_ema.update_count,
-                    sum(parameter.numel() for parameter in self.full_model_ema.model.parameters()),
+                    "Initialized target Value expert only: decay=%.6f parameters=%d; "
+                    "FLUX copies=0 Q-target copies=0",
+                    self.target_value_ema.decay,
+                    sum(parameter.numel() for parameter in self.target_value_ema.model.parameters()),
                 )
 
     def state_dict(self) -> dict[str, Any]:
@@ -253,7 +247,7 @@ class RoboNanaTrainer(Trainer):
         if self.posttrain_enabled:
             state.update(
                 ema_update_count=(
-                    0 if self.full_model_ema is None else self.full_model_ema.update_count
+                    0 if self.target_value_ema is None else self.target_value_ema.update_count
                 ),
                 current_collection_round=self.current_collection_round,
                 posttrain_config=self.posttrain_config,
@@ -267,8 +261,8 @@ class RoboNanaTrainer(Trainer):
         self.current_collection_round = int(
             state_dict.get("current_collection_round", self.current_collection_round)
         )
-        if self.full_model_ema is not None:
-            self.full_model_ema.update_count = int(state_dict.get("ema_update_count", 0))
+        if self.target_value_ema is not None:
+            self.target_value_ema.update_count = int(state_dict.get("ema_update_count", 0))
 
     def get_models(self, model_config):
         action_dim = int(_config_value(model_config, "action_dim", 14))
@@ -283,10 +277,12 @@ class RoboNanaTrainer(Trainer):
         )
         chunk_horizon = int(_config_value(model_config, "chunk_horizon", max_horizon))
         value_dim = int(_config_value(model_config, "value_dim", 1))
-        if architecture_version == "mac_v1":
+        expert_hidden_dim = _config_value(model_config, "expert_hidden_dim", None)
+        expert_hidden_dim = None if expert_hidden_dim is None else int(expert_hidden_dim)
+        if architecture_version == "mac_mot_v2":
             if reward_head_type != "binary_chunk" or reward_dim != chunk_horizon:
                 raise ValueError(
-                    "mac_v1 requires reward_head_type='binary_chunk' and reward_dim=chunk_horizon"
+                    "mac_mot_v2 requires reward_head_type='binary_chunk' and reward_dim=chunk_horizon"
                 )
         elif reward_head_type != "direct" or success_dim != 1:
             raise ValueError(
@@ -350,6 +346,7 @@ class RoboNanaTrainer(Trainer):
                 architecture_version=architecture_version,
                 chunk_horizon=chunk_horizon,
                 value_dim=value_dim,
+                expert_hidden_dim=expert_hidden_dim,
             )
             initialization_label = f"pretrained checkpoint parameters={report.checkpoint_parameters}"
         elif initialization == "trained":
@@ -369,6 +366,7 @@ class RoboNanaTrainer(Trainer):
                 architecture_version=architecture_version,
                 chunk_horizon=chunk_horizon,
                 value_dim=value_dim,
+                expert_hidden_dim=expert_hidden_dim,
                 device=self.device,
                 dtype=self.dtype,
                 params=params,
@@ -395,6 +393,7 @@ class RoboNanaTrainer(Trainer):
                 success_dim=success_dim,
                 q_dim=q_dim,
                 value_dim=value_dim,
+                expert_hidden_dim=1024 if expert_hidden_dim is None else expert_hidden_dim,
                 chunk_horizon=chunk_horizon,
                 dino_dim=dino_dim,
                 device=self.device,
@@ -422,6 +421,7 @@ class RoboNanaTrainer(Trainer):
                 architecture_version=architecture_version,
                 chunk_horizon=chunk_horizon,
                 value_dim=value_dim,
+                expert_hidden_dim=expert_hidden_dim,
             )
             initialization_label = "scratch"
         else:
@@ -462,7 +462,7 @@ class RoboNanaTrainer(Trainer):
                 "Attention layout: architecture=%s; A=%s; clean_action=%s",
                 architecture_version,
                 "bidirectional" if model.pred_action_bidirectional else "causal",
-                "full-48" if architecture_version == "mac_v1" else "causal-prefix",
+                "full-48" if architecture_version == "mac_mot_v2" else "causal-prefix",
             )
             if self.dino_encoder is not None:
                 self.logger.info(
@@ -503,62 +503,63 @@ class RoboNanaTrainer(Trainer):
 
     def save_model_hook(self, models, weights, output_dir: str) -> None:
         super().save_model_hook(models, weights, output_dir)
-        if self.full_model_ema is None or not self.is_main_process:
+        if self.target_value_ema is not None and self.is_main_process:
+            output = Path(output_dir)
+            save_file(
+                self.target_value_ema.state_dict(),
+                str(output / "target_value_expert.safetensors"),
+            )
+            state = {
+                "decay": self.target_value_ema.decay,
+                "update_every_optimizer_steps": self.target_value_ema.update_every_optimizer_steps,
+                "start_step": self.target_value_ema.start_step,
+                "update_count": self.target_value_ema.update_count,
+                "storage_dtype": "float32",
+                "target": "value_expert_only",
+                "current_collection_round": self.current_collection_round,
+            }
+            (output / "value_ema_state.json").write_text(
+                json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            (output / "posttrain_config.json").write_text(
+                json.dumps(self.posttrain_config, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
             return
-        output = Path(output_dir)
-        save_file(
-            self.full_model_ema.state_dict(),
-            str(output / "ema_model.safetensors"),
-        )
-        ema_state = {
-            "decay": self.full_model_ema.decay,
-            "update_every_optimizer_steps": self.full_model_ema.update_every_optimizer_steps,
-            "start_step": self.full_model_ema.start_step,
-            "update_count": self.full_model_ema.update_count,
-            "storage_dtype": "float32",
-            "forward_autocast_dtype": "bfloat16",
-            "current_collection_round": self.current_collection_round,
-        }
-        (output / "ema_state.json").write_text(
-            json.dumps(ema_state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        (output / "posttrain_config.json").write_text(
-            json.dumps(self.posttrain_config, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
 
     def load_model_hook(self, models, input_dir: str) -> None:
         super().load_model_hook(models, input_dir)
-        if self.full_model_ema is None:
-            return
-        ema_path = Path(input_dir) / "ema_model.safetensors"
-        state_path = Path(input_dir) / "ema_state.json"
-        if ema_path.is_file():
-            self.full_model_ema.load_state_dict(load_file(str(ema_path), device="cpu"))
-            if state_path.is_file():
-                state = json.loads(state_path.read_text(encoding="utf-8"))
-                self.full_model_ema.update_count = int(state.get("update_count", 0))
-                self.current_collection_round = int(
-                    state.get("current_collection_round", self.current_collection_round)
+        if self.target_value_ema is not None:
+            target_path = Path(input_dir) / "target_value_expert.safetensors"
+            state_path = Path(input_dir) / "value_ema_state.json"
+            if target_path.is_file():
+                self.target_value_ema.load_state_dict(
+                    load_file(str(target_path), device="cpu")
                 )
-            source = str(ema_path)
-        else:
-            online = self.accelerator.unwrap_model(
-                self.model, keep_torch_compile=False
-            )
-            self.full_model_ema.exact_copy_from(online)
-            self.full_model_ema.update_count = 0
-            source = "exact-copy online (legacy checkpoint has no EMA)"
-        for optimizer in self.optimizers:
-            self.full_model_ema.assert_not_in_optimizer(optimizer)
-        if self.is_main_process:
-            self.logger.info(
-                "Restored full EMA from %s: decay=%.6f updates=%d parameters=%d",
-                source,
-                self.full_model_ema.decay,
-                self.full_model_ema.update_count,
-                sum(parameter.numel() for parameter in self.full_model_ema.model.parameters()),
-            )
+                if state_path.is_file():
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    self.target_value_ema.update_count = int(state.get("update_count", 0))
+                    self.current_collection_round = int(
+                        state.get("current_collection_round", self.current_collection_round)
+                    )
+                source = str(target_path)
+            else:
+                online = self.accelerator.unwrap_model(
+                    self.model, keep_torch_compile=False
+                )
+                self.target_value_ema.exact_copy_from(online.value_expert)
+                self.target_value_ema.update_count = 0
+                source = "exact-copy online Value (new critic phase)"
+            for optimizer in self.optimizers:
+                self.target_value_ema.assert_not_in_optimizer(optimizer)
+            if self.is_main_process:
+                self.logger.info(
+                    "Restored target Value expert from %s: decay=%.6f updates=%d",
+                    source,
+                    self.target_value_ema.decay,
+                    self.target_value_ema.update_count,
+                )
+            return
 
     def _sample_timestep(self, batch_size: int) -> Tensor:
         sigma = torch.rand(batch_size, device=self.device, dtype=torch.float32)
@@ -611,12 +612,12 @@ class RoboNanaTrainer(Trainer):
         self._optimizer_step_succeeded = (
             loss_is_finite and self.accelerator.sync_gradients and not optimizer_skipped
         )
-        if self.full_model_ema is not None:
+        if self.target_value_ema is not None:
             online = self.accelerator.unwrap_model(
                 self.model, keep_torch_compile=False
             )
-            self.full_model_ema.update(
-                online,
+            self.target_value_ema.update(
+                online.value_expert,
                 optimizer_step=self.cur_step,
                 optimizer_step_succeeded=self._optimizer_step_succeeded,
             )
@@ -627,18 +628,19 @@ class RoboNanaTrainer(Trainer):
         if self._optimizer_step_succeeded and pending_eval is not None:
             self._run_fixed_horizon_eval(pending_eval)
         if (
-            self.full_model_ema is not None
+            self.target_value_ema is not None
             and self.cur_step % self.log_interval == 0
         ):
+            ema_object = self.target_value_ema
             self._accumulate_metric(
                 "posttrain/ema_updates",
                 torch.tensor(
-                    float(self.full_model_ema.update_count), device=self.device
+                    float(ema_object.update_count), device=self.device
                 ),
             )
             self._accumulate_metric(
                 "posttrain/ema_online_l2",
-                torch.tensor(self.full_model_ema.last_online_l2, device=self.device),
+                torch.tensor(ema_object.last_online_l2, device=self.device),
             )
         self._optimizer_step_succeeded = False
         super().print_step()
@@ -914,255 +916,125 @@ class RoboNanaTrainer(Trainer):
         if self.is_main_process:
             self.logger.info("Removed FLUX.2 VAE from every rank GPU after pixel eval")
 
-    def _prepare_posttrain_targets(
-        self,
-        *,
-        batch_dict: dict[str, Any],
-        context: Tensor,
-        context_mask: Tensor,
-        current: Tensor,
-        future: Tensor,
-        state: Tensor,
-        future_state: Tensor,
-        behavior_action: Tensor,
-        reward: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        if self.full_model_ema is None:
-            raise RuntimeError("posttraining requires a callable full-model EMA")
-        failure_mask = batch_dict["failure_episode_mask"].to(
-            device=self.device, dtype=torch.bool
-        ).reshape(-1)
-        pool_id = batch_dict["pool_id"].to(device=self.device, dtype=torch.long).reshape(-1)
-        invalid_failure_pool = failure_mask & ~((pool_id == 2) | (pool_id == 3))
-        if bool(invalid_failure_pool.any()):
-            raise RuntimeError("failure samples must come from historical/latest failure pools")
-        pred_action_target = behavior_action.clone()
-        failure = dict(self.posttrain_config["failure_policy_improvement"])
-        self._last_candidate_search = None
-        # Every distributed rank must reduce the same metric keys in the same
-        # order. A rank can legitimately receive no failure samples from the
-        # four-pool sampler, while another rank runs candidate search.
-        candidate_metric_names = (
-            "posttrain/failure_best_q_mean",
-            "posttrain/failure_candidate_q_mean",
-            "posttrain/failure_candidate_q_std",
-            "posttrain/failure_behavior_q_mean",
-            "posttrain/failure_best_minus_behavior_q",
-            "posttrain/candidate_search_ms",
-            "posttrain/candidate_search_peak_gib",
-        )
-        self._posttrain_metrics.update(
-            {name: reward.new_zeros(()) for name in candidate_metric_names}
-        )
-        if bool(failure_mask.any()):
-            result = search_failure_candidates(
-                online_model=self.model,
-                ema_model=self.full_model_ema.model,
-                context=context[failure_mask],
-                current_latents=current[failure_mask],
-                state=state[failure_mask],
-                context_mask=context_mask[failure_mask],
-                behavior_action=behavior_action[failure_mask],
-                candidate_count=int(failure["candidate_count"]),
-                candidate_horizon=int(failure["candidate_horizon"]),
-                action_sampling_steps=int(failure["candidate_action_sampling_steps"]),
-                q_sampling_steps=int(failure["candidate_q_sampling_steps"]),
-                flow_shift=float(failure["flow_shift"]),
-                microbatch_size=int(failure["candidate_microbatch_size"]),
-                grid_height=self.grid_height,
-                grid_width=self.grid_width,
-                ema_autocast_dtype=self.ema_forward_autocast_dtype,
-            )
-            pred_action_target[failure_mask] = result.pseudo_action
-            self._last_candidate_search = result
-            self._posttrain_metrics.update(
-                {
-                    "posttrain/failure_best_q_mean": result.best_q.mean(),
-                    "posttrain/failure_candidate_q_mean": result.candidate_q.mean(),
-                    "posttrain/failure_candidate_q_std": result.candidate_q.std(unbiased=False),
-                    "posttrain/failure_behavior_q_mean": result.behavior_q.mean(),
-                    "posttrain/failure_best_minus_behavior_q": (
-                        result.best_q - result.behavior_q
-                    ).mean(),
-                    "posttrain/candidate_search_ms": torch.tensor(
-                        result.elapsed_ms, device=self.device
-                    ),
-                    "posttrain/candidate_search_peak_gib": torch.tensor(
-                        result.peak_memory_bytes / 1024**3, device=self.device
-                    ),
-                }
-            )
 
-        td = dict(self.posttrain_config["td"])
-        td_result = build_td_targets(
-            ema_model=self.full_model_ema.model,
-            context=context,
-            next_current_latents=future,
-            next_state=future_state,
-            context_mask=context_mask,
-            reward_h=reward,
-            delta_steps=batch_dict["delta_steps"].to(self.device),
-            success_terminal_h=batch_dict["success_terminal_h"].to(self.device),
-            action_template=behavior_action,
-            discount=float(self.posttrain_config["discount"]),
-            target_action_horizon=int(td["target_action_horizon"]),
-            action_sampling_steps=int(td["action_sampling_steps"]),
-            q_sampling_steps=int(td["q_sampling_steps"]),
-            flow_shift=float(td["flow_shift"]),
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-            microbatch_size=int(td.get("microbatch_size", 16)),
-            ema_autocast_dtype=self.ema_forward_autocast_dtype,
-        )
-        self._last_td_target = td_result
-        delta = batch_dict["delta_steps"].to(device=self.device).float().reshape(-1)
-        success_terminal = batch_dict["success_terminal_h"].to(
-            device=self.device
-        ).float().reshape(-1)
-        failure_timeout = batch_dict["time_limit_truncated_h"].to(
-            device=self.device
-        ).float().reshape(-1)
-        valid = td_result.q_loss_mask.reshape(-1) > 0
-        bootstrap = td_result.bootstrap_mask.reshape(-1) > 0
-        observation_ids = batch_dict.get("observation_id", [])
-        if isinstance(observation_ids, (list, tuple)):
-            self._last_failure_timeout_observation_ids = [
-                str(observation_ids[index])
-                for index in range(len(observation_ids))
-                if bool(failure_timeout[index] > 0)
-            ]
-        self._posttrain_metrics.update(
-            {
-                "posttrain/td_reward_mean": reward.float().mean(),
-                "posttrain/td_delta_mean": delta.mean(),
-                "posttrain/td_discount_mean": td_result.discount_factor.mean(),
-                "posttrain/td_next_q_mean": (
-                    td_result.next_q.reshape(-1)[bootstrap].mean()
-                    if bool(bootstrap.any())
-                    else reward.new_zeros(())
-                ),
-                "posttrain/td_target_mean": (
-                    td_result.q_target.reshape(-1)[valid].mean()
-                    if bool(valid.any())
-                    else reward.new_zeros(())
-                ),
-                "posttrain/td_success_terminal_fraction": success_terminal.mean(),
-                "posttrain/td_failure_timeout_fraction": failure_timeout.mean(),
-                "posttrain/td_bootstrap_fraction": td_result.bootstrap_mask.float().mean(),
-                "posttrain/td_target_ms": torch.tensor(td_result.elapsed_ms, device=self.device),
-                "posttrain/td_target_peak_gib": torch.tensor(
-                    td_result.peak_memory_bytes / 1024**3, device=self.device
-                ),
-                "posttrain/q_loss_mask_fraction": td_result.q_loss_mask.float().mean(),
-                "posttrain/pseudo_action_samples": failure_mask.float().sum(),
-                "posttrain/success_action_samples": (~failure_mask).float().sum(),
-            }
-        )
-        pool_metric_names = (
-            "original_success_samples",
-            "collected_success_samples",
-            "historical_failure_samples",
-            "latest_failure_samples",
-        )
-        for index, name in enumerate(pool_metric_names):
-            self._posttrain_metrics[f"posttrain/{name}"] = (pool_id == index).float().sum()
-        return (
-            pred_action_target.detach(),
-            td_result.q_target.to(dtype=self.dtype),
-            torch.ones_like(failure_mask, dtype=torch.float32),
-            td_result.q_loss_mask,
-        )
+    def _mac_real_batch(self, batch_dict: dict[str, Any]) -> dict[str, Tensor]:
+        """Move and validate the fixed-48 fields shared by both MAC phases."""
 
-    def _forward_step_mac(self, batch_dict: dict[str, Any]) -> dict[str, Tensor]:
-        """One real-data model update plus one fresh H=1 imaginary rollout."""
-
-        if self.full_model_ema is None:
-            raise RuntimeError("mac_v1 requires FullModelEMA from the first step")
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
-        context_mask = batch_dict["context_mask"].to(
-            device=self.device, dtype=torch.bool
-        )
-        current = batch_dict["current_latents"].to(
-            device=self.device, dtype=self.dtype
-        )
-        future = batch_dict["future_latents"].to(
-            device=self.device, dtype=self.dtype
-        )
-        state = batch_dict["state"].to(
-            device=self.device, dtype=self.dtype
-        ).unsqueeze(1)
+        current = batch_dict["current_latents"].to(device=self.device, dtype=self.dtype)
+        future = batch_dict["future_latents"].to(device=self.device, dtype=self.dtype)
+        state = batch_dict["state"].to(device=self.device, dtype=self.dtype).unsqueeze(1)
         future_state = batch_dict["future_state"].to(
             device=self.device, dtype=self.dtype
         ).unsqueeze(1)
-        behavior_action = batch_dict.get(
-            "behavior_action", batch_dict["action"]
-        ).to(device=self.device, dtype=self.dtype)
-        reward_target = batch_dict["reward_chunk"].to(
+        action = batch_dict.get("behavior_action", batch_dict["action"]).to(
             device=self.device, dtype=self.dtype
         )
-        reward_mask = batch_dict["reward_chunk_mask"].to(
-            device=self.device, dtype=self.dtype
-        )
-        success_target = batch_dict["success"].to(
-            device=self.device, dtype=self.dtype
-        ).reshape(context.shape[0], 1)
-        action_loss_mask = batch_dict["action_loss_mask"].to(device=self.device)
         horizon = batch_dict["horizon_idx"].to(
             device=self.device, dtype=torch.long
         ).reshape(-1)
         if not bool(torch.all(horizon == 48)):
-            raise ValueError("mac_v1 batches must use the fixed 48-step horizon")
-
-        batch_size = context.shape[0]
+            raise ValueError("mac_mot_v2 batches must use the fixed 48-step horizon")
         expected_tokens = self.grid_height * self.grid_width
         if current.shape[1] != expected_tokens or future.shape[1] != expected_tokens:
-            raise ValueError(
-                f"cached FLUX image tokens must have {expected_tokens} tokens"
-            )
-        action_timestep = self._sample_timestep(batch_size)
-        wm_timestep = self._sample_timestep(batch_size)
-        noisy_action, action_velocity_target = flow_noise(
-            behavior_action, action_timestep
-        )
-        noisy_future, image_velocity_target = flow_noise(future, wm_timestep)
-        noisy_future_state, state_velocity_target = flow_noise(
-            future_state, wm_timestep
-        )
-        context_ids = text_position_ids(batch_size, context.shape[1], self.device)
+            raise ValueError(f"cached FLUX image tensors must contain {expected_tokens} tokens")
+        return {
+            "context": context,
+            "context_mask": batch_dict["context_mask"].to(
+                device=self.device, dtype=torch.bool
+            ),
+            "current": current,
+            "future": future,
+            "state": state,
+            "future_state": future_state,
+            "action": action,
+            "horizon": horizon,
+        }
+
+    def _forward_step_mac_world_policy(
+        self, batch_dict: dict[str, Any]
+    ) -> dict[str, Tensor]:
+        """Phase 1: train the single FLUX policy/world model on real data."""
+
+        values = self._mac_real_batch(batch_dict)
+        context = values["context"]
+        batch = context.shape[0]
+        action_timestep = self._sample_timestep(batch)
+        world_timestep = self._sample_timestep(batch)
+        noisy_action, action_target = flow_noise(values["action"], action_timestep)
+        noisy_future, image_target = flow_noise(values["future"], world_timestep)
+        noisy_state, state_target = flow_noise(values["future_state"], world_timestep)
+        context_ids = text_position_ids(batch, context.shape[1], self.device)
         current_ids = image_position_ids(
-            batch_size,
+            batch,
             grid_height=self.grid_height,
             grid_width=self.grid_width,
-            time_coord=torch.zeros_like(horizon),
+            time_coord=torch.zeros_like(values["horizon"]),
             device=self.device,
         )
         future_ids = image_position_ids(
-            batch_size,
+            batch,
             grid_height=self.grid_height,
             grid_width=self.grid_width,
-            time_coord=horizon,
+            time_coord=values["horizon"],
             device=self.device,
         )
-        empty_scalar = behavior_action.new_empty(batch_size, 0, 1)
+        empty = values["action"].new_empty(batch, 0, 1)
         output = self.model(
             context=context,
             context_ids=context_ids,
-            current_latents=current,
+            current_latents=values["current"],
             current_ids=current_ids,
             noisy_future_latents=noisy_future,
             future_ids=future_ids,
-            state=state,
+            state=values["state"],
             noisy_pred_action=noisy_action,
-            gt_action_cond=behavior_action,
-            horizon_idx=horizon,
-            noisy_future_state=noisy_future_state,
-            noisy_reward=empty_scalar,
-            noisy_q=empty_scalar,
+            gt_action_cond=values["action"],
+            horizon_idx=values["horizon"],
+            noisy_future_state=noisy_state,
+            noisy_reward=empty,
+            noisy_q=empty,
             action_timestep=action_timestep,
-            wm_timestep=wm_timestep,
-            context_mask=context_mask,
+            wm_timestep=world_timestep,
+            context_mask=values["context_mask"],
         )
+        action_mask = batch_dict["action_loss_mask"].to(device=self.device)
+        reward_mask = batch_dict["reward_chunk_mask"].to(
+            device=self.device, dtype=self.dtype
+        )
+        losses = {
+            "image_loss": masked_mse(output.image, image_target),
+            # Dataset sets this mask to success.  Failure trajectories train
+            # every world target below but cannot pull the BC policy backward.
+            "action_loss": masked_mse(output.action, action_target, action_mask),
+            "future_state_loss": masked_mse(output.future_state, state_target),
+            "reward_loss": masked_elementwise_bce_with_logits(
+                output.reward,
+                batch_dict["reward_chunk"].to(device=self.device, dtype=self.dtype),
+                reward_mask,
+            ),
+            "success_loss": masked_bce_with_logits(
+                output.success,
+                batch_dict["success"].to(device=self.device, dtype=self.dtype).reshape(batch, 1),
+            ),
+        }
+        self._posttrain_metrics.update(
+            {
+                "posttrain/action_bc_fraction": action_mask.float().mean(),
+                "posttrain/reward_valid_fraction": reward_mask.float().mean(),
+            }
+        )
+        return losses
 
+    def _forward_step_mac_critic(
+        self, batch_dict: dict[str, Any]
+    ) -> dict[str, Tensor]:
+        """Phase 2: freeze FLUX and fit online V/Q to one H=1 rollout."""
+
+        if self.target_value_ema is None:
+            raise RuntimeError("critic phase requires the target Value expert")
+        values = self._mac_real_batch(batch_dict)
+        batch = values["context"].shape[0]
         imagination = dict(self.posttrain_config["imagination"])
         candidate_count = int(imagination["candidate_count"])
         schedule = flow_euler_schedule(
@@ -1170,30 +1042,35 @@ class RoboNanaTrainer(Trainer):
             flow_shift=float(imagination["flow_shift"]),
             device=self.device,
         )
-        action_noise = torch.randn(
-            batch_size,
-            candidate_count,
-            48,
-            behavior_action.shape[-1],
-            device=self.device,
-            dtype=self.dtype,
+        # Imagination is stop-gradient and rank-local. Bypass the DDP wrapper
+        # for its many Euler forwards so the reducer sees only the final
+        # differentiable V/Q forward below.
+        rollout_model = self.accelerator.unwrap_model(
+            self.model, keep_torch_compile=False
         )
-        with evaluating(self.model), torch.autocast(
+        with evaluating(rollout_model), torch.autocast(
             device_type=self.device.type,
             dtype=self.ema_forward_autocast_dtype,
             enabled=self.device.type == "cuda",
         ):
             imaginary = generate_mac_imaginary_rollout_h1(
-                online_model=self.model,
-                ema_model=self.full_model_ema.model,
-                context=context,
-                current_latents=current,
-                state=state,
-                context_mask=context_mask,
+                online_model=rollout_model,
+                target_value_expert=self.target_value_ema.model,
+                context=values["context"],
+                current_latents=values["current"],
+                state=values["state"],
+                context_mask=values["context_mask"],
                 candidate_count=candidate_count,
-                action_noise=action_noise,
-                future_noise=torch.randn_like(future),
-                future_state_noise=torch.randn_like(future_state),
+                action_noise=torch.randn(
+                    batch,
+                    candidate_count,
+                    48,
+                    values["action"].shape[-1],
+                    device=self.device,
+                    dtype=self.dtype,
+                ),
+                future_noise=torch.randn_like(values["future"]),
+                future_state_noise=torch.randn_like(values["future_state"]),
                 schedule=schedule,
                 discount=float(self.posttrain_config["discount"]),
                 reward_non_goal=float(self.posttrain_config["reward_non_goal"]),
@@ -1202,64 +1079,44 @@ class RoboNanaTrainer(Trainer):
                 grid_height=self.grid_height,
                 grid_width=self.grid_width,
             )
-
         value_prediction, q_prediction = evaluate_mac_critics(
             model=self.model,
-            context=context,
-            current_latents=current,
-            state=state,
-            context_mask=context_mask,
+            context=values["context"],
+            current_latents=values["current"],
+            state=values["state"],
+            context_mask=values["context_mask"],
             clean_action=imaginary.selected_action,
             grid_height=self.grid_height,
             grid_width=self.grid_width,
         )
-        return_scale = float(self.posttrain_config["return_scale"])
+        scale = float(self.posttrain_config["return_scale"])
         losses = {
-            "image_loss": masked_mse(output.image, image_velocity_target),
-            "action_loss": masked_mse(
-                output.action, action_velocity_target, action_loss_mask
-            ),
-            "future_state_loss": masked_mse(
-                output.future_state, state_velocity_target
-            ),
-            "reward_loss": masked_elementwise_bce_with_logits(
-                output.reward, reward_target, reward_mask
-            ),
-            "success_loss": masked_bce_with_logits(
-                output.success, success_target
-            ),
             "value_loss": deterministic_return_loss(
-                value_prediction,
-                imaginary.target_return,
-                return_scale=return_scale,
+                value_prediction, imaginary.value_target_return, return_scale=scale
             ),
             "q_loss": deterministic_return_loss(
-                q_prediction,
-                imaginary.target_return,
-                return_scale=return_scale,
+                q_prediction, imaginary.q_target_return, return_scale=scale
             ),
         }
         self._posttrain_metrics.update(
             {
                 "posttrain/imaginary_chunk_return": imaginary.chunk_return.mean(),
-                "posttrain/imaginary_next_value": imaginary.next_value.mean(),
-                "posttrain/imaginary_target_return": imaginary.target_return.mean(),
+                "posttrain/target_next_value": imaginary.target_next_value.mean(),
+                "posttrain/online_next_value": imaginary.online_next_value.mean(),
+                "posttrain/value_target_return": imaginary.value_target_return.mean(),
+                "posttrain/q_target_return": imaginary.q_target_return.mean(),
                 "posttrain/imaginary_success_probability": imaginary.success_logit.float().sigmoid().mean(),
-                "posttrain/candidate_q_mean": imaginary.candidate_q.float().mean()
-                * return_scale,
-                "posttrain/candidate_q_std": imaginary.candidate_q.float().std(
-                    unbiased=False
-                )
-                * return_scale,
-                "posttrain/action_bc_fraction": action_loss_mask.float().mean(),
-                "posttrain/reward_valid_fraction": reward_mask.float().mean(),
+                "posttrain/candidate_q_mean": imaginary.candidate_q.float().mean() * scale,
+                "posttrain/candidate_q_std": imaginary.candidate_q.float().std(unbiased=False) * scale,
             }
         )
         return losses
 
     def forward_step(self, batch_dict: dict[str, Any]):
         if getattr(self, "mac_enabled", False):
-            return self._forward_step_mac(batch_dict)
+            if self.mac_phase == "world_policy":
+                return self._forward_step_mac_world_policy(batch_dict)
+            return self._forward_step_mac_critic(batch_dict)
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
         current = batch_dict["current_latents"].to(device=self.device, dtype=self.dtype)
         future = batch_dict["future_latents"].to(device=self.device, dtype=self.dtype)
@@ -1301,20 +1158,6 @@ class RoboNanaTrainer(Trainer):
             q_loss_mask = q_loss_mask.to(device=self.device)
 
         pred_action_target = behavior_action
-        if self.posttrain_enabled and self.posttrain_q_target_mode == "td_posttrain":
-            pred_action_target, q, action_loss_mask, q_loss_mask = (
-                self._prepare_posttrain_targets(
-                    batch_dict=batch_dict,
-                    context=context,
-                    context_mask=context_mask,
-                    current=current,
-                    future=future,
-                    state=state,
-                    future_state=future_state,
-                    behavior_action=behavior_action,
-                    reward=accumulated_reward,
-                )
-            )
 
         batch_size = context.shape[0]
         expected_tokens = self.grid_height * self.grid_width
@@ -1411,26 +1254,6 @@ class RoboNanaTrainer(Trainer):
             action_loss_mask=action_loss_mask,
             q_loss_mask=q_loss_mask,
         )
-        if self.posttrain_enabled and self.posttrain_q_target_mode == "td_posttrain":
-            failure_mask = batch_dict["failure_episode_mask"].to(
-                device=self.device, dtype=torch.float32
-            )
-            self._posttrain_metrics["posttrain/pseudo_action_loss"] = masked_mse(
-                output.action,
-                action_target,
-                failure_mask,
-            ).detach()
-        elif self.posttrain_enabled:
-            failure_mask = batch_dict["failure_episode_mask"].to(
-                device=self.device, dtype=torch.float32
-            )
-            self._posttrain_metrics.update(
-                {
-                    "posttrain/failure_fraction": failure_mask.mean(),
-                    "posttrain/action_loss_mask_fraction": action_loss_mask.float().mean(),
-                    "posttrain/mc_q_target_mean": q.float().mean(),
-                }
-            )
         return losses
 
     def parse_losses(self, losses: dict[str, Tensor] | Tensor) -> Tensor:

@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from robonana.configs.posttrain_config import (
-    apply_iterative_posttrain_config,
-    apply_mac_posttrain_config,
-)
+from robonana.configs.posttrain_config import apply_mac_posttrain_config
 
 
 def test_mac_posttrain_is_fixed_h1_and_uses_120k_migration(monkeypatch, tmp_path):
@@ -31,8 +28,10 @@ def test_mac_posttrain_is_fixed_h1_and_uses_120k_migration(monkeypatch, tmp_path
         },
     }
     config = apply_mac_posttrain_config(base)
-    assert config["models"]["architecture_version"] == "mac_v1"
+    assert config["models"]["architecture_version"] == "mac_mot_v2"
+    assert config["models"]["train_mode"] == "world_policy"
     assert config["models"]["initialization"] == "mac_from_legacy"
+    assert config["train"]["resume"] is True
     assert config["models"]["reward_dim"] == 48
     assert config["models"]["checkpoint"].endswith(
         "checkpoint_epoch_6_step_120000/transformer/diffusion_pytorch_model.bin"
@@ -40,11 +39,43 @@ def test_mac_posttrain_is_fixed_h1_and_uses_120k_migration(monkeypatch, tmp_path
     posttrain = config["train"]["posttrain"]
     assert posttrain["imagination"]["rollout_chunks"] == 1
     assert posttrain["imagination"]["candidate_count"] == 8
+    assert posttrain["imagination"]["fresh_each_batch"] is True
     assert posttrain["environment_policy"]["candidate_count"] == 32
     assert posttrain["ema"]["decay"] == 0.995
+    assert posttrain["ema"]["target"] == "value_expert_only"
+    assert posttrain["ema"]["initial_checkpoint"] == ""
     pools = config["dataloaders"]["train"]["data_or_config"]
     assert all(pool["fixed_horizon"] == 48 for pool in pools)
-    assert all(pool["q_target_mode"] == "mac_v1" for pool in pools)
+    assert all(pool["q_target_mode"] == "mac_mot_v2" for pool in pools)
+
+
+def test_mac_critic_phase_freezes_flux_surface_in_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROBONANA_REPLAY_ROOT", str(tmp_path / "replay"))
+    monkeypatch.setenv("ROBONANA_SOURCE_RUN", str(tmp_path / "run120k"))
+    monkeypatch.setenv("ROBONANA_MAC_PHASE", "critic")
+    monkeypatch.setenv(
+        "ROBONANA_MAC_TARGET_VALUE_CHECKPOINT", str(tmp_path / "target.safetensors")
+    )
+    monkeypatch.setenv(
+        "ROBONANA_MAC_TARGET_VALUE_STATE", str(tmp_path / "target-state.json")
+    )
+    base = {
+        "project_dir": str(tmp_path / "base"),
+        "dataloaders": {"train": {"data_or_config": {
+            "data_path": str(tmp_path / "original"),
+            "stats_path": str(tmp_path / "stats.json"),
+        }, "sampler": {}}},
+        "models": {},
+        "optimizers": {"lr": 1e-5, "robot_lr": 1e-4},
+        "train": {"loss_weights": {}, "tracker_init_kwargs": {"wandb": {}}},
+    }
+    config = apply_mac_posttrain_config(base)
+    assert config["models"]["train_mode"] == "critic"
+    assert config["train"]["posttrain"]["phase"] == "critic"
+    assert config["optimizers"]["lr"] == config["optimizers"]["robot_lr"]
+    assert config["train"]["posttrain"]["ema"]["initial_checkpoint"] == str(
+        tmp_path / "target.safetensors"
+    )
 
 
 def test_mac_posttrain_can_continue_from_an_exact_mac_checkpoint(
@@ -115,97 +146,3 @@ def test_mac_trained_continuation_requires_explicit_lineage(monkeypatch, tmp_pat
 
     with pytest.raises(ValueError, match="requires explicit"):
         apply_mac_posttrain_config(base)
-
-
-def test_posttrain_config_builds_four_separate_pool_views(monkeypatch, tmp_path):
-    replay_root = tmp_path / "replay"
-    checkpoint = tmp_path / "checkpoint" / "transformer" / "model.bin"
-    monkeypatch.setenv("ROBONANA_REPLAY_ROOT", str(replay_root))
-    monkeypatch.setenv("ROBONANA_POSTTRAIN_CHECKPOINT", str(checkpoint))
-    monkeypatch.setenv("ROBONANA_COLLECTION_ROUND", "3")
-    base = {
-        "project_dir": str(tmp_path / "experiment"),
-        "dataloaders": {
-            "train": {
-                "data_or_config": {
-                    "_class_name": "RoboTwinHDF5Dataset",
-                    "data_path": str(tmp_path / "original"),
-                    "stats_path": str(tmp_path / "stats.json"),
-                    "dino_online": True,
-                },
-                "sampler": {},
-            }
-        },
-        "models": {"dino_dim": 3072},
-        "train": {"loss_weights": {"dino_loss": 0.1}},
-    }
-    config = apply_iterative_posttrain_config(base)
-    pools = config["dataloaders"]["train"]["data_or_config"]
-    assert [pool["pool_name"] for pool in pools] == [
-        "original_success",
-        "collected_success_replay",
-        "historical_failure_replay",
-        "latest_failure",
-    ]
-    assert pools[2]["round_max"] == 2
-    assert pools[3]["round_id"] == 3
-    assert pools[1]["require_final_observation"] is True
-    assert pools[2]["require_final_observation"] is True
-    assert pools[3]["require_final_observation"] is True
-    assert all(pool["dino_image_size"] == (480, 640) for pool in pools)
-    assert config["dataloaders"]["train"]["sampler"]["pool_weights"] == {
-        "original_success": 0.25,
-        "collected_success_replay": 0.25,
-        "historical_failure_replay": 0.25,
-        "latest_failure": 0.25,
-    }
-    assert config["models"]["initialization"] == "trained"
-    assert config["models"]["checkpoint"] == str(checkpoint)
-    posttrain = config["train"]["posttrain"]
-    assert posttrain["ema"]["decay"] == 0.995
-    assert posttrain["failure_policy_improvement"]["candidate_count"] == 8
-    assert posttrain["failure_policy_improvement"]["use_advantage_gate"] is False
-    assert posttrain["td"]["next_action_policy"] == "ema"
-    assert posttrain["td"]["bootstrap_failure_timeout"] is True
-    assert config["train"]["q_target_mode"] == "td_posttrain"
-    assert config["train"]["checkpoint_save_optimizer"] is True
-
-
-def test_mc_posttrain_uses_only_current_failures_and_balances_outcomes(
-    monkeypatch, tmp_path
-):
-    monkeypatch.setenv("ROBONANA_REPLAY_ROOT", str(tmp_path / "replay"))
-    monkeypatch.setenv("ROBONANA_POSTTRAIN_CHECKPOINT", str(tmp_path / "model.bin"))
-    monkeypatch.setenv("ROBONANA_POSTTRAIN_Q_TARGET_MODE", "mc_posttrain")
-    monkeypatch.setenv(
-        "ROBONANA_POSTTRAIN_ORIGINAL_TASK_GLOBS", "Clean/hanging_mug"
-    )
-    base = {
-        "project_dir": str(tmp_path / "experiment"),
-        "dataloaders": {
-            "train": {
-                "data_or_config": {
-                    "_class_name": "RoboTwinLeRobotDataset",
-                    "data_path": str(tmp_path / "original"),
-                    "stats_path": str(tmp_path / "stats.json"),
-                    "task_globs": ("Clean/*",),
-                    "dino_online": True,
-                },
-                "sampler": {},
-            }
-        },
-        "models": {},
-        "train": {"loss_weights": {}},
-    }
-
-    config = apply_iterative_posttrain_config(base)
-    pools = config["dataloaders"]["train"]["data_or_config"]
-    weights = config["dataloaders"]["train"]["sampler"]["pool_weights"]
-    assert all(pool["q_target_mode"] == "mc_posttrain" for pool in pools)
-    assert all(pool["failure_terminal_q"] == -1000.0 for pool in pools)
-    assert pools[0]["task_globs"] == ("Clean/hanging_mug",)
-    assert weights["historical_failure_replay"] == 0.0
-    assert weights["latest_failure"] == 0.5
-    assert weights["original_success"] + weights["collected_success_replay"] == 0.5
-    assert config["train"]["q_target_mode"] == "mc_posttrain"
-    assert config["train"]["posttrain"]["q_normalization"] == "none"

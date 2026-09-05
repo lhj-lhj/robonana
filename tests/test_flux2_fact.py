@@ -1,11 +1,13 @@
+import pytest
 import torch
 
 from flux2.model import Flux2, Flux2Params
 
-from robonana.models.flux2_fact import Flux2FACTModel, MacFlux2FACTModel
+from robonana.models.flux2_fact import Flux2FACTModel
+from robonana.models.mac_flux2_fact import MacFlux2FACTModel
 
 
-def test_mac_model_has_fixed_chunk_logits_and_deterministic_critics():
+def test_mac_model_has_actor_world_sequence_and_one_query_experts():
     params = Flux2Params(
         in_channels=8,
         context_in_dim=16,
@@ -41,10 +43,70 @@ def test_mac_model_has_fixed_chunk_logits_and_deterministic_critics():
     assert output.action.shape == (batch, 48, 6)
     assert output.reward.shape == (batch, 48)
     assert output.success.shape == (batch, 1)
-    assert output.q.shape == (batch, 1)
-    assert output.value.shape == (batch, 1)
+    assert output.q is None
+    assert output.value is None
     assert not hasattr(model, "q_in")
     assert not hasattr(model, "horizon_embed")
+    assert model.value_expert.query.num_embeddings == 1
+    assert model.q_expert.query.num_embeddings == 1
+    assert model.value_expert.query.weight.std().item() < 0.1
+    assert model.q_expert.query.weight.std().item() < 0.1
+    assert not hasattr(output.segments, "q")
+    assert not hasattr(output.segments, "value")
+    world_loss = (
+        output.action.square().mean()
+        + output.reward.square().mean()
+        + output.success.square().mean()
+        + output.future_state.square().mean()
+        + output.image.square().mean()
+    )
+    world_loss.backward()
+    assert model.double_blocks[0].img_attn.qkv.weight.grad is not None
+    assert model.value_expert.query.weight.grad is None
+    assert model.q_expert.query.weight.grad is None
+    model.zero_grad(set_to_none=True)
+
+    model.set_training_phase("critic")
+    context = torch.randn(batch, 3, 16)
+    current = torch.randn(batch, 2, 8)
+    state = torch.randn(batch, 1, 6)
+    clean_action = torch.randn(batch, 48, 6)
+    common = dict(
+        context=context,
+        context_ids=ids(3),
+        current_latents=current,
+        current_ids=ids(2),
+        state=state,
+        context_mask=torch.ones(batch, 3, dtype=torch.bool),
+    )
+    value = model.predict_value(**common)
+    q = model.predict_q(**common, clean_action=clean_action)
+    assert value.shape == (batch, 1)
+    assert q.shape == (batch, 1)
+    (value.mean() + q.mean()).backward()
+    assert model.double_blocks[0].img_attn.qkv.weight.grad is None
+    assert model.value_expert.double_blocks[0].img_attn.qkv.weight.grad is not None
+    assert model.q_expert.double_blocks[0].img_attn.qkv.weight.grad is not None
+
+    with pytest.raises(ValueError, match="horizon_idx=48"):
+        model.set_training_phase("world_policy")
+        model(
+            context=torch.randn(batch, 3, 16),
+            context_ids=ids(3),
+            current_latents=torch.randn(batch, 2, 8),
+            current_ids=ids(2),
+            noisy_future_latents=torch.randn(batch, 3, 8),
+            future_ids=ids(3),
+            state=torch.randn(batch, 1, 6),
+            noisy_pred_action=torch.randn(batch, 48, 6),
+            gt_action_cond=torch.randn(batch, 48, 6),
+            horizon_idx=torch.ones(batch, dtype=torch.long),
+            noisy_future_state=torch.randn(batch, 1, 6),
+            noisy_reward=empty,
+            noisy_q=empty,
+            action_timestep=torch.rand(batch),
+            wm_timestep=torch.rand(batch),
+        )
 
 
 def _tiny_model():

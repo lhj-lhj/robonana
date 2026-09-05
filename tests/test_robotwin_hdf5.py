@@ -14,7 +14,6 @@ from robonana.data.robotwin_hdf5 import (
     RoboTwinPosttrainSampler,
     discounted_chunk_reward,
     mac_binary_chunk_targets,
-    mc_episode_q_target,
     mac_success_targets,
 )
 
@@ -246,7 +245,7 @@ def _posttrain_pool(
     success,
     round_id=0,
     allow_empty=False,
-    q_target_mode="td_posttrain",
+    q_target_mode="mac_mot_v2",
 ):
     root = tmp_path / pool_name
     task_dir = root / f"task_{pool_name}" / "robonana_rollout"
@@ -284,44 +283,6 @@ def _posttrain_pool(
     )
 
 
-def test_mc_posttrain_failure_terminal_and_action_masks(tmp_path):
-    success = _posttrain_pool(
-        tmp_path,
-        "original_success",
-        success=True,
-        q_target_mode="mc_posttrain",
-    )
-    failure = _posttrain_pool(
-        tmp_path,
-        "latest_failure",
-        success=False,
-        q_target_mode="mc_posttrain",
-    )
-
-    assert success[3]["q"].item() == 0.0
-    assert success[3]["action_loss_mask"].item() == 1.0
-    assert failure[0]["q"].item() == pytest.approx(-1000.0)
-    assert failure[3]["q"].item() == pytest.approx(-1000.0)
-    assert failure[3]["q_loss_mask"].item() == 1.0
-    assert failure[3]["action_loss_mask"].item() == 0.0
-
-
-def test_mc_episode_q_target_uses_discounted_failure_terminal():
-    assert mc_episode_q_target(
-        frame_index=4,
-        episode_length=5,
-        success=False,
-    ) == pytest.approx(-1000.0)
-    assert mc_episode_q_target(
-        frame_index=0,
-        episode_length=5,
-        success=False,
-    ) == pytest.approx(-1000.0)
-    assert mc_episode_q_target(
-        frame_index=0,
-        episode_length=5,
-        success=True,
-    ) == pytest.approx(-sum(0.999**offset for offset in range(4)))
 
 
 def test_failure_timeout_uses_real_final_observation_and_zero_length_is_masked(tmp_path):
@@ -355,7 +316,7 @@ def test_failure_without_reset_pre_final_observation_is_rejected(tmp_path):
         success=False,
         policy_value=1.0,
     )
-    dataset.q_target_mode = "td_posttrain"
+    dataset.q_target_mode = "mac_mot_v2"
     dataset.episode_filter = "failure"
     dataset.pool_name = "latest_failure"
     dataset.require_final_observation = True

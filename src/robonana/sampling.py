@@ -57,8 +57,10 @@ class MacImaginaryRollout:
     reward_logits: Tensor
     success_logit: Tensor
     chunk_return: Tensor
-    next_value: Tensor
-    target_return: Tensor
+    target_next_value: Tensor
+    online_next_value: Tensor
+    value_target_return: Tensor
+    q_target_return: Tensor
 
 
 def sample_action_flow(
@@ -136,10 +138,10 @@ def sample_flux2_action(
     grid_height: int,
     grid_width: int,
 ) -> Tensor:
-    """Sample Stage-1 actions for either online or EMA RoboNana.
+    """Sample Stage-1 actions through the shared training/inference path.
 
-    This is the shared model-facing path used by live inference, failure
-    candidate generation, and TD next-action generation.
+    Maintained MAC calls use this for live policy inference and online
+    candidate generation. Legacy checkpoints retain the same public sampler.
     """
 
     if action_noise.ndim != 3:
@@ -163,7 +165,12 @@ def sample_flux2_action(
     empty_image = current_latents.new_empty(batch_size, 0, current_latents.shape[-1])
     empty_state = state.new_empty(batch_size, 0, state.shape[-1])
     empty_scalar = action_noise.new_empty(batch_size, 0, 1)
-    clean_gt_action = torch.zeros_like(action_noise)
+    model_spec = getattr(model, "module", model)
+    clean_gt_action = (
+        action_noise.new_empty(batch_size, 0, action_noise.shape[-1])
+        if getattr(model_spec, "architecture_version", None) == "mac_mot_v2"
+        else torch.zeros_like(action_noise)
+    )
     clean_wm_time = torch.zeros(batch_size, device=device, dtype=torch.float32)
 
     def predict_action(sampled_action: Tensor, sigma: Tensor) -> Tensor:
@@ -424,8 +431,8 @@ def evaluate_mac_critics(
     """Evaluate deterministic ``Value(s)`` and ``Q(s, action_chunk)``."""
 
     model_spec = getattr(model, "module", model)
-    if getattr(model_spec, "architecture_version", None) != "mac_v1":
-        raise ValueError("deterministic critics require a mac_v1 model")
+    if getattr(model_spec, "architecture_version", None) != "mac_mot_v2":
+        raise ValueError("deterministic critics require a mac_mot_v2 model")
     batch_size = context.shape[0]
     device = context.device
     context_ids = text_position_ids(batch_size, context.shape[1], device)
@@ -445,7 +452,7 @@ def evaluate_mac_critics(
     horizon = torch.full(
         (batch_size,), int(model_spec.chunk_horizon), device=device, dtype=torch.long
     )
-    output = model(
+    common = dict(
         context=context,
         context_ids=context_ids,
         current_latents=current_latents,
@@ -463,9 +470,42 @@ def evaluate_mac_critics(
         wm_timestep=zeros,
         context_mask=context_mask,
     )
-    if output.value is None:
-        raise RuntimeError("mac_v1 model did not produce Value")
-    return output.value, output.q
+    return model(**common, critic_kind="both")
+
+
+def evaluate_mac_target_value(
+    *,
+    model,
+    target_value_expert,
+    context: Tensor,
+    current_latents: Tensor,
+    state: Tensor,
+    context_mask: Tensor,
+    grid_height: int,
+    grid_width: int,
+) -> Tensor:
+    """Evaluate the detached EMA Value expert on the single frozen FLUX."""
+
+    model_spec = getattr(model, "module", model)
+    batch = context.shape[0]
+    device = context.device
+    context_ids = text_position_ids(batch, context.shape[1], device)
+    current_ids = image_position_ids(
+        batch,
+        grid_height=grid_height,
+        grid_width=grid_width,
+        time_coord=torch.zeros(batch, device=device, dtype=torch.long),
+        device=device,
+    )
+    return model_spec.predict_value(
+        context=context,
+        context_ids=context_ids,
+        current_latents=current_latents,
+        current_ids=current_ids,
+        state=state,
+        context_mask=context_mask,
+        expert=target_value_expert,
+    )
 
 
 def sample_mac_world(
@@ -485,8 +525,8 @@ def sample_mac_world(
     """Generate one learned fixed-chunk world transition."""
 
     model_spec = getattr(model, "module", model)
-    if getattr(model_spec, "architecture_version", None) != "mac_v1":
-        raise ValueError("imaginary world rollout requires a mac_v1 model")
+    if getattr(model_spec, "architecture_version", None) != "mac_mot_v2":
+        raise ValueError("imaginary world rollout requires a mac_mot_v2 model")
     if schedule.ndim != 1 or schedule.numel() < 2:
         raise ValueError("schedule must contain at least a start and end sigma")
     if not bool(torch.isclose(schedule[0], schedule.new_tensor(1.0))):
@@ -634,7 +674,7 @@ def sample_q_rejection(
 def generate_mac_imaginary_rollout_h1(
     *,
     online_model,
-    ema_model,
+    target_value_expert,
     context: Tensor,
     current_latents: Tensor,
     state: Tensor,
@@ -682,26 +722,40 @@ def generate_mac_imaginary_rollout_h1(
         grid_height=grid_height,
         grid_width=grid_width,
     )
-    empty_action = rejection.action.new_empty(
-        rejection.action.shape[0], 0, rejection.action.shape[-1]
-    )
-    next_value_normalized, _ = evaluate_mac_critics(
-        model=ema_model,
+    target_next_value_normalized = evaluate_mac_target_value(
+        model=online_model,
+        target_value_expert=target_value_expert,
         context=context,
         current_latents=world.future,
         state=world.future_state,
         context_mask=context_mask,
-        clean_action=empty_action,
         grid_height=grid_height,
         grid_width=grid_width,
+    )
+    model_spec = getattr(online_model, "module", online_model)
+    batch = context.shape[0]
+    context_ids = text_position_ids(batch, context.shape[1], context.device)
+    current_ids = image_position_ids(
+        batch,
+        grid_height=grid_height,
+        grid_width=grid_width,
+        time_coord=torch.zeros(batch, device=context.device, dtype=torch.long),
+        device=context.device,
+    )
+    online_next_value_normalized = model_spec.predict_value(
+        context=context,
+        context_ids=context_ids,
+        current_latents=world.future,
+        current_ids=current_ids,
+        state=world.future_state,
+        context_mask=context_mask,
     )
     probabilities = world.reward_logits.float().sigmoid()
     predicted_rewards = float(reward_non_goal) + probabilities * (
         float(reward_goal) - float(reward_non_goal)
     )
-    online_spec = getattr(online_model, "module", online_model)
     offsets = torch.arange(
-        int(online_spec.chunk_horizon),
+        int(model_spec.chunk_horizon),
         device=predicted_rewards.device,
         dtype=torch.float32,
     )
@@ -709,11 +763,16 @@ def generate_mac_imaginary_rollout_h1(
         torch.full_like(offsets, float(discount)), offsets
     )
     chunk_return = (predicted_rewards * discounts[None]).sum(dim=1, keepdim=True)
-    terminal_probability = world.success_logit.float().sigmoid()
-    next_value = next_value_normalized.float() * float(return_scale)
-    target_return = chunk_return + (
-        float(discount) ** int(online_spec.chunk_horizon)
-    ) * (1.0 - terminal_probability) * next_value
+    # MAC uses a discrete terminate mask.  The world model's sigmoid is
+    # thresholded and detached; critics cannot exploit soft terminal leakage.
+    bootstrap_mask = (world.success_logit.float().sigmoid() < 0.5).float()
+    target_next_value = target_next_value_normalized.float() * float(return_scale)
+    online_next_value = online_next_value_normalized.float() * float(return_scale)
+    gamma_chunk = float(discount) ** int(model_spec.chunk_horizon)
+    value_target = chunk_return + gamma_chunk * bootstrap_mask * target_next_value
+    # Original MAC has no target Q.  Its Q target uses stop-gradient online V:
+    # https://github.com/kwanyoungpark/MAC/blob/main/agents/mac.py#L191-L217
+    q_target = chunk_return + gamma_chunk * bootstrap_mask * online_next_value
     return MacImaginaryRollout(
         selected_action=rejection.action.detach(),
         candidates=rejection.candidates.detach(),
@@ -724,6 +783,8 @@ def generate_mac_imaginary_rollout_h1(
         reward_logits=world.reward_logits.detach(),
         success_logit=world.success_logit.detach(),
         chunk_return=chunk_return.detach(),
-        next_value=next_value.detach(),
-        target_return=target_return.detach(),
+        target_next_value=target_next_value.detach(),
+        online_next_value=online_next_value.detach(),
+        value_target_return=value_target.detach(),
+        q_target_return=q_target.detach(),
     )

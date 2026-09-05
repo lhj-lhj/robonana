@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import torch
 
 from fact_train import Trainer
-from robonana.training.posttraining import FullModelEMA
+from robonana.training.posttraining import ValueExpertEMA
 from robonana.training.robotwin_trainer import RoboNanaTrainer, resolve_cuda_device_index
 
 
@@ -24,7 +24,7 @@ def test_pixel_eval_runs_only_after_backward_and_optimizer(monkeypatch):
     )
     trainer._models = [torch.nn.Linear(1, 1)]
     trainer._optimizers = []
-    trainer.full_model_ema = None
+    trainer.target_value_ema = None
     trainer._accumulation_invalid = False
     trainer._pending_pixel_eval = {"sample": torch.tensor(1)}
     trainer._optimizer_step_succeeded = False
@@ -64,7 +64,8 @@ def test_early_checkpoint_reuses_fact_save_path(monkeypatch):
 
 def _ema_hook_trainer(*, sync_gradients: bool, skipped: bool = False):
     trainer = object.__new__(RoboNanaTrainer)
-    online = torch.nn.Linear(2, 2, bias=False)
+    value_expert = torch.nn.Linear(2, 2, bias=False)
+    online = SimpleNamespace(value_expert=value_expert)
     optimizer = SimpleNamespace(
         step_was_skipped=skipped,
         zero_grad=lambda: None,
@@ -76,26 +77,26 @@ def _ema_hook_trainer(*, sync_gradients: bool, skipped: bool = False):
     )
     trainer._models = [online]
     trainer._optimizers = [optimizer]
-    trainer.full_model_ema = FullModelEMA(online, decay=0.995)
+    trainer.target_value_ema = ValueExpertEMA(value_expert, decay=0.995)
     trainer._cur_step = 1
     trainer._accumulation_invalid = False
     trainer._optimizer_step_succeeded = False
     return trainer
 
 
-def test_gradient_accumulation_and_skipped_step_do_not_update_full_ema(monkeypatch):
+def test_gradient_accumulation_and_skipped_step_update_value_ema_only(monkeypatch):
     monkeypatch.setattr(Trainer, "backward_step", lambda self, loss: None)
     trainer = _ema_hook_trainer(sync_gradients=False)
     trainer.backward_step(torch.tensor(1.0))
-    assert trainer.full_model_ema.update_count == 0
+    assert trainer.target_value_ema.update_count == 0
 
     trainer.accelerator.sync_gradients = True
     trainer.backward_step(torch.tensor(1.0))
-    assert trainer.full_model_ema.update_count == 1
+    assert trainer.target_value_ema.update_count == 1
 
     skipped = _ema_hook_trainer(sync_gradients=True, skipped=True)
     skipped.backward_step(torch.tensor(1.0))
-    assert skipped.full_model_ema.update_count == 0
+    assert skipped.target_value_ema.update_count == 0
 
 
 def test_nonfinite_microstep_cancels_whole_accumulated_optimizer_step(monkeypatch):
@@ -116,7 +117,14 @@ def test_nonfinite_microstep_cancels_whole_accumulated_optimizer_step(monkeypatc
 
     assert events == ["zero"]
     assert trainer._accumulation_invalid is False
-    assert trainer.full_model_ema.update_count == 0
+    assert trainer.target_value_ema.update_count == 0
+
+
+def test_value_target_ema_contains_no_flux_or_q_parameters():
+    value = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.Linear(4, 1))
+    target = ValueExpertEMA(value, decay=0.9)
+    assert set(target.state_dict()) == set(value.state_dict())
+    assert all("flux" not in name and "q_expert" not in name for name in target.state_dict())
 
 
 def test_posttrain_pixel_eval_resolves_the_sample_owning_pool():
