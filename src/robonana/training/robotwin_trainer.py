@@ -27,15 +27,28 @@ from robonana.models.pretrained import (
     initialize_flux2_fact_model,
     load_flux2_fact_checkpoint,
     load_flux2_fact_trained_checkpoint,
+    load_mac_from_legacy_checkpoint,
 )
 from robonana.models.position_ids import dino_position_ids, image_position_ids, text_position_ids
-from robonana.sampling import flow_euler_schedule, sample_world_flow
-from robonana.training.losses import joint_flow_loss, masked_mse
+from robonana.sampling import (
+    evaluate_mac_critics,
+    flow_euler_schedule,
+    generate_mac_imaginary_rollout_h1,
+    sample_world_flow,
+)
+from robonana.training.losses import (
+    deterministic_return_loss,
+    joint_flow_loss,
+    masked_bce_with_logits,
+    masked_elementwise_bce_with_logits,
+    masked_mse,
+)
 from robonana.training.optimizer import build_optimizer_param_groups
 from robonana.training.posttraining import (
     FullModelEMA,
     TDTargetResult,
     build_td_targets,
+    evaluating,
     search_failure_candidates,
 )
 from robonana.training.visualization import (
@@ -136,6 +149,7 @@ class RoboNanaTrainer(Trainer):
                 "q_target_mode", self.kwargs.get("q_target_mode", "")
             )
         )
+        self.mac_enabled = self.posttrain_q_target_mode == "mac_v1"
         self.full_model_ema: FullModelEMA | None = None
         self.ema_forward_autocast_dtype = torch.bfloat16
         self.current_collection_round = int(
@@ -152,10 +166,28 @@ class RoboNanaTrainer(Trainer):
         configured_mode = str(self.kwargs.get("q_target_mode", ""))
         if configured_mode != self.posttrain_q_target_mode:
             raise ValueError("train and posttrain q_target_mode must match")
-        if configured_mode not in {"td_posttrain", "mc_posttrain"}:
+        if configured_mode not in {"td_posttrain", "mc_posttrain", "mac_v1"}:
             raise ValueError(
-                "iterative posttraining requires q_target_mode='td_posttrain' or 'mc_posttrain'"
+                "iterative posttraining requires td_posttrain, mc_posttrain, or mac_v1"
             )
+        if configured_mode == "mac_v1":
+            if self.posttrain_config.get("algorithm") != "mac_v1":
+                raise ValueError("mac_v1 posttraining requires algorithm='mac_v1'")
+            if int(self.posttrain_config.get("chunk_horizon", 0)) != 48:
+                raise ValueError("mac_v1 posttraining requires chunk_horizon=48")
+            imagination = dict(self.posttrain_config.get("imagination", {}))
+            if int(imagination.get("rollout_chunks", 0)) != 1:
+                raise ValueError("the first mac_v1 implementation supports H=1 only")
+            if int(imagination.get("candidate_count", 0)) <= 0:
+                raise ValueError("mac_v1 imagination candidate_count must be positive")
+            if float(self.posttrain_config.get("return_scale", 0.0)) <= 0:
+                raise ValueError("mac_v1 return_scale must be positive")
+            ema = dict(self.posttrain_config.get("ema", {}))
+            if ema.get("storage_dtype") != "float32":
+                raise ValueError("posttrain EMA storage_dtype must be float32")
+            if ema.get("forward_autocast_dtype") != "bfloat16":
+                raise ValueError("posttrain EMA forward dtype must be bfloat16")
+            return
         if configured_mode == "mc_posttrain":
             if float(self.posttrain_config.get("failure_terminal_q", -1000.0)) != -1000.0:
                 raise ValueError("MC posttraining failure_terminal_q must be -1000")
@@ -245,11 +277,21 @@ class RoboNanaTrainer(Trainer):
         success_dim = int(_config_value(model_config, "success_dim", 1))
         q_dim = int(_config_value(model_config, "q_dim", 1))
         reward_head_type = str(_config_value(model_config, "reward_head_type", "direct"))
-        if reward_head_type != "direct" or success_dim != 1:
+        max_horizon = int(_config_value(model_config, "max_horizon", 48))
+        architecture_version = str(
+            _config_value(model_config, "architecture_version", "legacy_v1")
+        )
+        chunk_horizon = int(_config_value(model_config, "chunk_horizon", max_horizon))
+        value_dim = int(_config_value(model_config, "value_dim", 1))
+        if architecture_version == "mac_v1":
+            if reward_head_type != "binary_chunk" or reward_dim != chunk_horizon:
+                raise ValueError(
+                    "mac_v1 requires reward_head_type='binary_chunk' and reward_dim=chunk_horizon"
+                )
+        elif reward_head_type != "direct" or success_dim != 1:
             raise ValueError(
                 "current training requires models.reward_head_type='direct' and success_dim=1"
             )
-        max_horizon = int(_config_value(model_config, "max_horizon", 48))
         raw_dino_dim = _config_value(model_config, "dino_dim", None)
         dino_dim = None if raw_dino_dim is None else int(raw_dino_dim)
         pred_action_bidirectional = _config_value(
@@ -305,6 +347,9 @@ class RoboNanaTrainer(Trainer):
                 device=self.device,
                 dtype=self.dtype,
                 params=params,
+                architecture_version=architecture_version,
+                chunk_horizon=chunk_horizon,
+                value_dim=value_dim,
             )
             initialization_label = f"pretrained checkpoint parameters={report.checkpoint_parameters}"
         elif initialization == "trained":
@@ -321,6 +366,9 @@ class RoboNanaTrainer(Trainer):
                 max_horizon=max_horizon,
                 dino_dim=dino_dim,
                 pred_action_bidirectional=pred_action_bidirectional,
+                architecture_version=architecture_version,
+                chunk_horizon=chunk_horizon,
+                value_dim=value_dim,
                 device=self.device,
                 dtype=self.dtype,
                 params=params,
@@ -329,6 +377,34 @@ class RoboNanaTrainer(Trainer):
             initialization_label = (
                 f"trained checkpoint parameters={report.checkpoint_parameters}; "
                 f"new_parameters={len(report.initialized_robot_parameters)}"
+            )
+        elif initialization == "mac_from_legacy":
+            if checkpoint is None:
+                raise ValueError("mac_from_legacy initialization requires models.checkpoint")
+            checkpoint_config = _config_value(model_config, "checkpoint_config", None)
+            if checkpoint_config is None:
+                raise ValueError(
+                    "mac_from_legacy initialization requires the exact 120k checkpoint_config"
+                )
+            model, report = load_mac_from_legacy_checkpoint(
+                str(checkpoint),
+                config_path=str(checkpoint_config),
+                action_dim=action_dim,
+                state_dim=state_dim,
+                reward_dim=reward_dim,
+                success_dim=success_dim,
+                q_dim=q_dim,
+                value_dim=value_dim,
+                chunk_horizon=chunk_horizon,
+                dino_dim=dino_dim,
+                device=self.device,
+                dtype=self.dtype,
+                params=params,
+            )
+            initialization_label = (
+                f"120k MAC migration loaded={len(report.loaded_parameter_names)}; "
+                f"skipped={len(report.skipped_checkpoint_parameters)}; "
+                f"new={len(report.initialized_robot_parameters)}"
             )
         elif initialization == "scratch":
             model = initialize_flux2_fact_model(
@@ -343,11 +419,14 @@ class RoboNanaTrainer(Trainer):
                 device=self.device,
                 dtype=self.dtype,
                 params=params,
+                architecture_version=architecture_version,
+                chunk_horizon=chunk_horizon,
+                value_dim=value_dim,
             )
             initialization_label = "scratch"
         else:
             raise ValueError(
-                "initialization must be 'pretrained', 'trained', or 'scratch', "
+                "initialization must be pretrained, trained, mac_from_legacy, or scratch, "
                 f"got {initialization!r}"
             )
         train_mode = str(_config_value(model_config, "train_mode", "full"))
@@ -380,8 +459,10 @@ class RoboNanaTrainer(Trainer):
                 self.pixel_eval_interval,
             )
             self.logger.info(
-                "Attention layout: A=%s; G=causal; future_targets=G-prefix-through-idx_h",
+                "Attention layout: architecture=%s; A=%s; clean_action=%s",
+                architecture_version,
                 "bidirectional" if model.pred_action_bidirectional else "causal",
+                "full-48" if architecture_version == "mac_v1" else "causal-prefix",
             )
             if self.dino_encoder is not None:
                 self.logger.info(
@@ -992,7 +1073,193 @@ class RoboNanaTrainer(Trainer):
             td_result.q_loss_mask,
         )
 
+    def _forward_step_mac(self, batch_dict: dict[str, Any]) -> dict[str, Tensor]:
+        """One real-data model update plus one fresh H=1 imaginary rollout."""
+
+        if self.full_model_ema is None:
+            raise RuntimeError("mac_v1 requires FullModelEMA from the first step")
+        context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
+        context_mask = batch_dict["context_mask"].to(
+            device=self.device, dtype=torch.bool
+        )
+        current = batch_dict["current_latents"].to(
+            device=self.device, dtype=self.dtype
+        )
+        future = batch_dict["future_latents"].to(
+            device=self.device, dtype=self.dtype
+        )
+        state = batch_dict["state"].to(
+            device=self.device, dtype=self.dtype
+        ).unsqueeze(1)
+        future_state = batch_dict["future_state"].to(
+            device=self.device, dtype=self.dtype
+        ).unsqueeze(1)
+        behavior_action = batch_dict.get(
+            "behavior_action", batch_dict["action"]
+        ).to(device=self.device, dtype=self.dtype)
+        reward_target = batch_dict["reward_chunk"].to(
+            device=self.device, dtype=self.dtype
+        )
+        reward_mask = batch_dict["reward_chunk_mask"].to(
+            device=self.device, dtype=self.dtype
+        )
+        success_target = batch_dict["success"].to(
+            device=self.device, dtype=self.dtype
+        ).reshape(context.shape[0], 1)
+        action_loss_mask = batch_dict["action_loss_mask"].to(device=self.device)
+        horizon = batch_dict["horizon_idx"].to(
+            device=self.device, dtype=torch.long
+        ).reshape(-1)
+        if not bool(torch.all(horizon == 48)):
+            raise ValueError("mac_v1 batches must use the fixed 48-step horizon")
+
+        batch_size = context.shape[0]
+        expected_tokens = self.grid_height * self.grid_width
+        if current.shape[1] != expected_tokens or future.shape[1] != expected_tokens:
+            raise ValueError(
+                f"cached FLUX image tokens must have {expected_tokens} tokens"
+            )
+        action_timestep = self._sample_timestep(batch_size)
+        wm_timestep = self._sample_timestep(batch_size)
+        noisy_action, action_velocity_target = flow_noise(
+            behavior_action, action_timestep
+        )
+        noisy_future, image_velocity_target = flow_noise(future, wm_timestep)
+        noisy_future_state, state_velocity_target = flow_noise(
+            future_state, wm_timestep
+        )
+        context_ids = text_position_ids(batch_size, context.shape[1], self.device)
+        current_ids = image_position_ids(
+            batch_size,
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
+            time_coord=torch.zeros_like(horizon),
+            device=self.device,
+        )
+        future_ids = image_position_ids(
+            batch_size,
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
+            time_coord=horizon,
+            device=self.device,
+        )
+        empty_scalar = behavior_action.new_empty(batch_size, 0, 1)
+        output = self.model(
+            context=context,
+            context_ids=context_ids,
+            current_latents=current,
+            current_ids=current_ids,
+            noisy_future_latents=noisy_future,
+            future_ids=future_ids,
+            state=state,
+            noisy_pred_action=noisy_action,
+            gt_action_cond=behavior_action,
+            horizon_idx=horizon,
+            noisy_future_state=noisy_future_state,
+            noisy_reward=empty_scalar,
+            noisy_q=empty_scalar,
+            action_timestep=action_timestep,
+            wm_timestep=wm_timestep,
+            context_mask=context_mask,
+        )
+
+        imagination = dict(self.posttrain_config["imagination"])
+        candidate_count = int(imagination["candidate_count"])
+        schedule = flow_euler_schedule(
+            int(imagination["sampling_steps"]),
+            flow_shift=float(imagination["flow_shift"]),
+            device=self.device,
+        )
+        action_noise = torch.randn(
+            batch_size,
+            candidate_count,
+            48,
+            behavior_action.shape[-1],
+            device=self.device,
+            dtype=self.dtype,
+        )
+        with evaluating(self.model), torch.autocast(
+            device_type=self.device.type,
+            dtype=self.ema_forward_autocast_dtype,
+            enabled=self.device.type == "cuda",
+        ):
+            imaginary = generate_mac_imaginary_rollout_h1(
+                online_model=self.model,
+                ema_model=self.full_model_ema.model,
+                context=context,
+                current_latents=current,
+                state=state,
+                context_mask=context_mask,
+                candidate_count=candidate_count,
+                action_noise=action_noise,
+                future_noise=torch.randn_like(future),
+                future_state_noise=torch.randn_like(future_state),
+                schedule=schedule,
+                discount=float(self.posttrain_config["discount"]),
+                reward_non_goal=float(self.posttrain_config["reward_non_goal"]),
+                reward_goal=float(self.posttrain_config["reward_goal"]),
+                return_scale=float(self.posttrain_config["return_scale"]),
+                grid_height=self.grid_height,
+                grid_width=self.grid_width,
+            )
+
+        value_prediction, q_prediction = evaluate_mac_critics(
+            model=self.model,
+            context=context,
+            current_latents=current,
+            state=state,
+            context_mask=context_mask,
+            clean_action=imaginary.selected_action,
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
+        )
+        return_scale = float(self.posttrain_config["return_scale"])
+        losses = {
+            "image_loss": masked_mse(output.image, image_velocity_target),
+            "action_loss": masked_mse(
+                output.action, action_velocity_target, action_loss_mask
+            ),
+            "future_state_loss": masked_mse(
+                output.future_state, state_velocity_target
+            ),
+            "reward_loss": masked_elementwise_bce_with_logits(
+                output.reward, reward_target, reward_mask
+            ),
+            "success_loss": masked_bce_with_logits(
+                output.success, success_target
+            ),
+            "value_loss": deterministic_return_loss(
+                value_prediction,
+                imaginary.target_return,
+                return_scale=return_scale,
+            ),
+            "q_loss": deterministic_return_loss(
+                q_prediction,
+                imaginary.target_return,
+                return_scale=return_scale,
+            ),
+        }
+        self._posttrain_metrics.update(
+            {
+                "posttrain/imaginary_chunk_return": imaginary.chunk_return.mean(),
+                "posttrain/imaginary_next_value": imaginary.next_value.mean(),
+                "posttrain/imaginary_target_return": imaginary.target_return.mean(),
+                "posttrain/imaginary_success_probability": imaginary.success_logit.float().sigmoid().mean(),
+                "posttrain/candidate_q_mean": imaginary.candidate_q.float().mean()
+                * return_scale,
+                "posttrain/candidate_q_std": imaginary.candidate_q.float().std(
+                    unbiased=False
+                )
+                * return_scale,
+                "posttrain/action_bc_fraction": action_loss_mask.float().mean(),
+                "posttrain/reward_valid_fraction": reward_mask.float().mean(),
+            }
+        )
+        return losses
+
     def forward_step(self, batch_dict: dict[str, Any]):
+        if self.mac_enabled:
+            return self._forward_step_mac(batch_dict)
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
         current = batch_dict["current_latents"].to(device=self.device, dtype=self.dtype)
         future = batch_dict["future_latents"].to(device=self.device, dtype=self.dtype)

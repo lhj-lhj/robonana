@@ -53,6 +53,8 @@ def main() -> int:
     parser.add_argument("--discount", type=float, default=0.999)
     parser.add_argument("--reward-non-goal", type=float, default=-1.0)
     parser.add_argument("--success-threshold", type=float, default=0.5)
+    parser.add_argument("--rejection-candidate-count", type=int, default=32)
+    parser.add_argument("--q-return-scale", type=float, default=1000.0)
     parser.add_argument(
         "--inference-mode",
         choices=tuple(mode.value for mode in InferenceMode),
@@ -107,6 +109,8 @@ def main() -> int:
         discount=args.discount,
         reward_non_goal=args.reward_non_goal,
         success_threshold=args.success_threshold,
+        rejection_candidate_count=args.rejection_candidate_count,
+        q_return_scale=args.q_return_scale,
         inference_mode=args.inference_mode,
         stage2_image_horizon_batch_size=args.stage2_image_horizon_batch_size,
         vae_decode_batch_size=args.vae_decode_batch_size,

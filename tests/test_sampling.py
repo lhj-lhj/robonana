@@ -1,12 +1,106 @@
+from types import SimpleNamespace
+
 import torch
 
 from robonana.sampling import (
     flow_euler_schedule,
     flow_euler_step,
+    generate_mac_imaginary_rollout_h1,
+    sample_q_rejection,
     sample_action_flow,
     sample_two_stage_flow,
     sample_world_flow,
 )
+
+
+class _FakeMacModel:
+    architecture_version = "mac_v1"
+    chunk_horizon = 48
+    action_dim = 2
+
+    def __init__(self, value: float = 0.0):
+        self.value = float(value)
+
+    def __call__(self, **kwargs):
+        action = kwargs["noisy_pred_action"]
+        clean_action = kwargs["gt_action_cond"]
+        batch = kwargs["context"].shape[0]
+        device = kwargs["context"].device
+        dtype = kwargs["context"].dtype
+        q = (
+            clean_action.float().mean(dim=(1, 2), keepdim=False)[:, None]
+            if clean_action.shape[1]
+            else torch.zeros(batch, 1, device=device)
+        )
+        return SimpleNamespace(
+            action=torch.zeros_like(action),
+            image=torch.zeros_like(kwargs["noisy_future_latents"]),
+            future_state=torch.zeros_like(kwargs["noisy_future_state"]),
+            reward=torch.zeros(batch, 48, device=device, dtype=dtype),
+            success=torch.zeros(batch, 1, device=device, dtype=dtype),
+            q=q.to(device=device, dtype=dtype),
+            value=torch.full((batch, 1), self.value, device=device, dtype=dtype),
+        )
+
+
+def test_q_rejection_returns_argmax_candidate():
+    model = _FakeMacModel()
+    context = torch.zeros(1, 1, 3)
+    current = torch.zeros(1, 1, 4)
+    state = torch.zeros(1, 1, 2)
+    noise = torch.stack(
+        [
+            torch.zeros(48, 2),
+            torch.ones(48, 2),
+            -torch.ones(48, 2),
+        ],
+        dim=0,
+    )[None]
+    result = sample_q_rejection(
+        model=model,
+        context=context,
+        current_latents=current,
+        state=state,
+        context_mask=torch.ones(1, 1, dtype=torch.bool),
+        candidate_count=3,
+        action_noise=noise,
+        schedule=torch.tensor([1.0, 0.0]),
+        grid_height=1,
+        grid_width=1,
+    )
+    assert result.best_index.item() == 1
+    torch.testing.assert_close(result.action, torch.ones(1, 48, 2))
+
+
+def test_h1_imaginary_target_uses_binary_reward_curve_and_ema_value():
+    online = _FakeMacModel()
+    ema = _FakeMacModel(value=0.1)
+    discount = 0.9
+    rollout = generate_mac_imaginary_rollout_h1(
+        online_model=online,
+        ema_model=ema,
+        context=torch.zeros(1, 1, 3),
+        current_latents=torch.zeros(1, 1, 4),
+        state=torch.zeros(1, 1, 2),
+        context_mask=torch.ones(1, 1, dtype=torch.bool),
+        candidate_count=1,
+        action_noise=torch.zeros(1, 1, 48, 2),
+        future_noise=torch.zeros(1, 1, 4),
+        future_state_noise=torch.zeros(1, 1, 2),
+        schedule=torch.tensor([1.0, 0.0]),
+        discount=discount,
+        reward_non_goal=-1.0,
+        reward_goal=0.0,
+        return_scale=1000.0,
+        grid_height=1,
+        grid_width=1,
+    )
+    expected_reward = -0.5 * sum(discount**step for step in range(48))
+    expected = expected_reward + discount**48 * 0.5 * 100.0
+    torch.testing.assert_close(
+        rollout.target_return, torch.tensor([[expected]]), atol=1e-5, rtol=1e-5
+    )
+    assert not rollout.target_return.requires_grad
 
 
 def test_flow_euler_schedule_runs_from_pure_noise_to_clean():

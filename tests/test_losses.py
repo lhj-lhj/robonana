@@ -2,7 +2,13 @@ from types import SimpleNamespace
 
 import torch
 
-from robonana.training.losses import joint_flow_loss, masked_bce_with_logits, masked_mse
+from robonana.training.losses import (
+    deterministic_return_loss,
+    joint_flow_loss,
+    masked_bce_with_logits,
+    masked_elementwise_bce_with_logits,
+    masked_mse,
+)
 
 
 def test_failure_mask_removes_action_sample():
@@ -20,6 +26,26 @@ def test_reward_is_binary_logit_loss():
     targets = torch.tensor([[0.0], [1.0]])
     expected = torch.nn.functional.binary_cross_entropy_with_logits(logits, targets)
     torch.testing.assert_close(masked_bce_with_logits(logits, targets), expected)
+
+
+def test_chunk_reward_bce_ignores_invalid_timeout_tail():
+    logits = torch.tensor([[0.0, 0.0, 100.0]])
+    targets = torch.zeros_like(logits)
+    mask = torch.tensor([[1.0, 1.0, 0.0]])
+    expected = torch.nn.functional.binary_cross_entropy_with_logits(
+        logits[:, :2], targets[:, :2]
+    )
+    torch.testing.assert_close(
+        masked_elementwise_bce_with_logits(logits, targets, mask), expected
+    )
+
+
+def test_deterministic_return_loss_uses_fixed_scale():
+    prediction = torch.tensor([[0.5], [-0.5]])
+    target = torch.tensor([[500.0], [-500.0]])
+    assert deterministic_return_loss(
+        prediction, target, return_scale=1000.0
+    ).item() == 0.0
 
 
 def test_joint_loss_adds_dino_only_when_target_is_present():

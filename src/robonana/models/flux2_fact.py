@@ -13,7 +13,12 @@ from torch.utils.checkpoint import checkpoint
 
 from flux2.model import Flux2, Flux2Params, apply_rope, timestep_embedding
 
-from .attention_mask import SegmentMap, build_attention_bias
+from .attention_mask import (
+    MacSegmentMap,
+    SegmentMap,
+    build_attention_bias,
+    build_mac_attention_bias,
+)
 
 
 @dataclass
@@ -25,7 +30,8 @@ class Flux2FACTOutput:
     success: Tensor
     q: Tensor
     dino: Tensor | None
-    segments: SegmentMap
+    segments: SegmentMap | MacSegmentMap
+    value: Tensor | None = None
 
 
 def _masked_attention(q: Tensor, k: Tensor, v: Tensor, bias: Tensor) -> Tensor:
@@ -537,4 +543,304 @@ class Flux2FACTModel(Flux2):
             q=q_output,
             dino=self.dino_out(dino_hidden) if self.dino_dim is not None and dino_hidden.shape[-2] else None,
             segments=segments,
+        )
+
+
+class MacFlux2FACTModel(Flux2FACTModel):
+    """Fixed-48 MAC schema using the same official FLUX.2 backbone.
+
+    This class intentionally retains the compatible action/state/image/DINO
+    module names so a legacy 120k RoboNana checkpoint can warm-start them.  All
+    horizon and scalar project heads are replaced by deterministic MAC heads.
+    """
+
+    architecture_version = "mac_v1"
+
+    def __init__(
+        self,
+        params: Flux2Params,
+        *,
+        action_dim: int,
+        state_dim: int,
+        chunk_horizon: int = 48,
+        reward_dim: int = 48,
+        success_dim: int = 1,
+        q_dim: int = 1,
+        value_dim: int = 1,
+        dino_dim: int | None = None,
+    ) -> None:
+        if int(chunk_horizon) != 48:
+            raise ValueError("mac_v1 currently requires chunk_horizon=48")
+        if int(reward_dim) != int(chunk_horizon):
+            raise ValueError("mac_v1 reward_dim must equal chunk_horizon")
+        if (int(success_dim), int(q_dim), int(value_dim)) != (1, 1, 1):
+            raise ValueError("mac_v1 success, Q, and Value heads must be scalar")
+        super().__init__(
+            params,
+            action_dim=action_dim,
+            state_dim=state_dim,
+            reward_dim=1,
+            success_dim=1,
+            q_dim=1,
+            max_horizon=chunk_horizon,
+            dino_dim=dino_dim,
+            pred_action_bidirectional=True,
+        )
+        self.chunk_horizon = int(chunk_horizon)
+        self.max_horizon = self.chunk_horizon
+        self.reward_dim = int(reward_dim)
+        self.value_dim = int(value_dim)
+
+        # These modules encode the removed variable-horizon/flow-Q schema and
+        # must not appear in a mac_v1 checkpoint.
+        del self.q_in
+        del self.horizon_embed
+        del self.segment_embed
+        del self.q_segment_embed
+        if hasattr(self, "dino_segment_embed"):
+            del self.dino_segment_embed
+
+        self.value_token = nn.Embedding(1, self.hidden_size)
+        self.q_token = nn.Embedding(1, self.hidden_size)
+        self.mac_segment_embed = nn.Embedding(11, self.hidden_size)
+        self.value_out = nn.Linear(self.hidden_size, value_dim, bias=False)
+        self.reward_out = nn.Linear(self.hidden_size, reward_dim, bias=False)
+        self.q_out = nn.Linear(self.hidden_size, q_dim, bias=False)
+
+    def forward(
+        self,
+        *,
+        context: Tensor,
+        context_ids: Tensor,
+        current_latents: Tensor,
+        current_ids: Tensor,
+        noisy_future_latents: Tensor,
+        future_ids: Tensor,
+        state: Tensor,
+        noisy_pred_action: Tensor,
+        gt_action_cond: Tensor,
+        horizon_idx: Tensor,
+        noisy_future_state: Tensor,
+        noisy_reward: Tensor,
+        noisy_q: Tensor,
+        action_timestep: Tensor,
+        wm_timestep: Tensor,
+        noisy_future_dino: Tensor | None = None,
+        dino_ids: Tensor | None = None,
+        context_mask: Tensor | None = None,
+        guidance: Tensor | None = None,
+    ) -> Flux2FACTOutput:
+        del horizon_idx, noisy_reward, noisy_q
+        batch_size = context.shape[0]
+        if current_ids.shape != (*current_latents.shape[:2], 4):
+            raise ValueError("current_ids must have shape [B, image_tokens, 4]")
+        if future_ids.shape != (*noisy_future_latents.shape[:2], 4):
+            raise ValueError("future_ids must have shape [B, image_tokens, 4]")
+        if context_ids.shape != (*context.shape[:2], 4):
+            raise ValueError("context_ids must have shape [B, text_tokens, 4]")
+        for name, value, width in (
+            ("state", state, self.state_dim),
+            ("noisy_future_state", noisy_future_state, self.state_dim),
+            ("noisy_pred_action", noisy_pred_action, self.action_dim),
+            ("gt_action_cond", gt_action_cond, self.action_dim),
+        ):
+            if value.ndim != 3 or value.shape[0] != batch_size or value.shape[-1] != width:
+                raise ValueError(f"{name} must have shape [B, tokens, {width}]")
+        if noisy_pred_action.shape[1] not in (0, self.chunk_horizon):
+            raise ValueError("mac_v1 predicted action must be empty or one 48-step chunk")
+        if gt_action_cond.shape[1] not in (0, self.chunk_horizon):
+            raise ValueError("mac_v1 clean action must be empty or one 48-step chunk")
+        if (noisy_future_dino is None) != (dino_ids is None):
+            raise ValueError("noisy_future_dino and dino_ids must be provided together")
+        if noisy_future_dino is not None:
+            if self.dino_dim is None or noisy_future_dino.shape[-1] != self.dino_dim:
+                raise ValueError("DINO token dimension does not match the mac_v1 model")
+            if dino_ids.shape != (*noisy_future_dino.shape[:2], 4):
+                raise ValueError("dino_ids must have shape [B, DINO tokens, 4]")
+
+        dtype = self.img_in.weight.dtype
+        device = context.device
+        context = context.to(dtype=dtype)
+        current_latents = current_latents.to(dtype=dtype)
+        noisy_future_latents = noisy_future_latents.to(dtype=dtype)
+        state = state.to(dtype=dtype)
+        noisy_pred_action = noisy_pred_action.to(dtype=dtype)
+        gt_action_cond = gt_action_cond.to(dtype=dtype)
+        noisy_future_state = noisy_future_state.to(dtype=dtype)
+        if noisy_future_dino is not None:
+            noisy_future_dino = noisy_future_dino.to(dtype=dtype)
+
+        segments = MacSegmentMap.from_lengths(
+            language=context.shape[1],
+            state=state.shape[1],
+            ref_image=current_latents.shape[1],
+            value=1,
+            pred_action=noisy_pred_action.shape[1],
+            clean_action=gt_action_cond.shape[1],
+            q=1,
+            reward=1,
+            success=1,
+            future_state=noisy_future_state.shape[1],
+            future_image=noisy_future_latents.shape[1],
+            future_dino=0 if noisy_future_dino is None else noisy_future_dino.shape[1],
+        )
+
+        def with_segment(part: Tensor, segment_id: int) -> Tensor:
+            return part + self.mac_segment_embed.weight[segment_id]
+
+        txt = self.txt_in(context)
+        image_parts = [
+            with_segment(self.state_in(state), 0),
+            with_segment(self.img_in(current_latents), 1),
+            with_segment(self.value_token.weight[None].expand(batch_size, 1, -1), 2),
+            with_segment(self.action_in(noisy_pred_action), 3),
+            with_segment(self.action_in(gt_action_cond), 4),
+            with_segment(self.q_token.weight[None].expand(batch_size, 1, -1), 5),
+            with_segment(self.reward_token.weight[None].expand(batch_size, 1, -1), 6),
+            with_segment(self.success_token.weight[None].expand(batch_size, 1, -1), 7),
+            with_segment(self.state_in(noisy_future_state), 8),
+            with_segment(self.img_in(noisy_future_latents), 9),
+        ]
+        if noisy_future_dino is not None:
+            image_parts.append(with_segment(self.dino_in(noisy_future_dino), 10))
+        img = torch.cat(image_parts, dim=1)
+
+        id_dtype = current_ids.dtype
+        action_time = torch.arange(
+            1, noisy_pred_action.shape[1] + 1, device=device, dtype=id_dtype
+        )[None].expand(batch_size, -1)
+        clean_action_time = torch.arange(
+            1, gt_action_cond.shape[1] + 1, device=device, dtype=id_dtype
+        )[None].expand(batch_size, -1)
+        robot_id = lambda length, segment_id, time_ids=None: self._robot_ids(
+            batch_size=batch_size,
+            length=length,
+            segment_id=segment_id,
+            device=device,
+            dtype=id_dtype,
+            time_ids=time_ids,
+        )
+        id_parts = [
+            robot_id(state.shape[1], 1),
+            current_ids.to(device=device),
+            robot_id(1, 2),
+            robot_id(noisy_pred_action.shape[1], 3, action_time),
+            robot_id(gt_action_cond.shape[1], 4, clean_action_time),
+            robot_id(1, 5),
+            robot_id(1, 6),
+            robot_id(1, 7),
+            robot_id(noisy_future_state.shape[1], 8),
+            future_ids.to(device=device),
+        ]
+        if dino_ids is not None:
+            id_parts.append(dino_ids.to(device=device))
+        nontext_ids = torch.cat(id_parts, dim=1)
+        pe_img = self.pe_embedder(nontext_ids)
+        pe_txt = self.pe_embedder(context_ids.to(device=device))
+        bias = build_mac_attention_bias(
+            segments,
+            batch_size=batch_size,
+            dtype=dtype,
+            device=device,
+            context_mask=context_mask,
+        )
+
+        zeros = torch.zeros_like(wm_timestep)
+        vec_clean = self._condition_vec(zeros, guidance)
+        vec_action = self._condition_vec(action_timestep, guidance)
+        vec_wm = self._condition_vec(wm_timestep, guidance)
+        double_clean = self.double_stream_modulation_img(vec_clean)
+        double_action = self.double_stream_modulation_img(vec_action)
+        double_wm = self.double_stream_modulation_img(vec_wm)
+        nontext_lengths = (
+            state.shape[1],
+            current_latents.shape[1],
+            1,
+            noisy_pred_action.shape[1],
+            gt_action_cond.shape[1],
+            1,
+            1,
+            1,
+            noisy_future_state.shape[1],
+            noisy_future_latents.shape[1],
+            0 if noisy_future_dino is None else noisy_future_dino.shape[1],
+        )
+        double_modes = (
+            double_clean,
+            double_clean,
+            double_clean,
+            double_action,
+            double_clean,
+            double_clean,
+            double_clean,
+            double_clean,
+            double_wm,
+            double_wm,
+            double_wm,
+        )
+        double_img = _stitch_double(zip(nontext_lengths, double_modes, strict=True))
+        double_txt = self.double_stream_modulation_txt(vec_clean)
+        for block in self.double_blocks:
+            if self.gradient_checkpointing and self.training:
+                img, txt = checkpoint(
+                    lambda img_, txt_, block_=block: self._double_block_forward(
+                        block_, img_, txt_, pe_img, pe_txt, double_img, double_txt, bias
+                    ),
+                    img,
+                    txt,
+                    use_reentrant=False,
+                )
+            else:
+                img, txt = self._double_block_forward(
+                    block, img, txt, pe_img, pe_txt, double_img, double_txt, bias
+                )
+
+        hidden = torch.cat([txt, img], dim=1)
+        pe = torch.cat([pe_txt, pe_img], dim=2)
+        single_clean = self.single_stream_modulation(vec_clean)[0]
+        single_action = self.single_stream_modulation(vec_action)[0]
+        single_wm = self.single_stream_modulation(vec_wm)[0]
+        single_lengths = (context.shape[1], *nontext_lengths)
+        single_modes = (
+            single_clean,
+            single_clean,
+            single_clean,
+            single_clean,
+            single_action,
+            single_clean,
+            single_clean,
+            single_clean,
+            single_clean,
+            single_wm,
+            single_wm,
+            single_wm,
+        )
+        single_mod = _stitch_triple(zip(single_lengths, single_modes, strict=True))
+        for block in self.single_blocks:
+            if self.gradient_checkpointing and self.training:
+                hidden = checkpoint(
+                    lambda hidden_, block_=block: self._single_block_forward(
+                        block_, hidden_, pe, single_mod, bias
+                    ),
+                    hidden,
+                    use_reentrant=False,
+                )
+            else:
+                hidden = self._single_block_forward(block, hidden, pe, single_mod, bias)
+
+        image_hidden = hidden[:, segments.future_image]
+        image_output = self.final_layer(image_hidden, vec_wm)
+        dino_output = None
+        if self.dino_dim is not None and segments.future_dino.stop > segments.future_dino.start:
+            dino_output = self.dino_out(hidden[:, segments.future_dino])
+        return Flux2FACTOutput(
+            image=image_output,
+            action=self.action_out(hidden[:, segments.pred_action]),
+            future_state=self.state_out(hidden[:, segments.future_state]),
+            reward=self.reward_out(hidden[:, segments.reward]).squeeze(1),
+            success=self.success_out(hidden[:, segments.success]).squeeze(1),
+            q=self.q_out(hidden[:, segments.q]).squeeze(1),
+            dino=dino_output,
+            segments=segments,
+            value=self.value_out(hidden[:, segments.value]).squeeze(1),
         )

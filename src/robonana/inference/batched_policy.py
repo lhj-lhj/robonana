@@ -16,7 +16,7 @@ from robonana.inference.robotwin_policy import (
     postprocess_action,
     seeded_randn_like,
 )
-from robonana.sampling import sample_flux2_action
+from robonana.sampling import QRejectionSample, sample_flux2_action, sample_q_rejection
 from world_action_model.image_layouts import (
     ROBOTWIN_VIEW_KEYS,
     build_robotwin_ref_tensor,
@@ -35,8 +35,13 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
     supports_true_batch = True
 
     def _validate_action_only_batch(self) -> None:
-        if self.inference_mode is not InferenceMode.ACTION:
-            raise ValueError("batched RoboTwin eval currently requires inference_mode='action'")
+        if self.inference_mode not in {
+            InferenceMode.ACTION,
+            InferenceMode.ACTION_Q_REJECTION,
+        }:
+            raise ValueError(
+                "batched RoboTwin eval requires action or action_q_rejection"
+            )
         if bool(getattr(self, "return_chunk_q", False)) or self.return_stage2_image:
             raise ValueError(
                 "batched RoboTwin eval is Stage-1-only; disable auxiliary Stage-2 returns"
@@ -156,6 +161,37 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
             ],
             dim=0,
         )
+        if self.inference_mode is InferenceMode.ACTION_Q_REJECTION:
+            noise_rows = []
+            for batch_index, seed in enumerate(sampling_seeds):
+                candidates = []
+                for candidate_index in range(self.rejection_candidate_count):
+                    candidate_seed = (
+                        None
+                        if seed is None
+                        else int(seed) + 1009 * candidate_index
+                    )
+                    candidates.append(
+                        seeded_randn_like(
+                            clean_gt_action[batch_index : batch_index + 1],
+                            candidate_seed,
+                        )[0]
+                    )
+                noise_rows.append(torch.stack(candidates, dim=0))
+            self._last_batch_rejection = sample_q_rejection(
+                model=self.model,
+                context=context,
+                current_latents=current,
+                state=state,
+                context_mask=context_mask,
+                candidate_count=self.rejection_candidate_count,
+                action_noise=torch.stack(noise_rows, dim=0),
+                schedule=self.schedule,
+                grid_height=self.grid_height,
+                grid_width=self.grid_width,
+            )
+            return self._last_batch_rejection.action
+        self._last_batch_rejection = None
         return sample_flux2_action(
             model=self.model,
             context=context,
@@ -245,7 +281,7 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
             "action_sample_ms": action_sample_ms,
             "total_policy_ms": total_ms,
         }
-        return [
+        responses = [
             {
                 "action": action,
                 "_inference_mode": self.inference_mode.value,
@@ -254,3 +290,25 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
             }
             for index, action in enumerate(actions)
         ]
+        rejection: QRejectionSample | None = getattr(
+            self, "_last_batch_rejection", None
+        )
+        if rejection is not None:
+            for index, response in enumerate(responses):
+                candidate_q = (
+                    rejection.candidate_q[index].float() * self.q_return_scale
+                ).cpu()
+                best_index = int(rejection.best_index[index].item())
+                sorted_q = candidate_q.sort(descending=True).values
+                response.update(
+                    candidate_q=candidate_q,
+                    selected_candidate_index=best_index,
+                    selected_q=float(candidate_q[best_index].item()),
+                    q_margin=(
+                        float((sorted_q[0] - sorted_q[1]).item())
+                        if sorted_q.numel() > 1
+                        else 0.0
+                    ),
+                    candidate_count=self.rejection_candidate_count,
+                )
+        return responses

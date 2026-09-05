@@ -1,6 +1,48 @@
 from __future__ import annotations
 
-from robonana.configs.posttrain_config import apply_iterative_posttrain_config
+from robonana.configs.posttrain_config import (
+    apply_iterative_posttrain_config,
+    apply_mac_posttrain_config,
+)
+
+
+def test_mac_posttrain_is_fixed_h1_and_uses_120k_migration(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROBONANA_REPLAY_ROOT", str(tmp_path / "replay"))
+    monkeypatch.setenv("ROBONANA_SOURCE_RUN", str(tmp_path / "run120k"))
+    base = {
+        "project_dir": str(tmp_path / "base"),
+        "dataloaders": {
+            "train": {
+                "data_or_config": {
+                    "_class_name": "RoboTwinLeRobotDataset",
+                    "data_path": str(tmp_path / "original"),
+                    "stats_path": str(tmp_path / "stats.json"),
+                    "dino_online": True,
+                },
+                "sampler": {},
+            }
+        },
+        "models": {},
+        "train": {
+            "loss_weights": {},
+            "tracker_init_kwargs": {"wandb": {}},
+        },
+    }
+    config = apply_mac_posttrain_config(base)
+    assert config["models"]["architecture_version"] == "mac_v1"
+    assert config["models"]["initialization"] == "mac_from_legacy"
+    assert config["models"]["reward_dim"] == 48
+    assert config["models"]["checkpoint"].endswith(
+        "checkpoint_epoch_6_step_120000/transformer/diffusion_pytorch_model.bin"
+    )
+    posttrain = config["train"]["posttrain"]
+    assert posttrain["imagination"]["rollout_chunks"] == 1
+    assert posttrain["imagination"]["candidate_count"] == 8
+    assert posttrain["environment_policy"]["candidate_count"] == 32
+    assert posttrain["ema"]["decay"] == 0.995
+    pools = config["dataloaders"]["train"]["data_or_config"]
+    assert all(pool["fixed_horizon"] == 48 for pool in pools)
+    assert all(pool["q_target_mode"] == "mac_v1" for pool in pools)
 
 
 def test_posttrain_config_builds_four_separate_pool_views(monkeypatch, tmp_path):

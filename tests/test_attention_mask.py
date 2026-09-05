@@ -1,6 +1,52 @@
 import torch
 
-from robonana.models.attention_mask import SegmentMap, build_attention_bias
+from robonana.models.attention_mask import (
+    MacSegmentMap,
+    SegmentMap,
+    build_attention_bias,
+    build_mac_attention_bias,
+)
+
+
+def test_mac_mask_enforces_deterministic_critics_and_world_cascade():
+    seg = MacSegmentMap.from_lengths(
+        language=2,
+        state=1,
+        ref_image=2,
+        value=1,
+        pred_action=4,
+        clean_action=4,
+        q=1,
+        reward=1,
+        success=1,
+        future_state=1,
+        future_image=3,
+    )
+    bias = build_mac_attention_bias(
+        seg,
+        batch_size=1,
+        dtype=torch.float32,
+        device="cpu",
+    )[0, 0]
+
+    context = seg.clean_condition
+    assert torch.isfinite(bias[seg.value, context]).all()
+    for forbidden in (seg.pred_action, seg.clean_action, seg.q, seg.reward):
+        assert torch.isneginf(bias[seg.value, forbidden]).all()
+    assert torch.isfinite(bias[seg.q, seg.clean_action]).all()
+    for forbidden in (seg.value, seg.pred_action, seg.reward, seg.success, seg.future_state):
+        assert torch.isneginf(bias[seg.q, forbidden]).all()
+    assert torch.isfinite(bias[seg.reward, seg.clean_action]).all()
+    assert torch.isneginf(bias[seg.reward, seg.q]).all()
+    assert torch.isfinite(bias[seg.success, seg.reward]).all()
+    assert torch.isneginf(bias[seg.success, seg.future_state]).all()
+    assert torch.isfinite(bias[seg.future_state, seg.reward]).all()
+    assert torch.isfinite(bias[seg.future_state, seg.success]).all()
+    assert torch.isfinite(bias[seg.future_image, seg.future_state]).all()
+    for world in (seg.reward, seg.success, seg.future_state, seg.future_image):
+        assert torch.isneginf(bias[world, seg.value]).all()
+        assert torch.isneginf(bias[world, seg.pred_action]).all()
+        assert torch.isneginf(bias[world, seg.q]).all()
 
 
 def test_pred_action_is_bidirectional_gt_action_is_causal_and_targets_see_prefix():

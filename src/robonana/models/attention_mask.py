@@ -8,6 +8,80 @@ import torch
 
 
 @dataclass(frozen=True)
+class MacSegmentMap:
+    """Fixed-chunk MAC layout.
+
+    The language tokens are stored in FLUX's text stream and every other slice
+    is stored in the image stream, but the slices describe their concatenated
+    attention order::
+
+        [L | S | I | V | A | G | Q | R | U | S' | I' | D]
+
+    ``R`` is one learned query whose output head produces all chunk-reward
+    logits.  ``U`` is the success-terminal query.  There is deliberately no
+    horizon token: one transition is always one complete action chunk.
+    """
+
+    language: slice
+    state: slice
+    ref_image: slice
+    value: slice
+    pred_action: slice
+    clean_action: slice
+    q: slice
+    reward: slice
+    success: slice
+    future_state: slice
+    future_image: slice
+    future_dino: slice
+    total_length: int
+
+    @property
+    def clean_condition(self) -> slice:
+        return slice(self.language.start, self.ref_image.stop)
+
+    @classmethod
+    def from_lengths(
+        cls,
+        *,
+        language: int,
+        state: int,
+        ref_image: int,
+        value: int,
+        pred_action: int,
+        clean_action: int,
+        q: int,
+        reward: int,
+        success: int,
+        future_state: int,
+        future_image: int,
+        future_dino: int = 0,
+    ) -> "MacSegmentMap":
+        lengths = (
+            language,
+            state,
+            ref_image,
+            value,
+            pred_action,
+            clean_action,
+            q,
+            reward,
+            success,
+            future_state,
+            future_image,
+            future_dino,
+        )
+        if any(length < 0 for length in lengths):
+            raise ValueError(f"segment lengths must be non-negative, got {lengths}")
+        slices: list[slice] = []
+        start = 0
+        for length in lengths:
+            slices.append(slice(start, start + length))
+            start += length
+        return cls(*slices, total_length=start)
+
+
+@dataclass(frozen=True)
 class WorldBlockMap:
     """One isolated ``[H | S | R | U | Q | I | D]`` horizon-query block.
 
@@ -269,6 +343,74 @@ def build_attention_bias(
         # ignored, but SDPA still needs one finite key to avoid NaNs.
         for batch_index in range(batch_size):
             padded = torch.where(~context_mask[batch_index])[0] + segments.language.start
+            allowed[batch_index, padded, :] = False
+            allowed[batch_index, padded, padded] = True
+
+    bias = torch.zeros(batch_size, 1, n, n, dtype=dtype, device=device)
+    return bias.masked_fill(~allowed[:, None], float("-inf"))
+
+
+def build_mac_attention_bias(
+    segments: MacSegmentMap,
+    *,
+    batch_size: int,
+    dtype: torch.dtype,
+    device: torch.device | str,
+    context_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Build the explicit fixed-chunk MAC dependency graph.
+
+    The graph is intentionally stronger than an ordinary causal mask.  Value
+    cannot read an action; Q cannot read predicted rewards or futures; and the
+    learned world model is the requested cascade ``R -> U -> S' -> I'``.  The
+    action-flow track is an isolated sink and therefore cannot leak into Q or
+    the world targets.
+    """
+
+    if not dtype.is_floating_point:
+        raise TypeError(f"attention bias requires a floating dtype, got {dtype}")
+    n = segments.total_length
+    allowed = torch.zeros(batch_size, n, n, dtype=torch.bool, device=device)
+    c = segments.clean_condition
+    v = segments.value
+    a = segments.pred_action
+    g = segments.clean_action
+    q = segments.q
+    r = segments.reward
+    u = segments.success
+    s = segments.future_state
+    i = segments.future_image
+    d = segments.future_dino
+
+    _allow(allowed, c, c)
+    _allow(allowed, v, c, v)
+    _allow(allowed, a, c, a)
+    # A candidate is a complete known chunk, so the clean conditioning track
+    # is bidirectional and every downstream query may inspect all 48 actions.
+    _allow(allowed, g, c, g)
+    _allow(allowed, q, c, g, q)
+    _allow(allowed, r, c, g, r)
+    _allow(allowed, u, c, g, r, u)
+    _allow(allowed, s, c, g, r, u, s)
+    _allow(allowed, i, c, g, r, u, s, i)
+    # DINO remains an optional training-only sink and is never visible to any
+    # earlier segment.
+    _allow(allowed, d, c, g, r, u, s, i, d)
+
+    if context_mask is not None:
+        expected = (batch_size, segments.language.stop - segments.language.start)
+        if tuple(context_mask.shape) != expected:
+            raise ValueError(
+                f"context_mask must have shape {expected}, got {tuple(context_mask.shape)}"
+            )
+        context_mask = context_mask.to(device=device, dtype=torch.bool)
+        valid_keys = torch.ones(batch_size, n, dtype=torch.bool, device=device)
+        valid_keys[:, segments.language] = context_mask
+        allowed &= valid_keys[:, None, :]
+        for batch_index in range(batch_size):
+            padded = (
+                torch.where(~context_mask[batch_index])[0] + segments.language.start
+            )
             allowed[batch_index, padded, :] = False
             allowed[batch_index, padded, padded] = True
 

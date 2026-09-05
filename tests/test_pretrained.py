@@ -12,8 +12,55 @@ from robonana.models.pretrained import (
     configure_trainable_parameters,
     load_flux2_fact_checkpoint,
     load_flux2_fact_trained_checkpoint,
+    load_mac_from_legacy_checkpoint,
     robot_parameter_names,
 )
+
+
+def test_mac_migration_from_120k_loads_compatible_weights_only(tmp_path):
+    source = Flux2FACTModel(
+        _tiny_params(), action_dim=6, state_dim=5, max_horizon=48
+    )
+    checkpoint = tmp_path / "run120k" / "models" / "checkpoint_epoch_6_step_120000" / "transformer" / "diffusion_pytorch_model.bin"
+    checkpoint.parent.mkdir(parents=True)
+    torch.save(source.state_dict(), checkpoint)
+    config_path = tmp_path / "run120k" / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "models": {
+                    "params": asdict(_tiny_params()),
+                    "action_dim": 6,
+                    "state_dim": 5,
+                    "reward_dim": 1,
+                    "success_dim": 1,
+                    "q_dim": 1,
+                    "reward_head_type": "direct",
+                    "max_horizon": 48,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.warns(UserWarning, match="legacy 120k"):
+        model, report = load_mac_from_legacy_checkpoint(
+            checkpoint,
+            config_path=config_path,
+            action_dim=6,
+            state_dim=5,
+            device="cpu",
+            dtype=torch.float32,
+            params=_tiny_params(),
+        )
+
+    assert model.architecture_version == "mac_v1"
+    assert model.reward_out.weight.shape == (48, model.hidden_size)
+    torch.testing.assert_close(model.action_in.weight, source.action_in.weight)
+    torch.testing.assert_close(model.state_out.weight, source.state_out.weight)
+    assert "action_in.weight" in report.loaded_parameter_names
+    assert "q_out.weight" in report.skipped_checkpoint_parameters
+    assert "horizon_embed.weight" in report.skipped_checkpoint_parameters
+    assert any(name.startswith("value_token.") for name in report.initialized_robot_parameters)
 
 
 def _tiny_params():

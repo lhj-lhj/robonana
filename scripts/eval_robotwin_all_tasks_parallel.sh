@@ -254,6 +254,9 @@ run_worker() {
     --action-chunk 48
     --horizon 24
     --num-inference-steps 20
+    --inference-mode "${ROBONANA_INFERENCE_MODE:-action}"
+    --rejection-candidate-count "${ROBONANA_REJECTION_CANDIDATE_COUNT:-32}"
+    --q-return-scale "${ROBONANA_Q_RETURN_SCALE:-1000}"
     --port "${port}"
     --max-batch-size "${jobs_per_gpu}"
     --max-batch-wait-ms "${batch_wait_ms}"

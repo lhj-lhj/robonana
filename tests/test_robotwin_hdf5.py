@@ -13,9 +13,24 @@ from robonana.data.robotwin_hdf5 import (
     RoboTwinMixtureSampler,
     RoboTwinPosttrainSampler,
     discounted_chunk_reward,
+    mac_binary_chunk_targets,
     mc_episode_q_target,
     mac_success_targets,
 )
+
+
+def test_mac_binary_reward_chunk_uses_absorbing_success_and_masks_timeout_tail():
+    success, success_mask = mac_binary_chunk_targets(
+        delta_steps=3, success_terminal=True, chunk_horizon=6
+    )
+    torch.testing.assert_close(success, torch.tensor([0, 0, 0, 1, 1, 1]).float())
+    torch.testing.assert_close(success_mask, torch.ones(6))
+
+    timeout, timeout_mask = mac_binary_chunk_targets(
+        delta_steps=3, success_terminal=False, chunk_horizon=6
+    )
+    torch.testing.assert_close(timeout, torch.zeros(6))
+    torch.testing.assert_close(timeout_mask, torch.tensor([1, 1, 1, 0, 0, 0]).float())
 
 
 def _stats(dim=14):

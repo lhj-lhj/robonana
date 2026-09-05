@@ -18,10 +18,12 @@ from robonana.data.robotwin_hdf5 import ALOHA_DELTA_MASK
 from robonana.encoding import LocalQwen3Embedder, encode_flux2_image_tokens
 from robonana.models.pretrained import load_flux2_fact_trained_checkpoint
 from robonana.sampling import (
+    QRejectionSample,
     WorldFlowSample,
     flow_euler_schedule,
     sample_flux2_action,
     sample_flux2_world,
+    sample_q_rejection,
 )
 from robonana.training.visualization import decode_flux2_tokens
 from world_action_model.image_layouts import (
@@ -40,9 +42,10 @@ from world_action_model.pipeline.utils import (
 
 
 class InferenceMode(str, Enum):
-    """The four supported RoboNana inference graphs."""
+    """Supported RoboNana inference graphs."""
 
     ACTION = "action"
+    ACTION_Q_REJECTION = "action_q_rejection"
     ACTION_REWARD_Q = "action_reward_q"
     WORLD_ALL = "world_all"
     WORLD_HORIZON = "world_horizon"
@@ -202,6 +205,8 @@ class RoboNanaRobotWinPolicy:
         reward_non_goal: float = -1.0,
         reward_goal: float = 0.0,
         success_threshold: float = 0.5,
+        rejection_candidate_count: int = 32,
+        q_return_scale: float = 1000.0,
     ) -> None:
         self.flux_checkpoint_dir = Path(flux_checkpoint_dir).expanduser().resolve()
         self.model_device = torch.device(model_device)
@@ -224,10 +229,16 @@ class RoboNanaRobotWinPolicy:
         self.reward_non_goal = float(reward_non_goal)
         self.reward_goal = float(reward_goal)
         self.success_threshold = float(success_threshold)
+        self.rejection_candidate_count = int(rejection_candidate_count)
+        self.q_return_scale = float(q_return_scale)
         if not 0.0 < self.discount <= 1.0:
             raise ValueError("discount must lie in (0, 1]")
         if not 0.0 <= self.success_threshold <= 1.0:
             raise ValueError("success_threshold must lie in [0, 1]")
+        if self.rejection_candidate_count <= 0:
+            raise ValueError("rejection_candidate_count must be positive")
+        if self.q_return_scale <= 0:
+            raise ValueError("q_return_scale must be positive")
         if self.return_stage2_image and not self.return_chunk_q:
             raise ValueError("return_stage2_image requires return_chunk_q Stage-2 sampling")
         if self.inference_mode is not InferenceMode.ACTION and (
@@ -252,8 +263,6 @@ class RoboNanaRobotWinPolicy:
             checkpoint,
             action_dim=action_dim,
             state_dim=state_dim,
-            success_dim=1,
-            reward_head_type="direct",
             max_horizon=max_horizon,
             device=self.model_device,
             dtype=self.dtype,
@@ -268,6 +277,19 @@ class RoboNanaRobotWinPolicy:
         if self.action_chunk > self.max_horizon:
             raise ValueError("action_chunk cannot exceed the checkpoint's max_horizon")
         self.model.eval().requires_grad_(False)
+        if (
+            self.inference_mode is InferenceMode.ACTION_Q_REJECTION
+            and getattr(self.model, "architecture_version", None) != "mac_v1"
+        ):
+            raise ValueError("action_q_rejection requires a mac_v1 checkpoint")
+        if (
+            getattr(self.model, "architecture_version", None) == "mac_v1"
+            and self.inference_mode
+            not in {InferenceMode.ACTION, InferenceMode.ACTION_Q_REJECTION}
+        ):
+            raise ValueError(
+                "mac_v1 live inference currently supports action or action_q_rejection"
+            )
         self.vae = AutoencoderKLFlux2.from_pretrained(
             self.flux_checkpoint_dir,
             subfolder="vae",
@@ -296,6 +318,7 @@ class RoboNanaRobotWinPolicy:
         )
         self._text_embedder: LocalQwen3Embedder | None = None
         self._context_cache: dict[str, Tensor] = {}
+        self._last_rejection: QRejectionSample | None = None
 
     def _sync(self, device: torch.device) -> None:
         if device.type == "cuda":
@@ -360,6 +383,31 @@ class RoboNanaRobotWinPolicy:
             device=self.model_device,
             dtype=torch.bool,
         )
+        if self.inference_mode is InferenceMode.ACTION_Q_REJECTION:
+            noises = []
+            for candidate_index in range(self.rejection_candidate_count):
+                candidate_seed = (
+                    None
+                    if sampling_seed is None
+                    else int(sampling_seed) + 1009 * candidate_index
+                )
+                noises.append(
+                    seeded_randn_like(action_template, candidate_seed)[:, None]
+                )
+            self._last_rejection = sample_q_rejection(
+                model=self.model,
+                context=context,
+                current_latents=current,
+                state=state,
+                context_mask=context_mask,
+                candidate_count=self.rejection_candidate_count,
+                action_noise=torch.cat(noises, dim=1),
+                schedule=self.schedule,
+                grid_height=self.grid_height,
+                grid_width=self.grid_width,
+            )
+            return self._last_rejection.action
+        self._last_rejection = None
         return sample_flux2_action(
             model=self.model,
             context=context,
@@ -575,6 +623,7 @@ class RoboNanaRobotWinPolicy:
 
     @torch.inference_mode()
     def inference(self, observation: dict[str, Any]) -> dict[str, Any]:
+        self._last_rejection = None
         timing: dict[str, float] = {}
         total_start = time.perf_counter()
         log_digest = os.environ.get("ROBONANA_LOG_INFERENCE_DIGEST", "").strip().lower() in {
@@ -818,6 +867,23 @@ class RoboNanaRobotWinPolicy:
             "_policy_timing_ms": timing,
             "_sampling_seed": observation.get("sampling_seed"),
         }
+        if self._last_rejection is not None:
+            candidate_q = (
+                self._last_rejection.candidate_q[0].float() * self.q_return_scale
+            ).cpu()
+            best_index = int(self._last_rejection.best_index[0].item())
+            sorted_q = candidate_q.sort(descending=True).values
+            response.update(
+                candidate_q=candidate_q,
+                selected_candidate_index=best_index,
+                selected_q=float(candidate_q[best_index].item()),
+                q_margin=(
+                    float((sorted_q[0] - sorted_q[1]).item())
+                    if sorted_q.numel() > 1
+                    else 0.0
+                ),
+                candidate_count=self.rejection_candidate_count,
+            )
         if world_sample is not None and horizons is not None:
             future_states = denormalize_state(
                 world_sample.future_state[0].float(), self.normalization, mode="zscore"

@@ -31,6 +31,41 @@ def masked_bce_with_logits(
     return (per_sample * mask).sum() / mask.sum().clamp_min(1e-8)
 
 
+def masked_elementwise_bce_with_logits(
+    logits: Tensor,
+    target: Tensor,
+    valid_mask: Tensor,
+) -> Tensor:
+    """BCE normalized by valid chunk positions rather than padded positions."""
+
+    if logits.shape != target.shape or logits.shape != valid_mask.shape:
+        raise ValueError(
+            "logits, target, and valid_mask must have identical shapes, got "
+            f"{tuple(logits.shape)}, {tuple(target.shape)}, {tuple(valid_mask.shape)}"
+        )
+    elementwise = F.binary_cross_entropy_with_logits(
+        logits.float(), target.float(), reduction="none"
+    )
+    mask = valid_mask.to(device=elementwise.device, dtype=elementwise.dtype)
+    return (elementwise * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+def deterministic_return_loss(
+    prediction: Tensor,
+    target: Tensor,
+    *,
+    return_scale: float,
+    sample_mask: Tensor | None = None,
+) -> Tensor:
+    """MSE for deterministic Value/Q heads using one fixed return scale."""
+
+    return_scale = float(return_scale)
+    if return_scale <= 0:
+        raise ValueError("return_scale must be positive")
+    normalized_target = target.float() / return_scale
+    return masked_mse(prediction, normalized_target, sample_mask)
+
+
 def joint_flow_loss(
     output: Flux2FACTOutput,
     *,

@@ -23,6 +23,7 @@ for upstream in reversed(
 import torch
 
 from robonana.inference.batched_policy import BatchedRoboNanaRobotWinPolicy
+from robonana.inference.robotwin_policy import InferenceMode
 from robonana.inference.dynamic_batch_server import DynamicBatchRobotInferenceServer
 from world_action_model import apply_runtime_compat
 
@@ -43,6 +44,13 @@ def main() -> int:
     parser.add_argument("--action-chunk", type=int, default=48)
     parser.add_argument("--horizon", type=int, default=24)
     parser.add_argument("--num-inference-steps", type=int, default=20)
+    parser.add_argument(
+        "--inference-mode",
+        choices=(InferenceMode.ACTION.value, InferenceMode.ACTION_Q_REJECTION.value),
+        default=InferenceMode.ACTION.value,
+    )
+    parser.add_argument("--rejection-candidate-count", type=int, default=32)
+    parser.add_argument("--q-return-scale", type=float, default=1000.0)
     parser.add_argument("--max-batch-size", type=int, default=2)
     parser.add_argument("--max-batch-wait-ms", type=float, default=100.0)
     parser.add_argument("--max-clients", type=int, default=16)
@@ -64,6 +72,9 @@ def main() -> int:
         action_chunk=args.action_chunk,
         horizon=args.horizon,
         num_inference_steps=args.num_inference_steps,
+        inference_mode=args.inference_mode,
+        rejection_candidate_count=args.rejection_candidate_count,
+        q_return_scale=args.q_return_scale,
     )
     resolved = policy.load_report.model_config
     print(

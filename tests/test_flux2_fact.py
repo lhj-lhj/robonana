@@ -2,7 +2,49 @@ import torch
 
 from flux2.model import Flux2, Flux2Params
 
-from robonana.models.flux2_fact import Flux2FACTModel
+from robonana.models.flux2_fact import Flux2FACTModel, MacFlux2FACTModel
+
+
+def test_mac_model_has_fixed_chunk_logits_and_deterministic_critics():
+    params = Flux2Params(
+        in_channels=8,
+        context_in_dim=16,
+        hidden_size=32,
+        num_heads=4,
+        depth=1,
+        depth_single_blocks=1,
+        axes_dim=[2, 2, 2, 2],
+        mlp_ratio=2.0,
+        use_guidance_embed=False,
+    )
+    model = MacFlux2FACTModel(params, action_dim=6, state_dim=6)
+    batch = 2
+    ids = lambda length: torch.zeros(batch, length, 4)
+    empty = torch.empty(batch, 0, 1)
+    output = model(
+        context=torch.randn(batch, 3, 16),
+        context_ids=ids(3),
+        current_latents=torch.randn(batch, 2, 8),
+        current_ids=ids(2),
+        noisy_future_latents=torch.randn(batch, 3, 8),
+        future_ids=ids(3),
+        state=torch.randn(batch, 1, 6),
+        noisy_pred_action=torch.randn(batch, 48, 6),
+        gt_action_cond=torch.randn(batch, 48, 6),
+        horizon_idx=torch.full((batch,), 48),
+        noisy_future_state=torch.randn(batch, 1, 6),
+        noisy_reward=empty,
+        noisy_q=empty,
+        action_timestep=torch.rand(batch),
+        wm_timestep=torch.rand(batch),
+    )
+    assert output.action.shape == (batch, 48, 6)
+    assert output.reward.shape == (batch, 48)
+    assert output.success.shape == (batch, 1)
+    assert output.q.shape == (batch, 1)
+    assert output.value.shape == (batch, 1)
+    assert not hasattr(model, "q_in")
+    assert not hasattr(model, "horizon_embed")
 
 
 def _tiny_model():

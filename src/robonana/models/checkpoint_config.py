@@ -25,6 +25,9 @@ class RoboNanaCheckpointConfig:
     dino_dim: int | None
     pred_action_bidirectional: bool
     legacy_value_dim: int | None
+    architecture_version: str
+    chunk_horizon: int
+    value_dim: int
     source: str
 
 
@@ -102,16 +105,33 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
             f"model config {path} is missing reward_dim and q_dim "
             "(or the explicit legacy value_dim marker)"
         )
-    if reward_dim != 1 or q_dim != 1:
-        raise ValueError("reward_dim and q_dim must both be one scalar token")
+    architecture_version = str(models.get("architecture_version", "legacy_v1"))
+    if architecture_version not in {"legacy_v1", "mac_v1"}:
+        raise ValueError("models.architecture_version must be legacy_v1 or mac_v1")
+    chunk_horizon = int(models.get("chunk_horizon", models["max_horizon"]))
+    value_dim = int(models.get("value_dim", 1))
     reward_head_type = str(models.get("reward_head_type", "flow"))
-    if reward_head_type not in {"flow", "direct"}:
-        raise ValueError("models.reward_head_type must be 'flow' or 'direct'")
+    if reward_head_type not in {"flow", "direct", "binary_chunk"}:
+        raise ValueError(
+            "models.reward_head_type must be 'flow', 'direct', or 'binary_chunk'"
+        )
     success_dim = int(models.get("success_dim", 0))
-    if reward_head_type == "direct" and success_dim != 1:
-        raise ValueError("direct reward checkpoints must declare models.success_dim=1")
-    if reward_head_type == "flow" and success_dim != 0:
-        raise ValueError("legacy flow-reward checkpoints must not declare a success head")
+    if architecture_version == "mac_v1":
+        if chunk_horizon != 48 or int(models["max_horizon"]) != chunk_horizon:
+            raise ValueError("mac_v1 requires chunk_horizon=max_horizon=48")
+        if reward_head_type != "binary_chunk" or reward_dim != chunk_horizon:
+            raise ValueError(
+                "mac_v1 requires a binary_chunk reward head with one logit per chunk step"
+            )
+        if success_dim != 1 or q_dim != 1 or value_dim != 1:
+            raise ValueError("mac_v1 success, Q, and Value dimensions must be one")
+    else:
+        if reward_dim != 1 or q_dim != 1:
+            raise ValueError("legacy reward_dim and q_dim must both be one scalar token")
+        if reward_head_type == "direct" and success_dim != 1:
+            raise ValueError("direct reward checkpoints must declare models.success_dim=1")
+        if reward_head_type == "flow" and success_dim != 0:
+            raise ValueError("legacy flow-reward checkpoints must not declare a success head")
 
     return RoboNanaCheckpointConfig(
         params=Flux2Params(**dict(raw_params)),
@@ -128,6 +148,9 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
         # Configs written before the hybrid layout used causal A and causal G.
         pred_action_bidirectional=raw_pred_action_bidirectional,
         legacy_value_dim=legacy_value_dim,
+        architecture_version=architecture_version,
+        chunk_horizon=chunk_horizon,
+        value_dim=value_dim,
         source=str(path),
     )
 
@@ -146,6 +169,9 @@ def resolve_checkpoint_config(
     max_horizon: int | None = None,
     dino_dim: int | None = None,
     pred_action_bidirectional: bool | None = None,
+    architecture_version: str | None = None,
+    chunk_horizon: int | None = None,
+    value_dim: int | None = None,
 ) -> RoboNanaCheckpointConfig:
     """Resolve an exact architecture; never infer structure from model tensors."""
 
@@ -190,12 +216,26 @@ def resolve_checkpoint_config(
                     else pred_action_bidirectional
                 ),
                 legacy_value_dim=None,
+                architecture_version=(
+                    "legacy_v1" if architecture_version is None else architecture_version
+                ),
+                chunk_horizon=(
+                    int(max_horizon) if chunk_horizon is None else int(chunk_horizon)
+                ),
+                value_dim=1 if value_dim is None else int(value_dim),
                 source="explicit model metadata",
             )
-            if resolved.reward_dim != 1 or resolved.q_dim != 1:
-                raise ValueError("reward_dim and q_dim must both be one scalar token")
-            if resolved.success_dim != 1 or resolved.reward_head_type != "direct":
-                raise ValueError("current RoboNana models require direct reward and success_dim=1")
+            if resolved.architecture_version == "mac_v1":
+                if (
+                    resolved.reward_head_type != "binary_chunk"
+                    or resolved.reward_dim != resolved.chunk_horizon
+                    or resolved.success_dim != 1
+                    or resolved.q_dim != 1
+                    or resolved.value_dim != 1
+                ):
+                    raise ValueError("invalid explicit mac_v1 model metadata")
+            elif resolved.reward_dim != 1 or resolved.q_dim != 1:
+                raise ValueError("legacy reward_dim and q_dim must both be one scalar token")
             return resolved
         raise FileNotFoundError(
             "no complete RoboNana model config was found above checkpoint "
@@ -225,9 +265,22 @@ def resolve_checkpoint_config(
             if pred_action_bidirectional is not None
             else resolved.pred_action_bidirectional
         ),
+        architecture_version=(
+            str(architecture_version)
+            if architecture_version is not None
+            else resolved.architecture_version
+        ),
+        chunk_horizon=(
+            int(chunk_horizon)
+            if chunk_horizon is not None
+            else resolved.chunk_horizon
+        ),
+        value_dim=int(value_dim) if value_dim is not None else resolved.value_dim,
     )
-    if resolved.reward_dim != 1 or resolved.q_dim != 1:
-        raise ValueError("reward_dim and q_dim must both be one scalar token")
-    if resolved.reward_head_type not in {"flow", "direct"}:
-        raise ValueError("reward_head_type must be 'flow' or 'direct'")
+    if resolved.architecture_version == "legacy_v1" and (
+        resolved.reward_dim != 1 or resolved.q_dim != 1
+    ):
+        raise ValueError("legacy reward_dim and q_dim must both be one scalar token")
+    if resolved.reward_head_type not in {"flow", "direct", "binary_chunk"}:
+        raise ValueError("unsupported reward_head_type")
     return resolved

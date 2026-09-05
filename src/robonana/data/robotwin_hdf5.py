@@ -58,6 +58,35 @@ def discounted_chunk_reward(
     )
 
 
+def mac_binary_chunk_targets(
+    *,
+    delta_steps: int,
+    success_terminal: bool,
+    chunk_horizon: int = 48,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build one binary reward label per action in the fixed MAC chunk.
+
+    Class zero decodes to the RoboTwin step cost ``-1``.  A successful terminal
+    enters an absorbing state, so the terminal suffix is class one and decodes
+    to ``0``.  A failed time-limit suffix is unknown rather than terminal and is
+    therefore excluded with ``valid_mask``.
+    """
+
+    delta_steps = int(delta_steps)
+    chunk_horizon = int(chunk_horizon)
+    if chunk_horizon <= 0:
+        raise ValueError("chunk_horizon must be positive")
+    if not 0 <= delta_steps <= chunk_horizon:
+        raise ValueError("delta_steps must lie in [0, chunk_horizon]")
+    target = torch.zeros(chunk_horizon, dtype=torch.float32)
+    valid_mask = torch.zeros(chunk_horizon, dtype=torch.float32)
+    valid_mask[:delta_steps] = 1.0
+    if success_terminal:
+        target[delta_steps:] = 1.0
+        valid_mask[delta_steps:] = 1.0
+    return target, valid_mask
+
+
 def mac_success_targets(
     *,
     frame_index: int,
@@ -333,9 +362,22 @@ class RoboTwinHDF5Dataset(BaseDataset):
             raise ValueError("dino_image_size must be (height, width) with positive values")
         if not 0.0 < self.discount <= 1.0:
             raise ValueError("discount must lie in (0, 1]")
-        if self.q_target_mode not in {"mc_success", "mc_posttrain", "td_posttrain"}:
+        if self.q_target_mode not in {
+            "mc_success",
+            "mc_posttrain",
+            "td_posttrain",
+            "mac_v1",
+        }:
             raise ValueError(
-                "q_target_mode must be 'mc_success', 'mc_posttrain', or 'td_posttrain'"
+                "q_target_mode must be mc_success, mc_posttrain, td_posttrain, or mac_v1"
+            )
+        if self.q_target_mode == "mac_v1" and (
+            self.action_chunk != 48
+            or self.max_horizon != self.action_chunk
+            or self.fixed_horizon not in (0, self.action_chunk)
+        ):
+            raise ValueError(
+                "mac_v1 requires action_chunk=max_horizon=48 and fixed_horizon=0 or 48"
             )
         if self.episode_filter not in {"all", "success", "failure"}:
             raise ValueError("episode_filter must be all, success, or failure")
@@ -527,6 +569,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
         return self.records[episode_pos], int(index - self.episode_starts[episode_pos])
 
     def _sample_horizon(self) -> int:
+        if self.q_target_mode == "mac_v1":
+            return self.action_chunk
         if self.fixed_horizon:
             return self.fixed_horizon
         return int(torch.randint(1, self.max_horizon + 1, ()).item())
@@ -637,6 +681,11 @@ class RoboTwinHDF5Dataset(BaseDataset):
         current_latent, future_latent = select_current_future_latents(frame_latents, frame_index, horizon_idx)
         context = self._context(record)
         success_terminal_h = bool(record.success and future_index == record.length - 1)
+        reward_chunk, reward_chunk_mask = mac_binary_chunk_targets(
+            delta_steps=delta_steps,
+            success_terminal=success_terminal_h,
+            chunk_horizon=self.action_chunk,
+        )
         direct_reward_h = self.reward_goal if success_terminal_h else self.reward_non_goal
         time_limit_truncated_h = bool(
             not record.success
@@ -658,6 +707,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
             # posttraining needs the real discounted reward accumulated from
             # t through the clipped horizon.
             "reward": torch.tensor([direct_reward_h], dtype=torch.float32),
+            "reward_chunk": reward_chunk,
+            "reward_chunk_mask": reward_chunk_mask,
             "reward_h": torch.tensor([reward_h], dtype=torch.float32),
             "success": torch.tensor([float(success_terminal_h)], dtype=torch.float32),
             "q": torch.tensor([q_clean], dtype=torch.float32),
@@ -671,7 +722,11 @@ class RoboTwinHDF5Dataset(BaseDataset):
             ),
             "episode_success": torch.tensor(float(record.success), dtype=torch.float32),
             "action_loss_mask": torch.tensor(
-                1.0 if self.q_target_mode == "td_posttrain" else float(record.success),
+                (
+                    float(record.success)
+                    if self.q_target_mode == "mac_v1"
+                    else 1.0 if self.q_target_mode == "td_posttrain" else float(record.success)
+                ),
                 dtype=torch.float32,
             ),
             "q_loss_mask": torch.tensor(

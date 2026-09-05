@@ -16,7 +16,7 @@ from PIL import Image
 
 CAMERAS = ("head_camera", "left_camera", "right_camera")
 ROLLOUT_VARIANT = "robonana_rollout"
-ROLLOUT_SCHEMA_VERSION = 2
+ROLLOUT_SCHEMA_VERSION = 3
 
 
 def _atomic_json(payload: Mapping[str, Any], path: Path) -> None:
@@ -91,6 +91,7 @@ class RoboTwinRolloutWriter:
         self._states: list[np.ndarray] = []
         self._actions: list[np.ndarray] = []
         self._transition_valid: list[bool] = []
+        self._policy_selections: list[dict[str, Any] | None] = []
         self._metadata: dict[str, Any] | None = None
         self._success = False
         self._terminal = False
@@ -121,6 +122,7 @@ class RoboTwinRolloutWriter:
         action: np.ndarray,
         success: bool,
         terminal: bool,
+        policy_selection: Mapping[str, Any] | None = None,
     ) -> None:
         missing = [camera for camera in CAMERAS if camera not in images]
         if missing:
@@ -145,6 +147,28 @@ class RoboTwinRolloutWriter:
         self._states.append(state_value.copy())
         self._actions.append(action_value.copy())
         self._transition_valid.append(True)
+        if policy_selection is None:
+            self._policy_selections.append(None)
+        else:
+            candidate_q = np.asarray(
+                policy_selection["candidate_q"], dtype=np.float32
+            ).reshape(-1)
+            candidate_count = int(policy_selection["candidate_count"])
+            selected_index = int(policy_selection["selected_candidate_index"])
+            if candidate_q.shape != (candidate_count,):
+                raise ValueError("candidate_q length must equal candidate_count")
+            if not 0 <= selected_index < candidate_count:
+                raise ValueError("selected_candidate_index is outside candidate_q")
+            self._policy_selections.append(
+                {
+                    "inference_mode": str(policy_selection["inference_mode"]),
+                    "candidate_q": candidate_q.copy(),
+                    "candidate_count": candidate_count,
+                    "selected_candidate_index": selected_index,
+                    "selected_q": float(policy_selection["selected_q"]),
+                    "q_margin": float(policy_selection["q_margin"]),
+                }
+            )
         self._success = self._success or bool(success)
         self._terminal = self._terminal or bool(terminal)
 
@@ -176,6 +200,11 @@ class RoboTwinRolloutWriter:
         # transition_valid=False prevents it from entering any TD target.
         self._actions.append(self._actions[-1].copy())
         self._transition_valid.append(False)
+        self._policy_selections.append(
+            None
+            if not self._policy_selections
+            else self._policy_selections[-1]
+        )
         self._final_observation_appended = True
 
     def _reserve_episode_index(self, task_dir: Path) -> tuple[int, Path]:
@@ -242,6 +271,34 @@ class RoboTwinRolloutWriter:
                     "transition_valid",
                     data=np.asarray(self._transition_valid, dtype=np.bool_),
                 )
+                selected_rows = [row for row in self._policy_selections if row is not None]
+                if selected_rows:
+                    if len(selected_rows) != len(self._policy_selections):
+                        raise RuntimeError(
+                            "an episode cannot mix Q-rejection and unranked action plans"
+                        )
+                    candidate_counts = {int(row["candidate_count"]) for row in selected_rows}
+                    inference_modes = {str(row["inference_mode"]) for row in selected_rows}
+                    if len(candidate_counts) != 1 or len(inference_modes) != 1:
+                        raise RuntimeError(
+                            "Q-rejection candidate count and inference mode must be fixed per episode"
+                        )
+                    group = handle.create_group("policy_selection")
+                    group.attrs["inference_mode"] = next(iter(inference_modes))
+                    group.create_dataset(
+                        "candidate_q",
+                        data=np.stack([row["candidate_q"] for row in selected_rows]),
+                    )
+                    for name, dtype in (
+                        ("selected_candidate_index", np.int64),
+                        ("selected_q", np.float32),
+                        ("q_margin", np.float32),
+                        ("candidate_count", np.int64),
+                    ):
+                        group.create_dataset(
+                            name,
+                            data=np.asarray([row[name] for row in selected_rows], dtype=dtype),
+                        )
                 image_dtype = h5py.vlen_dtype(np.dtype("uint8"))
                 for camera in CAMERAS:
                     dataset = handle.create_dataset(
@@ -296,6 +353,7 @@ class RoboTwinRolloutWriter:
         self._states = []
         self._actions = []
         self._transition_valid = []
+        self._policy_selections = []
         self._metadata = None
         self._success = False
         self._terminal = False

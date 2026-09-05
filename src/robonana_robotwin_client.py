@@ -120,6 +120,22 @@ def _install_chunk_return_hook(model) -> None:
 
     def inference_with_chunk_return(request):
         response = original_inference(request)
+        if isinstance(response, dict) and response.get("candidate_q") is not None:
+            candidate_q = response["candidate_q"]
+            if hasattr(candidate_q, "detach"):
+                candidate_q = candidate_q.detach().cpu().numpy()
+            model._robonana_policy_selection = {
+                "inference_mode": str(
+                    response.get("_inference_mode", "action_q_rejection")
+                ),
+                "candidate_q": np.asarray(candidate_q, dtype=np.float32).reshape(-1),
+                "selected_candidate_index": int(
+                    response["selected_candidate_index"]
+                ),
+                "selected_q": float(response["selected_q"]),
+                "q_margin": float(response["q_margin"]),
+                "candidate_count": int(response["candidate_count"]),
+            }
         if isinstance(response, dict) and response.get("chunk_q") is not None:
             model._robonana_chunk_reward = _response_scalar(response["chunk_reward"])
             model._robonana_chunk_q = _response_scalar(response["chunk_q"])
@@ -138,6 +154,7 @@ def _install_chunk_return_hook(model) -> None:
     model._robonana_return_horizon = 0
     model._robonana_chunk_index = -1
     model._robonana_pending_stage2_image = None
+    model._robonana_policy_selection = None
     model._robonana_chunk_return_hook = True
 
 
@@ -323,6 +340,7 @@ def reset_model(model) -> None:
     model._robonana_return_horizon = 0
     model._robonana_chunk_index = -1
     model._robonana_pending_stage2_image = None
+    model._robonana_policy_selection = None
 
 
 def _episode_seed(task_env) -> int | None:
@@ -371,6 +389,7 @@ def eval(TASK_ENV, model, observation):  # noqa: A001,N803
         action=action,
         success=success,
         terminal=terminal,
+        policy_selection=getattr(model, "_robonana_policy_selection", None),
     )
     if terminal:
         final_observation = getattr(TASK_ENV, "now_obs", None)

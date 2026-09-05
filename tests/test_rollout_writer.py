@@ -79,3 +79,36 @@ def test_rollout_writer_rejects_initial_dataset_subdirectory(tmp_path) -> None:
     initial_root = tmp_path / "initial"
     with pytest.raises(ValueError, match="must be separate"):
         RoboTwinRolloutWriter(initial_root / "policy_data", initial_dataset_root=initial_root)
+
+
+def test_rollout_writer_records_q_rejection_selection(tmp_path) -> None:
+    writer = RoboTwinRolloutWriter(
+        tmp_path / "rollouts", initial_dataset_root=tmp_path / "initial"
+    )
+    images = {camera: np.zeros((4, 4, 3), dtype=np.uint8) for camera in CAMERAS}
+    selection = {
+        "inference_mode": "action_q_rejection",
+        "candidate_q": np.asarray([-4.0, -2.0, -3.0], dtype=np.float32),
+        "candidate_count": 3,
+        "selected_candidate_index": 1,
+        "selected_q": -2.0,
+        "q_margin": 1.0,
+    }
+    writer.append(
+        task_name="hanging_mug",
+        instruction="hang the mug",
+        seed=1,
+        images=images,
+        state=np.zeros(14, dtype=np.float32),
+        action=np.zeros(14, dtype=np.float32),
+        success=True,
+        terminal=True,
+        policy_selection=selection,
+    )
+    writer.append_final_observation(images=images, state=np.zeros(14, dtype=np.float32))
+    output = writer.finish_episode()
+    with h5py.File(output, "r") as handle:
+        group = handle["policy_selection"]
+        assert group.attrs["inference_mode"] == "action_q_rejection"
+        np.testing.assert_array_equal(group["selected_candidate_index"][:], [1, 1])
+        np.testing.assert_allclose(group["candidate_q"][:], [[-4, -2, -3], [-4, -2, -3]])
