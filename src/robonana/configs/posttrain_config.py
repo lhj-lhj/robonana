@@ -290,6 +290,21 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
     source_config = Path(
         os.environ.get("ROBONANA_MAC_PRETRAIN_CONFIG", source_run / "config.json")
     ).expanduser()
+    initialization = os.environ.get(
+        "ROBONANA_MAC_INITIALIZATION", "mac_from_legacy"
+    ).strip()
+    if initialization not in {"mac_from_legacy", "trained"}:
+        raise ValueError(
+            "ROBONANA_MAC_INITIALIZATION must be mac_from_legacy or trained"
+        )
+    if initialization == "trained" and (
+        not os.environ.get("ROBONANA_MAC_PRETRAIN_CHECKPOINT", "").strip()
+        or not os.environ.get("ROBONANA_MAC_PRETRAIN_CONFIG", "").strip()
+    ):
+        raise ValueError(
+            "trained MAC continuation requires explicit "
+            "ROBONANA_MAC_PRETRAIN_CHECKPOINT and ROBONANA_MAC_PRETRAIN_CONFIG"
+        )
     replay_root = Path(
         os.environ.get(
             "ROBONANA_REPLAY_ROOT",
@@ -376,7 +391,7 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
     )
     config["models"].update(
         architecture_version="mac_v1",
-        initialization="mac_from_legacy",
+        initialization=initialization,
         checkpoint=str(source_checkpoint),
         checkpoint_config=str(source_config),
         action_dim=14,

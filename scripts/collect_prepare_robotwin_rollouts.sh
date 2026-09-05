@@ -33,6 +33,32 @@ test_num=${TEST_NUM:-1}
 eval_run_dir=${ROBONANA_EVAL_RUN_DIR:-${dataset_root}/logs/isolated_collection}
 video_log=${EVAL_VIDEO_LOG:-0}
 
+count_dataset_episodes() {
+  local data_dir="${dataset_root}/${task_name}/robonana_rollout/data"
+  if [[ ! -d ${data_dir} ]]; then
+    printf '0\n'
+    return
+  fi
+  find "${data_dir}" -maxdepth 1 -type f -name 'episode*.hdf5' | wc -l
+}
+
+count_completed_eval_episodes() {
+  local ledger rows
+  local total=0
+  if [[ ! -d ${eval_run_dir} ]]; then
+    printf '0\n'
+    return
+  fi
+  while IFS= read -r -d '' ledger; do
+    rows=$(grep -cve '^[[:space:]]*$' "${ledger}" || true)
+    total=$((total + rows))
+  done < <(
+    find "${eval_run_dir}" -type f \
+      -path "*/task_runs/${task_name}/episodes.jsonl" -print0
+  )
+  printf '%d\n' "${total}"
+}
+
 for required_path in "${trained_checkpoint}" "${stats_source}" "${model_python}" \
   "${robotwin_python}" "${deploy_policy}" "${isolated_eval}"; do
   if [[ ! -f "${required_path}" ]]; then
@@ -60,6 +86,13 @@ if [[ ${server_gpu_id} == "${sim_gpu_id}" ]]; then
 fi
 
 mkdir -p "${dataset_root}/logs"
+episode_count_before=$(count_dataset_episodes)
+completed_eval_before=$(count_completed_eval_episodes)
+if (( completed_eval_before > test_num )); then
+  echo "evaluation ledger has ${completed_eval_before} rows, target is ${test_num}" >&2
+  exit 2
+fi
+expected_new_episodes=$((test_num - completed_eval_before))
 env \
   ROBONANA_TRAINED_CHECKPOINT="${trained_checkpoint}" \
   ROBONANA_STATS_PATH="${stats_source}" \
@@ -87,10 +120,11 @@ env \
   ROBONANA_ROLLOUT_CHECKPOINT="${trained_checkpoint}" \
   bash "${isolated_eval}" "${task_config}" "${test_num}"
 
-episode_count=$(find "${dataset_root}/${task_name}/robonana_rollout/data" \
-  -maxdepth 1 -type f -name 'episode*.hdf5' | wc -l)
-if [[ ${episode_count} -ne ${test_num} ]]; then
-  echo "isolated collection wrote ${episode_count} episodes, expected ${test_num}" >&2
+episode_count=$(count_dataset_episodes)
+expected_episode_count=$((episode_count_before + expected_new_episodes))
+if [[ ${episode_count} -ne ${expected_episode_count} ]]; then
+  echo "isolated collection has ${episode_count} episodes; expected " \
+    "${episode_count_before} existing + ${expected_new_episodes} resumed/new" >&2
   exit 1
 fi
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from robonana.configs.posttrain_config import (
     apply_iterative_posttrain_config,
     apply_mac_posttrain_config,
@@ -43,6 +45,76 @@ def test_mac_posttrain_is_fixed_h1_and_uses_120k_migration(monkeypatch, tmp_path
     pools = config["dataloaders"]["train"]["data_or_config"]
     assert all(pool["fixed_horizon"] == 48 for pool in pools)
     assert all(pool["q_target_mode"] == "mac_v1" for pool in pools)
+
+
+def test_mac_posttrain_can_continue_from_an_exact_mac_checkpoint(
+    monkeypatch, tmp_path
+):
+    checkpoint = (
+        tmp_path
+        / "round0"
+        / "models"
+        / "checkpoint"
+        / "transformer"
+        / "model.bin"
+    )
+    model_config = tmp_path / "round0" / "config.json"
+    monkeypatch.setenv("ROBONANA_REPLAY_ROOT", str(tmp_path / "replay"))
+    monkeypatch.setenv("ROBONANA_MAC_INITIALIZATION", "trained")
+    monkeypatch.setenv("ROBONANA_MAC_PRETRAIN_CHECKPOINT", str(checkpoint))
+    monkeypatch.setenv("ROBONANA_MAC_PRETRAIN_CONFIG", str(model_config))
+    base = {
+        "project_dir": str(tmp_path / "base"),
+        "dataloaders": {
+            "train": {
+                "data_or_config": {
+                    "_class_name": "RoboTwinLeRobotDataset",
+                    "data_path": str(tmp_path / "original"),
+                    "stats_path": str(tmp_path / "stats.json"),
+                },
+                "sampler": {},
+            }
+        },
+        "models": {},
+        "train": {
+            "loss_weights": {},
+            "tracker_init_kwargs": {"wandb": {}},
+        },
+    }
+
+    config = apply_mac_posttrain_config(base)
+
+    assert config["models"]["initialization"] == "trained"
+    assert config["models"]["checkpoint"] == str(checkpoint)
+    assert config["models"]["checkpoint_config"] == str(model_config)
+
+
+def test_mac_trained_continuation_requires_explicit_lineage(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROBONANA_REPLAY_ROOT", str(tmp_path / "replay"))
+    monkeypatch.setenv("ROBONANA_MAC_INITIALIZATION", "trained")
+    monkeypatch.delenv("ROBONANA_MAC_PRETRAIN_CHECKPOINT", raising=False)
+    monkeypatch.delenv("ROBONANA_MAC_PRETRAIN_CONFIG", raising=False)
+    base = {
+        "project_dir": str(tmp_path / "base"),
+        "dataloaders": {
+            "train": {
+                "data_or_config": {
+                    "_class_name": "RoboTwinLeRobotDataset",
+                    "data_path": str(tmp_path / "original"),
+                    "stats_path": str(tmp_path / "stats.json"),
+                },
+                "sampler": {},
+            }
+        },
+        "models": {},
+        "train": {
+            "loss_weights": {},
+            "tracker_init_kwargs": {"wandb": {}},
+        },
+    }
+
+    with pytest.raises(ValueError, match="requires explicit"):
+        apply_mac_posttrain_config(base)
 
 
 def test_posttrain_config_builds_four_separate_pool_views(monkeypatch, tmp_path):

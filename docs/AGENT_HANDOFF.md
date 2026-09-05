@@ -1,8 +1,8 @@
 # RoboNana agent handoff and operational log
 
-Last verified: 2026-09-04 (Asia/Shanghai)
-Task-filter fix validated on 190: commit
-`c8c931fa1d7b38385cef71044af163484e4bdc0e`, branch `main`.
+Last verified: 2026-09-05 (Asia/Shanghai).
+Fixed-48 MAC implementation and 190 validation are on branch `main`; always
+re-check local, origin, and server HEAD before quoting a commit.
 
 This document is the first-read handoff for an agent with no conversation
 history. It records the current research objective, authoritative locations,
@@ -72,39 +72,51 @@ git rev-parse origin/main
 
 ## Research objective and current model contract
 
-RoboNana retains FACT's RoboTwin data/training bus and extends the official
-pretrained FLUX.2 Klein 4B shared DiT into a world-action model. There is no MoT
-or separate action/world transformer. DINOv3 is frozen and training-only.
+The current objective is the fixed-48 `mac_v1` RL path. RoboNana still reuses
+FACT's data/training bus and the official FLUX.2 Klein 4B shared DiT; there is
+no MoT or separate action/world transformer. The maintained MAC config disables
+DINO.
 
-Current token order:
+Current MAC token order:
 
 ```text
-[language | state | current_image | pred_action | gt_action_full_clean |
- idx_h | future_state | reward | success | Q | future_image_vae |
- future_image_dino]
+[language | state | current_image_vae | Value | pred_action |
+ gt_action_full_clean | Q | reward | success | future_state | future_image_vae]
 ```
 
-Key mask rules:
+There is no `idx_h`: all action chunks and future targets use 48 steps. Value
+can read only language/state/current image. Q can additionally read the full
+clean action chunk. Reward has the same inputs as Q; success additionally reads
+reward; future state additionally reads success; future image additionally
+reads future state. World targets cannot read Value, predicted action, or Q.
 
-- predicted action `A` is bidirectional inside the action chunk;
-- full-clean teacher-forcing action `G` is causal;
-- a world block at `idx_h` sees only `G_1..G_idx_h`, never `A`;
-- packed horizon blocks are isolated from one another;
-- DINO is the final one-way auxiliary sink.
+Value and Q are deterministic scalar heads. One reward query emits 48 binary
+logits rather than regressing a drifting scalar chunk return. The first
+implementation performs one H=1 on-policy learned-world rollout per update,
+uses M=8 candidate chunks during training, and bootstraps from an always-on FP32
+EMA Value. Environment inference samples M=32 BC chunks and executes the
+deterministic-Q argmax.
 
-Current scalar semantics:
+Selected successful rollouts re-enter action BC on the next round. Both success
+and failure rollouts train future image/state/reward/success, while failures
+have zero action-BC weight. Candidate Q values and the selected candidate are
+stored in rollout HDF5.
 
-- direct reward is `-1` for a nonterminal future state and `0` for a successful
-  terminal state;
-- success is a Bernoulli terminal-success logit;
-- Q is a scalar flow token, not a success probability;
-- successful pretraining uses full-trajectory MC return;
-- current critic-calibration posttraining uses `mc_posttrain`, keeps success
-  action supervision, disables action loss only for failure samples, and gives
-  a failed terminal continuation value of `-1000`.
+The first MAC round loads the immutable step-120000 checkpoint from:
 
-The canonical 4B+DINO pretraining and inference contracts remain documented in
-`README.md` and `docs/INHERITANCE.md`. The 800M model is for smoke tests only.
+```text
+/data3/hongjia/robonana/experiments/robotwin_flux2_4b_dino_grouped_lr_A_bidir_G_causal_bs256_120k/models/checkpoint_epoch_6_step_120000/transformer/diffusion_pytorch_model.bin
+```
+
+Its exact source config is the experiment-level `config.json`. Migration keeps
+the official FLUX backbone and compatible action/state/image adapters, but
+skips all obsolete horizon/segment/DINO/Value and other project heads. Later
+rounds use exact `trained` loading from the preceding `mac_v1` checkpoint and
+its config.
+
+The legacy `mc_posttrain` experiment below is retained as historical evidence;
+it is not the current token/Q contract and its checkpoint must not be loaded as
+MAC.
 
 ## Current hanging-mug critic-calibration experiment
 
@@ -292,6 +304,7 @@ episode, frame, and cache path in the W&B caption; never guess these fields.
 | isolated RoboTwin task eval | `scripts/eval_robotwin_task_isolated.py` |
 | full-task parallel eval | `scripts/eval_robotwin_all_tasks_parallel.sh` |
 | collect and preprocess replay | `scripts/collect_prepare_robotwin_rollouts.sh` |
+| fixed-48 MAC train/eval/selected-policy round | `scripts/run_hanging_mug_mac_round.sh` |
 | iterative hanging-mug round | `scripts/run_hanging_mug_posttrain_round.sh` |
 | annotate recorded Q/reward overlays | `scripts/annotate_recorded_robotwin_returns.py` |
 | package the three 50-video groups | `scripts/run_hanging_mug_overlay150_pipeline.sh` |

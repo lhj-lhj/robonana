@@ -9,7 +9,34 @@ FLUX.2 implementations external and contains only the adapters, masks, cache
 contracts, losses, training hooks, and RoboTwin integration needed by the current
 experiment.
 
-## Current experiment
+## Current fixed-48 MAC experiment (`mac_v1`)
+
+The maintained RL entrypoint is
+`robonana.configs.robotwin_flux2_4b_mac_from120k.config`. It uses a fixed
+48-step action chunk, one H=1 learned-world rollout per update, deterministic
+scalar Value/Q heads, one query that emits 48 binary reward logits, an always-on
+FP32 EMA model, M=8 action candidates during training, and M=32 Q-rejection
+sampling during environment inference.
+
+The exact MAC token order is:
+
+```text
+[language | state | current_image_vae | Value | pred_action |
+ gt_action_full_clean | Q | reward | success | future_state | future_image_vae]
+```
+
+There is no `idx_h` token in `mac_v1`; `future_state` and `future_image_vae`
+always refer to the clipped `t+48` observation. See
+[docs/INHERITANCE.md](docs/INHERITANCE.md) for the exact non-leaking attention
+dependencies.
+
+The first MAC round warm-starts from the immutable 120k run. Its loader keeps
+the official FLUX.2 backbone and shape-compatible action/state/image adapters,
+but explicitly skips old horizon/segment/DINO/Value and other project heads.
+Later MAC rounds use exact `trained` loading from the prior MAC run and its
+saved `config.json`.
+
+## Legacy pretraining lineage (`legacy_v1`)
 
 The canonical pretraining entrypoint is
 `robonana.configs.robotwin_flux2_4b_dino.config`:
@@ -33,7 +60,10 @@ the final valid frame/action, which matches the retained FACT tail-clipping
 behavior. The scratch 800M configuration is retained only for inexpensive
 contract tests, smoke runs, and ablations; it is not the default experiment.
 
-## Shared-DiT design
+## Legacy shared-DiT design
+
+This section documents the `legacy_v1` lineage retained for checkpoint
+compatibility and historical inference. It is not the current MAC layout.
 
 The exact token order is:
 
@@ -204,6 +234,7 @@ The supported entrypoint roles are:
 |---|---|---|
 | canonical pretraining | `robonana.configs.robotwin_flux2_4b_dino.config` | frozen DINOv3 targets and DINO flow loss enabled |
 | canonical inference | `scripts/inference_server_robotwin.py` with the trained 4B checkpoint | no DINO encoder, target tokens, sampling, or output |
+| fixed-48 MAC RL | `robonana.configs.robotwin_flux2_4b_mac_from120k.config` | DINO disabled; deterministic V/Q plus binary chunk reward |
 | iterative posttraining | `robonana.configs.robotwin_flux2_4b_dino_posttrain.config` | same training-only DINO supervision |
 | test/smoke only | `robonana.configs.robotwin_flux2_800m_dino.config` | smaller scratch backbone for fast validation |
 
@@ -676,7 +707,85 @@ also retain MP4s. The focused posttraining pipeline uses both options so its
 baseline success rate, videos, and trainable replay come from exactly the same
 episodes.
 
-## Iterative posttraining
+## Fixed-48 MAC training and selected-policy loop
+
+For each real batch, the shared model learns the behavior-conditioned future
+image/state, 48 binary reward labels, and terminal-success label. Action BC is
+masked to successful episodes only. The trainer then samples M=8 independent
+BC chunks, selects the largest deterministic `Q(s,a)`, and performs one learned
+world transition. If reward logits are `ell_0..ell_47`, the imagined per-step
+reward and one-chunk return are
+
+$$
+\hat r_j=-1+\operatorname{sigmoid}(\ell_j),\qquad
+\hat R_{48}=\sum_{j=0}^{47}\gamma^j\hat r_j.
+$$
+
+With H=1, the detached target used by deterministic Value and Q is
+
+$$
+y=\hat R_{48}+\gamma^{48}
+  \left(1-\operatorname{sigmoid}(\hat u)\right)
+  V_{\bar\theta}(\hat s_{t+48}),
+$$
+
+where `bar(theta)` is the always-on FP32 EMA. This follows the official MAC
+first-rollout critic update: the initial observation comes from the real batch,
+while the selected action, reward, and next observation are imagined. Value/Q
+are normalized only at the regression boundary by `return_scale=1000`; neither
+is sampled as a flow token.
+
+The first round defaults to the immutable 120k source:
+
+```bash
+export ROBONANA_REPLAY_ROOT=/data3/hongjia/robonana_rollouts/hanging_mug_round0_from160k
+export ROBONANA_COLLECTION_ROUND=0
+export ROBONANA_PROJECT_DIR=$PWD/experiments/hanging_mug_mac_round0
+
+bash scripts/run_robotwin_train.sh \
+  --config robonana.configs.robotwin_flux2_4b_mac_from120k.config
+```
+
+The default source is
+`experiments/robotwin_flux2_4b_dino_grouped_lr_A_bidir_G_causal_bs256_120k`
+at step 120000. Override it only with both
+`ROBONANA_MAC_PRETRAIN_CHECKPOINT` and `ROBONANA_MAC_PRETRAIN_CONFIG`.
+
+Environment inference must use Q rejection sampling:
+
+```bash
+export ROBONANA_INFERENCE_MODE=action_q_rejection
+export ROBONANA_REJECTION_CANDIDATE_COUNT=32
+export ROBONANA_Q_RETURN_SCALE=1000
+```
+
+The rollout writer records all candidate Q values, the selected index, selected
+Q, and Q margin. The four-pool loader sends selected successful trajectories
+back into action BC and uses both successful and failed selected trajectories
+for world/reward/success learning. Failed trajectories have zero action-BC
+weight.
+
+`scripts/run_hanging_mug_mac_round.sh` packages one resumable round: train,
+same-seed M=1 evaluation, M=32 Q-rejection evaluation/collection, cache refresh,
+and `comparison.json`. It appends the M=32 trajectories to the cumulative
+replay with `round_id+1`, so the next invocation closes the BC feedback loop.
+It does not overwrite the 120k source or existing replay episodes.
+
+For a later round, load the previous MAC checkpoint exactly:
+
+```bash
+export ROBONANA_COLLECTION_ROUND=1
+export ROBONANA_MAC_INITIALIZATION=trained
+export ROBONANA_MAC_SOURCE_CHECKPOINT=/path/to/round0/transformer/diffusion_pytorch_model.bin
+export ROBONANA_MAC_SOURCE_CONFIG=/path/to/round0/config.json
+bash scripts/run_hanging_mug_mac_round.sh
+```
+
+## Legacy iterative posttraining
+
+The remainder of this section documents the older `td_posttrain` and
+`mc_posttrain` paths retained for comparison. They use the legacy variable-
+horizon/Q-flow contract and must not be mixed with `mac_v1` checkpoints.
 
 Posttraining changes the source of the Q label and adds policy improvement on
 failed data; it does not add a second network architecture. The online model
