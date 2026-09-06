@@ -333,7 +333,15 @@ def initialize_scalar_expert_from_flux(
 
     This follows ImageWAM's preprocessing policy: exact copies where shapes
     match, axis-wise interpolation otherwise, and fan-in alpha correction when
-    the last dimension changes.  The learned query is intentionally new.
+    the last dimension changes. The learned query and the entire scalar head
+    retain their fresh initialization, including the head's AdaLN modulation.
+
+    ImageWAM excludes ``action_encoder.*`` and ``head.*`` from transfer:
+    https://github.com/yuyangalin/ImageWAM/blob/5d4a341ed20a95cdb08f0293f3d44778b9a9e05a/scripts/flux2/preprocess_action_dit_flux2.py
+    Here the learned query replaces the task-specific action encoder. FLUX's
+    image-velocity output layer has no scalar-return counterpart to transfer.
+    This helper is for initial migration only; trained MAC checkpoints load
+    the complete online experts exactly, including their queries and heads.
     """
 
     source_state = flux.state_dict()
@@ -341,14 +349,11 @@ def initialize_scalar_expert_from_flux(
     copied = 0
     resized = 0
     mapped: dict[str, Tensor] = {}
+    fresh_prefixes = ("query.", "head.")
     for name, target in target_state.items():
-        if name.startswith("query."):
+        if name.startswith(fresh_prefixes):
             continue
-        if name.startswith("head."):
-            source_name = "final_layer." + name.removeprefix("head.")
-        else:
-            source_name = name
-        source = source_state.get(source_name)
+        source = source_state.get(name)
         if source is None:
             continue
         if tuple(source.shape) == tuple(target.shape):
@@ -361,7 +366,9 @@ def initialize_scalar_expert_from_flux(
             resized += 1
         mapped[name] = value.to(device=target.device, dtype=target.dtype)
     incompatible = expert.load_state_dict(mapped, strict=False)
-    expected_missing = {"query.weight"}
+    # Allow only the intentionally fresh task-specific tensors. A missing
+    # body parameter must still fail instead of silently staying random.
+    expected_missing = {name for name in target_state if name.startswith(fresh_prefixes)}
     if set(incompatible.missing_keys) != expected_missing or incompatible.unexpected_keys:
         raise RuntimeError(
             "FLUX-to-expert initialization mismatch: "

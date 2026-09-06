@@ -78,7 +78,13 @@ The 4B default expert width is 1024. Its attention retains the main FLUX head
 count and per-head width; MLP/residual width is slimmed to 1024. Expert
 initialization follows ImageWAM's preprocessing policy: exact tensor copy when
 shapes match, axis-wise linear interpolation otherwise, and fan-in alpha
-scaling when the final input width changes. The learned query remains new.
+scaling when the final input width changes. Only the expert body is transferred.
+Each learned query and the entire scalar head (output linear layer and head
+AdaLN modulation) retain their fresh initialization. ImageWAM similarly skips
+its task-specific `action_encoder.*` and `head.*`; RoboNana's learned query
+replaces that input encoder. FLUX `final_layer.*` is never mapped to a scalar
+head. This applies only to initial migration: exact loading of trained MAC
+checkpoints preserves all online expert parameters across rounds.
 
 ## Two serial optimization phases
 

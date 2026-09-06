@@ -8,6 +8,11 @@ from safetensors.torch import save_file
 from flux2.model import Flux2, Flux2Params
 
 from robonana.models.flux2_fact import Flux2FACTModel
+from robonana.models.flux2_scalar_expert import (
+    DeterministicFlux2ScalarExpert,
+    initialize_scalar_expert_from_flux,
+)
+import robonana.models.pretrained as pretrained
 from robonana.models.pretrained import (
     configure_trainable_parameters,
     load_flux2_fact_checkpoint,
@@ -17,7 +22,20 @@ from robonana.models.pretrained import (
 )
 
 
-def test_mac_migration_from_120k_loads_compatible_weights_only(tmp_path):
+def test_mac_migration_from_120k_loads_compatible_weights_only(tmp_path, monkeypatch):
+    # Observe the real loader after meta materialization/reset but before
+    # FLUX transfer: both experts must retain these exact query/head tensors.
+    fresh_experts = []
+
+    def capture_initialization(expert, flux):
+        fresh_experts.append({
+            name: tensor.clone()
+            for name, tensor in expert.state_dict().items()
+            if name.startswith(("query.", "head."))
+        })
+        return initialize_scalar_expert_from_flux(expert, flux)
+
+    monkeypatch.setattr(pretrained, "initialize_scalar_expert_from_flux", capture_initialization)
     source = Flux2FACTModel(
         _tiny_params(), action_dim=6, state_dim=5, max_horizon=48
     )
@@ -74,6 +92,73 @@ def test_mac_migration_from_120k_loads_compatible_weights_only(tmp_path):
         model.q_expert.single_blocks[0].linear1.weight,
         model.single_blocks[0].linear1.weight,
     )
+    assert len(fresh_experts) == 2
+    for expert, fresh in zip((model.value_expert, model.q_expert), fresh_experts):
+        for name, expected in fresh.items():
+            torch.testing.assert_close(expert.state_dict()[name], expected, rtol=0, atol=0)
+    assert not torch.equal(model.value_expert.head.linear.weight, model.q_expert.head.linear.weight)
+
+    # Later rounds must preserve trained task-specific weights; the new
+    # initialization boundary must never be applied to exact MAC loading.
+    with torch.no_grad():
+        for expert in (model.value_expert, model.q_expert):
+            expert.query.weight.add_(0.5)
+            for parameter in expert.head.parameters():
+                parameter.add_(0.5)
+    trained_checkpoint = tmp_path / "mac.bin"
+    trained_config = tmp_path / "mac_config.json"
+    torch.save(model.state_dict(), trained_checkpoint)
+    trained_config.write_text(json.dumps(asdict(report.model_config)), encoding="utf-8")
+    restored, restored_report = load_flux2_fact_trained_checkpoint(
+        trained_checkpoint, config_path=trained_config, device="cpu", dtype=torch.float32
+    )
+    assert len(fresh_experts) == 2  # Exact loading never invoked the initializer.
+    assert restored_report.initialized_robot_parameters == ()
+    for name, expected in model.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[name], expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("hidden_dim", [32, 16])
+def test_scalar_expert_transfer_preserves_fresh_query_and_entire_head(hidden_dim):
+    source = Flux2(_tiny_params())
+    expert = DeterministicFlux2ScalarExpert(
+        hidden_dim=hidden_dim, num_heads=4, attn_head_dim=8,
+        num_layers_double=1, num_layers_single=1, mlp_ratio=2.0,
+    )
+    expert.reset_parameters()
+    fresh = {name: tensor.clone() for name, tensor in expert.state_dict().items()}
+    # Constant body weights give an independently calculable interpolation
+    # result. Poison the image head to catch accidental transfer of any part.
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.fill_(0.25)
+        for parameter in source.final_layer.parameters():
+            parameter.fill_(123.0)
+    copied, resized = initialize_scalar_expert_from_flux(expert, source)
+    body_count = 0
+    for name, actual in expert.state_dict().items():
+        if name.startswith(("query.", "head.")):
+            torch.testing.assert_close(actual, fresh[name], rtol=0, atol=0)
+        else:
+            body_count += 1
+            source_tensor = source.state_dict()[name]
+            scale = 1.0
+            if source_tensor.ndim >= 2 and source_tensor.shape[-1] != actual.shape[-1]:
+                scale = (source_tensor.shape[-1] / actual.shape[-1]) ** 0.5
+            torch.testing.assert_close(actual, torch.full_like(actual, 0.25 * scale))
+    assert copied + resized == body_count
+    assert (resized > 0) == (hidden_dim != 32)
+
+
+def test_scalar_expert_transfer_rejects_missing_body_parameter():
+    source = Flux2(_tiny_params())
+    expert = DeterministicFlux2ScalarExpert(
+        hidden_dim=32, num_heads=4, attn_head_dim=8,
+        num_layers_double=1, num_layers_single=1, mlp_ratio=2.0,
+    )
+    del source.time_in
+    with pytest.raises(RuntimeError, match="FLUX-to-expert initialization mismatch"):
+        initialize_scalar_expert_from_flux(expert, source)
 
 
 def _tiny_params():
