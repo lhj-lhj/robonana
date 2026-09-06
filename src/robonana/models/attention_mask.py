@@ -415,7 +415,10 @@ def build_mac_critic_prefix_bias(
 
     Value passes ``action_length=0`` and therefore caches exactly
     ``[language, state, current_image]``.  Q additionally caches the complete
-    clean action chunk.  This function returns both the square backbone bias
+    clean action chunk. C reads only C; each complete G reads C and itself.
+    In particular C must never depend on G, so it can be shared across action
+    candidates and agrees with the actor/world clean-condition track.
+    This function returns both the square backbone bias
     and the flat valid-key mask reused by the one-query expert.
     """
 
@@ -426,6 +429,8 @@ def build_mac_critic_prefix_bias(
         raise ValueError(f"critic prefix lengths must be non-negative, got {lengths}")
     total = sum(lengths)
     allowed = torch.ones(batch_size, total, total, dtype=torch.bool, device=device)
+    condition_length = language_length + state_length + image_length
+    allowed[:, :condition_length, condition_length:] = False
     key_mask = torch.ones(batch_size, total, dtype=torch.bool, device=device)
     if context_mask is not None:
         expected = (batch_size, language_length)

@@ -20,6 +20,17 @@ class _FakeMacModel:
 
     def __init__(self, value: float = 0.0):
         self.value = float(value)
+        self.prefill_count = 0
+
+    def prefill_condition_cache(self, **kwargs):
+        self.prefill_count += 1
+        return kwargs["context"]
+
+    def predict_action_cached(self, cache, action, **kwargs):
+        return torch.zeros_like(action)
+
+    def score_q_candidates(self, cache, clean_actions, **kwargs):
+        return clean_actions.float().mean(dim=(2, 3))
 
     def __call__(self, **kwargs):
         action = kwargs["noisy_pred_action"]
@@ -78,6 +89,7 @@ def test_q_rejection_returns_argmax_candidate():
         grid_width=1,
     )
     assert result.best_index.item() == 1
+    assert model.prefill_count == 1
     torch.testing.assert_close(result.action, torch.ones(1, 48, 2))
 
 
@@ -120,6 +132,7 @@ def test_h1_imaginary_target_uses_binary_reward_curve_and_ema_value():
     )
     assert not rollout.value_target_return.requires_grad
     assert not rollout.q_target_return.requires_grad
+    assert online.prefill_count == 2  # One current C, one next C for both Values.
 
 
 def test_flow_euler_schedule_runs_from_pure_noise_to_clean():

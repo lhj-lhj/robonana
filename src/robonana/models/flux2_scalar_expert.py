@@ -27,12 +27,33 @@ from flux2.model import MLPEmbedder, Modulation, QKNorm, SiLUActivation, apply_r
 
 @dataclass(frozen=True)
 class FrozenFluxKVCache:
-    """Detached per-layer K/V from one frozen FLUX prefix."""
+    """Detached K/V with an optional shared condition prefix.
+
+    For an action branch, double/single store only its 48 tokens. The parent
+    retains C once at observation batch size B; batch_indices maps the bounded
+    candidate batch back to B. Materialize combined K/V one layer at a time,
+    never a persistent [B*M, C+G] cache for every FLUX layer.
+    """
 
     double: tuple[dict[str, Tensor], ...]
     single: tuple[dict[str, Tensor], ...]
     key_mask: Tensor
     prefix_length: int
+    parent: FrozenFluxKVCache | None = None
+    batch_indices: Tensor | None = None
+
+    def layers(self, stream: str):
+        own = getattr(self, stream)
+        if self.parent is None:
+            yield from own
+            return
+        for shared, branch in zip(getattr(self.parent, stream), own, strict=True):
+            yield {
+                name: torch.cat(
+                    (shared[name].index_select(0, self.batch_indices), branch[name]), dim=1
+                )
+                for name in ("k", "v")
+            }
 
 
 def _flatten_heads(value: Tensor) -> Tensor:
@@ -268,7 +289,7 @@ class DeterministicFlux2ScalarExpert(nn.Module):
             dim=1,
         )
 
-        for block, layer_cache in zip(self.double_blocks, cache.double, strict=True):
+        for block, layer_cache in zip(self.double_blocks, cache.layers("double"), strict=True):
             state = block.prepare_qkv(query, query_pe, double_mod)
             k = torch.cat([layer_cache["k"].to(dtype=state["k"].dtype), state["k"]], dim=1)
             v = torch.cat([layer_cache["v"].to(dtype=state["v"].dtype), state["v"]], dim=1)
@@ -280,7 +301,7 @@ class DeterministicFlux2ScalarExpert(nn.Module):
             )
             query = block.apply_post(mixed, state)
 
-        for block, layer_cache in zip(self.single_blocks, cache.single, strict=True):
+        for block, layer_cache in zip(self.single_blocks, cache.layers("single"), strict=True):
             state = block.prepare_qkv(query, query_pe, single_mod)
             k = torch.cat([layer_cache["k"].to(dtype=state["k"].dtype), state["k"]], dim=1)
             v = torch.cat([layer_cache["v"].to(dtype=state["v"].dtype), state["v"]], dim=1)

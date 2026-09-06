@@ -60,7 +60,9 @@ def test_mac_value_prefix_has_no_action_and_q_prefix_has_full_action():
     )
     assert value_bias.shape[-1] == value_keys.shape[-1] == 5
     assert q_bias.shape[-1] == q_keys.shape[-1] == 53
-    assert torch.isfinite(q_bias).all()
+    assert torch.isfinite(q_bias[..., :5, :5]).all()
+    assert torch.isneginf(q_bias[..., :5, 5:]).all()
+    assert torch.isfinite(q_bias[..., 5:, :]).all()
 
 
 def test_pred_action_is_bidirectional_gt_action_is_causal_and_targets_see_prefix():

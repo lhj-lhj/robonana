@@ -70,6 +70,9 @@ deterministic scalar.
 
 - Value FLUX prefix: `[language,state,current_image]`.
 - Q FLUX prefix: `[language,state,current_image,clean_action_chunk]`.
+- The condition C reads only C; a complete clean-action G reads C and G.
+  Q queries read C, their own G, and their own query. Candidates cannot read
+  other candidates. This is the actor/world mask specialized to the critic.
 - No expert output or gradient is fed back into FLUX.
 - No Q target or Q EMA exists.
 - The only target network is an FP32 copy of `value_expert`.
@@ -85,6 +88,33 @@ its task-specific `action_encoder.*` and `head.*`; RoboNana's learned query
 replaces that input encoder. FLUX `final_layer.*` is never mapped to a scalar
 head. This applies only to initial migration: exact loading of trained MAC
 checkpoints preserves all online expert parameters across rounds.
+
+### Shared condition K/V execution
+
+`prefill_condition_cache` computes C once per observation at clean timestep 0.
+The actor reads this same cache across all Euler steps and candidate groups;
+only the noisy action stream receives a changing action timestep. Q scoring
+re-encodes the final clean chunk with the clean segment/position convention.
+
+The action branch reuses the official FLUX `_prepare_qkv`/`_apply_residuals`
+and `_qkv`/`_out` methods. C K/V stay at observation batch size B; candidate
+branches store only their own 48-token K/V and a reference to C. Combined K/V
+are materialized one layer at a time for a bounded candidate group. Attention
+uses one softmax over all visible C/action/query keys.
+
+`sample_q_rejection` uses Q-only scoring and defaults to groups of eight
+(`ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE`). Joint critic-loss forwards share C
+between online V and Q; imagined next-state online and target V share another
+C cache. FLUX cache construction is no-grad, while online experts remain in
+the DDP forward/autograd graph. Caches are request-local and never reused after
+an observation or FLUX weight change.
+
+This changes Q's former fully visible prefix semantics. Existing trained Q
+weights can warm-start training with the corrected mask; old Q scores are not
+guaranteed to stay calibrated. Parameter names/shapes and exact loading remain
+unchanged. Equivalence tests use the full forward with the corrected mask.
+See [MAC_PREFIX_CACHE_VALIDATION.md](MAC_PREFIX_CACHE_VALIDATION.md) for tests,
+real 4B smoke results, performance measurements, and BF16 numerical differences.
 
 ## Two serial optimization phases
 

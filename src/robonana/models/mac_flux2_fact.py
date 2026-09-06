@@ -24,6 +24,7 @@ from .flux2_scalar_expert import (
     DeterministicFlux2ScalarExpert,
     FrozenFluxKVCache,
     _flatten_heads,
+    _mixed_query_attention,
 )
 
 
@@ -164,6 +165,11 @@ class MacFlux2FACTModel(Flux2FACTModel):
     ) -> Flux2FACTOutput | Tensor:
         if critic_kind is not None:
             if critic_kind == "both":
+                cache = self.prefill_condition_cache(
+                    context=context, context_ids=context_ids,
+                    current_latents=current_latents, current_ids=current_ids,
+                    state=state, context_mask=context_mask,
+                )
                 return (
                     self.predict_value(
                         context=context,
@@ -172,6 +178,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
                         current_ids=current_ids,
                         state=state,
                         context_mask=context_mask,
+                        cache=cache,
                     ),
                     self.predict_q(
                         context=context,
@@ -181,6 +188,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
                         state=state,
                         clean_action=gt_action_cond,
                         context_mask=context_mask,
+                        cache=cache,
                     ),
                 )
             if critic_kind == "value":
@@ -359,6 +367,125 @@ class MacFlux2FACTModel(Flux2FACTModel):
             value=None,
         )
 
+    def prefill_condition_cache(self, **kwargs) -> FrozenFluxKVCache:
+        """Compute C once per observation/weight snapshot at clean timestep 0.
+
+        Callers own this ephemeral cache. Never attach it to the model or
+        reuse it after an observation, guidance, dtype, or FLUX weight change.
+        """
+        return self.prefill_critic_cache(**kwargs, clean_action=None)
+
+    @torch.no_grad()
+    def _action_from_cache(
+        self, cache: FrozenFluxKVCache, action: Tensor, *,
+        batch_indices: Tensor, timestep: Tensor, clean: bool,
+    ) -> tuple[Tensor, FrozenFluxKVCache | None]:
+        """Advance only the action stream using official FLUX block methods.
+
+        This follows ImageWAM's per-layer prepare_qkv -> mixed attention ->
+        apply_post ordering, but uses the main FLUX action/image branch:
+        https://github.com/yuyangalin/ImageWAM/blob/5d4a341ed20a95cdb08f0293f3d44778b9a9e05a/src/imagewam/models/backbones/mot.py#L612-L745
+        Each attention uses ONE softmax over [C,G]. K is cached after RoPE,
+        V before residual update, matching both the full pass and Q expert.
+        Predicted A and clean G have different segment IDs; Q must re-encode G.
+        """
+        batch = action.shape[0]
+        if action.shape != (batch, self.chunk_horizon, self.action_dim):
+            raise ValueError("cached action must have shape [batch,48,action_dim]")
+        if cache.parent is not None or batch_indices.shape != (batch,):
+            raise ValueError("action branch requires a condition-only cache and batch mapping")
+        device = action.device
+        action = action.to(dtype=self.img_in.weight.dtype)
+        hidden = self.action_in(action) + self.actor_world_segment_embed.weight[3 if clean else 2]
+        time_ids = torch.arange(1, self.chunk_horizon + 1, device=device)[None].expand(batch, -1)
+        ids = self._robot_ids(
+            batch_size=batch, length=self.chunk_horizon, segment_id=4 if clean else 3,
+            device=device, dtype=torch.long, time_ids=time_ids,
+        )
+        pe = self.pe_embedder(ids)
+        # Empty text lets us reuse the official two-stream routines without
+        # recomputing any text tokens; C is already represented by cached K/V.
+        txt = hidden[:, :0]
+        pe_txt = pe[:, :, :0]
+        vec = self._condition_vec(timestep.to(device=device).expand(batch), None)
+        double_mod = self.double_stream_modulation_img(vec)
+        txt_mod = self.double_stream_modulation_txt(vec)
+        key_mask = torch.cat((cache.key_mask.index_select(0, batch_indices),
+                              torch.ones(batch, self.chunk_horizon, device=device, dtype=torch.bool)), dim=1)
+
+        def attend(q, k, v, shared):
+            return _mixed_query_attention(
+                _flatten_heads(q),
+                torch.cat((shared["k"].index_select(0, batch_indices), _flatten_heads(k)), dim=1),
+                torch.cat((shared["v"].index_select(0, batch_indices), _flatten_heads(v)), dim=1),
+                num_heads=self.num_heads, head_dim=self.hidden_size // self.num_heads,
+                key_mask=key_mask,
+            )
+
+        double_cache = []
+        for block, shared in zip(self.double_blocks, cache.double, strict=True):
+            q, k, v, full_pe, _, mods = block._prepare_qkv(
+                hidden, txt, pe, pe_txt, double_mod, txt_mod
+            )
+            q, k = apply_rope(q, k, full_pe)
+            if clean:
+                double_cache.append({"k": _flatten_heads(k).detach(), "v": _flatten_heads(v).detach()})
+            attention = attend(q, k, v, shared)
+            hidden, txt = block._apply_residuals(hidden, txt, attention, attention[:, :0], mods)
+        single_cache = []
+        single_mod = self.single_stream_modulation(vec)[0]
+        for block, shared in zip(self.single_blocks, cache.single, strict=True):
+            q, k, v, mlp, gate = block._qkv(hidden, single_mod)
+            q, k = apply_rope(q, k, pe)
+            if clean:
+                single_cache.append({"k": _flatten_heads(k).detach(), "v": _flatten_heads(v).detach()})
+            hidden = block._out(hidden, attend(q, k, v, shared), mlp, gate)
+        branch = None
+        if clean:
+            branch = FrozenFluxKVCache(
+                double=tuple(double_cache), single=tuple(single_cache),
+                key_mask=key_mask.detach(), prefix_length=key_mask.shape[1],
+                parent=cache, batch_indices=batch_indices,
+            )
+        return hidden, branch
+
+    @torch.no_grad()
+    def predict_action_cached(self, cache, action, *, batch_indices, timestep):
+        hidden, _ = self._action_from_cache(
+            cache, action, batch_indices=batch_indices, timestep=timestep, clean=False
+        )
+        return self.action_out(hidden)
+
+    def predict_q_cached(self, cache, clean_action, *, batch_indices):
+        _, branch = self._action_from_cache(
+            cache, clean_action, batch_indices=batch_indices,
+            timestep=torch.zeros((), device=clean_action.device), clean=True,
+        )
+        query_pe = self._expert_query_pe(
+            batch=clean_action.shape[0], device=clean_action.device,
+            dtype=torch.long, segment_id=11,
+        )
+        # Only frozen FLUX computation above is no-grad. Keep the expert in
+        # autograd for critic training and in the surrounding DDP forward.
+        return self.q_expert(branch, query_pe=query_pe)
+
+    def score_q_candidates(self, cache, clean_actions, *, candidate_batch_size=8):
+        if clean_actions.ndim != 4 or candidate_batch_size <= 0 or clean_actions.shape[1] == 0:
+            raise ValueError("expected nonempty [B,M,48,A] actions and positive candidate_batch_size")
+        batch, count = clean_actions.shape[:2]
+        if cache.key_mask.shape[0] != batch:
+            raise ValueError("condition cache batch must match candidate observations")
+        scores = []
+        for start in range(0, count, candidate_batch_size):
+            group = clean_actions[:, start:start + candidate_batch_size]
+            width = group.shape[1]
+            indices = torch.arange(batch, device=group.device).repeat_interleave(width)
+            scores.append(self.predict_q_cached(
+                cache, group.reshape(batch * width, self.chunk_horizon, self.action_dim),
+                batch_indices=indices,
+            ).reshape(batch, width))
+        return torch.cat(scores, dim=1)
+
     @torch.no_grad()
     def prefill_critic_cache(
         self,
@@ -466,14 +593,14 @@ class MacFlux2FACTModel(Flux2FACTModel):
         state: Tensor,
         context_mask: Tensor | None = None,
         expert: nn.Module | None = None,
+        cache: FrozenFluxKVCache | None = None,
     ) -> Tensor:
-        cache = self.prefill_critic_cache(
+        cache = cache if cache is not None else self.prefill_condition_cache(
             context=context,
             context_ids=context_ids,
             current_latents=current_latents,
             current_ids=current_ids,
             state=state,
-            clean_action=None,
             context_mask=context_mask,
         )
         selected = self.value_expert if expert is None else expert
@@ -492,17 +619,17 @@ class MacFlux2FACTModel(Flux2FACTModel):
         state: Tensor,
         clean_action: Tensor,
         context_mask: Tensor | None = None,
+        cache: FrozenFluxKVCache | None = None,
     ) -> Tensor:
-        cache = self.prefill_critic_cache(
+        cache = cache if cache is not None else self.prefill_condition_cache(
             context=context,
             context_ids=context_ids,
             current_latents=current_latents,
             current_ids=current_ids,
             state=state,
-            clean_action=clean_action,
             context_mask=context_mask,
         )
-        query_pe = self._expert_query_pe(
-            batch=context.shape[0], device=context.device, dtype=current_ids.dtype, segment_id=11
+        return self.predict_q_cached(
+            cache, clean_action,
+            batch_indices=torch.arange(context.shape[0], device=context.device),
         )
-        return self.q_expert(cache, query_pe=query_pe)

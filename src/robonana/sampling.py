@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Callable
 
 import torch
@@ -166,6 +167,20 @@ def sample_flux2_action(
     empty_state = state.new_empty(batch_size, 0, state.shape[-1])
     empty_scalar = action_noise.new_empty(batch_size, 0, 1)
     model_spec = getattr(model, "module", model)
+    if getattr(model_spec, "architecture_version", None) == "mac_mot_v2":
+        if not bool(torch.all(horizon == model_spec.chunk_horizon)):
+            raise ValueError("mac_mot_v2 action sampling requires horizon_idx=48")
+        cache = model_spec.prefill_condition_cache(
+            context=context, context_ids=context_ids, current_latents=current_latents,
+            current_ids=current_ids, state=state, context_mask=context_mask,
+        )
+        indices = torch.arange(batch_size, device=device)
+        return sample_action_flow(
+            action_noise=action_noise, schedule=schedule,
+            predict_action=lambda action, sigma: model_spec.predict_action_cached(
+                cache, action, batch_indices=indices, timestep=sigma
+            ),
+        )
     clean_gt_action = (
         action_noise.new_empty(batch_size, 0, action_noise.shape[-1])
         if getattr(model_spec, "architecture_version", None) == "mac_mot_v2"
@@ -483,6 +498,7 @@ def evaluate_mac_target_value(
     context_mask: Tensor,
     grid_height: int,
     grid_width: int,
+    cache=None,
 ) -> Tensor:
     """Evaluate the detached EMA Value expert on the single frozen FLUX."""
 
@@ -505,6 +521,7 @@ def evaluate_mac_target_value(
         state=state,
         context_mask=context_mask,
         expert=target_value_expert,
+        cache=cache,
     )
 
 
@@ -596,6 +613,24 @@ def sample_mac_world(
     )
 
 
+def prefill_mac_condition(*, model, context, current_latents, state, context_mask,
+                          grid_height, grid_width):
+    """Build one request-local clean C cache, shared across candidates/steps."""
+    batch = context.shape[0]
+    return model.prefill_condition_cache(
+        context=context,
+        context_ids=text_position_ids(batch, context.shape[1], context.device),
+        current_latents=current_latents,
+        current_ids=image_position_ids(
+            batch, grid_height=grid_height, grid_width=grid_width,
+            time_coord=torch.zeros(batch, device=context.device, dtype=torch.long),
+            device=context.device,
+        ),
+        state=state, context_mask=context_mask,
+    )
+
+
+@torch.no_grad()
 def sample_q_rejection(
     *,
     model,
@@ -608,6 +643,7 @@ def sample_q_rejection(
     schedule: Tensor,
     grid_height: int,
     grid_width: int,
+    candidate_batch_size: int | None = None,
 ) -> QRejectionSample:
     """Sample independent BC chunks and return deterministic-Q argmax."""
 
@@ -625,41 +661,34 @@ def sample_q_rejection(
     if tuple(action_noise.shape) != expected:
         raise ValueError(f"action_noise must have shape {expected}")
 
-    def repeat(value: Tensor) -> Tensor:
-        return value[:, None].expand(-1, candidate_count, *value.shape[1:]).reshape(
-            batch_size * candidate_count, *value.shape[1:]
+    group_size = int(candidate_batch_size if candidate_batch_size is not None else
+                     os.environ.get("ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE", "8"))
+    if group_size <= 0:
+        raise ValueError("candidate_batch_size must be positive")
+    cache = prefill_mac_condition(
+        model=model_spec, context=context, current_latents=current_latents,
+        state=state, context_mask=context_mask,
+        grid_height=grid_height, grid_width=grid_width,
+    )
+    groups = []
+    for start in range(0, candidate_count, group_size):
+        noise = action_noise[:, start:start + group_size]
+        width = noise.shape[1]
+        indices = torch.arange(batch_size, device=noise.device).repeat_interleave(width)
+        actions = sample_action_flow(
+            action_noise=noise.reshape(batch_size * width, model_spec.chunk_horizon, model_spec.action_dim),
+            schedule=schedule,
+            predict_action=lambda action, sigma: model_spec.predict_action_cached(
+                cache, action, batch_indices=indices, timestep=sigma
+            ),
         )
-
-    flat_noise = action_noise.reshape(
-        batch_size * candidate_count, model_spec.chunk_horizon, model_spec.action_dim
+        groups.append(actions.reshape(batch_size, width, model_spec.chunk_horizon, model_spec.action_dim))
+    candidates = torch.cat(groups, dim=1)
+    # Q-only scoring. C is shared with policy sampling, and G is re-encoded
+    # with its clean segment/time convention instead of reusing noisy A K/V.
+    candidate_q = model_spec.score_q_candidates(
+        cache, candidates, candidate_batch_size=group_size,
     )
-    candidates = sample_flux2_action(
-        model=model,
-        context=repeat(context),
-        current_latents=repeat(current_latents),
-        state=repeat(state),
-        context_mask=repeat(context_mask),
-        action_noise=flat_noise,
-        horizon_idx=int(model_spec.chunk_horizon),
-        schedule=schedule,
-        grid_height=grid_height,
-        grid_width=grid_width,
-    ).reshape(
-        batch_size, candidate_count, model_spec.chunk_horizon, model_spec.action_dim
-    )
-    _, flat_q = evaluate_mac_critics(
-        model=model,
-        context=repeat(context),
-        current_latents=repeat(current_latents),
-        state=repeat(state),
-        context_mask=repeat(context_mask),
-        clean_action=candidates.reshape(
-            batch_size * candidate_count, model_spec.chunk_horizon, model_spec.action_dim
-        ),
-        grid_height=grid_height,
-        grid_width=grid_width,
-    )
-    candidate_q = flat_q.reshape(batch_size, candidate_count)
     best_index = candidate_q.argmax(dim=1)
     batch_indices = torch.arange(batch_size, device=candidate_q.device)
     return QRejectionSample(
@@ -722,6 +751,12 @@ def generate_mac_imaginary_rollout_h1(
         grid_height=grid_height,
         grid_width=grid_width,
     )
+    model_spec = getattr(online_model, "module", online_model)
+    next_cache = prefill_mac_condition(
+        model=model_spec, context=context, current_latents=world.future,
+        state=world.future_state, context_mask=context_mask,
+        grid_height=grid_height, grid_width=grid_width,
+    )
     target_next_value_normalized = evaluate_mac_target_value(
         model=online_model,
         target_value_expert=target_value_expert,
@@ -731,8 +766,8 @@ def generate_mac_imaginary_rollout_h1(
         context_mask=context_mask,
         grid_height=grid_height,
         grid_width=grid_width,
+        cache=next_cache,
     )
-    model_spec = getattr(online_model, "module", online_model)
     batch = context.shape[0]
     context_ids = text_position_ids(batch, context.shape[1], context.device)
     current_ids = image_position_ids(
@@ -749,6 +784,7 @@ def generate_mac_imaginary_rollout_h1(
         current_ids=current_ids,
         state=world.future_state,
         context_mask=context_mask,
+        cache=next_cache,
     )
     probabilities = world.reward_logits.float().sigmoid()
     predicted_rewards = float(reward_non_goal) + probabilities * (
