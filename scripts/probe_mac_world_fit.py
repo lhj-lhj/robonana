@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 from robonana.data.robotwin_hdf5 import RoboTwinHDF5Dataset
 from robonana.data.robotwin_lerobot import RoboTwinLeRobotDataset
-from robonana.models.pretrained import load_flux2_fact_trained_checkpoint, load_mac_from_legacy_checkpoint
+from robonana.models.pretrained import load_flux2_fact_trained_checkpoint
 from robonana.sampling import sample_mac_world
 
 
@@ -58,7 +58,6 @@ def main():
     parser.add_argument("--model-config", required=True)
     parser.add_argument("--data-config", required=True, help="Saved/config snapshot containing the four pools")
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--legacy", action="store_true")
     parser.add_argument("--seed", type=int, default=20260906)
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
@@ -66,8 +65,7 @@ def main():
     output.mkdir(parents=True, exist_ok=False)  # Never overwrite an earlier probe.
     config = json.loads(Path(args.data_config).read_text())
     torch.manual_seed(args.seed)
-    loader = load_mac_from_legacy_checkpoint if args.legacy else load_flux2_fact_trained_checkpoint
-    model, _ = loader(args.checkpoint, config_path=args.model_config,
+    model, _ = load_flux2_fact_trained_checkpoint(args.checkpoint, config_path=args.model_config,
                       action_dim=config["models"]["action_dim"],
                       state_dim=config["models"]["state_dim"],
                       expert_hidden_dim=config["models"]["expert_hidden_dim"],

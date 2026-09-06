@@ -24,10 +24,7 @@ from robonana.data import robotwin_hdf5 as _robotwin_hdf5  # noqa: F401
 from robonana.encoding import DinoV3FeatureEncoder
 from robonana.models.pretrained import (
     configure_trainable_parameters,
-    initialize_flux2_fact_model,
-    load_flux2_fact_checkpoint,
     load_flux2_fact_trained_checkpoint,
-    load_mac_from_legacy_checkpoint,
 )
 from robonana.models.position_ids import dino_position_ids, image_position_ids, text_position_ids
 from robonana.sampling import (
@@ -162,7 +159,7 @@ class RoboNanaTrainer(Trainer):
         configured_mode = str(self.kwargs.get("q_target_mode", ""))
         if configured_mode != "mac_mot_v2":
             raise ValueError(
-                "the maintained RL path is mac_mot_v2; legacy TD/MC posttraining was removed"
+                "the maintained RL path is mac_mot_v2"
             )
         if configured_mode != self.posttrain_q_target_mode:
             raise ValueError("train and posttrain q_target_mode must match")
@@ -261,23 +258,18 @@ class RoboNanaTrainer(Trainer):
         reward_dim = int(_config_value(model_config, "reward_dim", 1))
         success_dim = int(_config_value(model_config, "success_dim", 1))
         q_dim = int(_config_value(model_config, "q_dim", 1))
-        reward_head_type = str(_config_value(model_config, "reward_head_type", "direct"))
+        reward_head_type = str(_config_value(model_config, "reward_head_type", "binary_chunk"))
         max_horizon = int(_config_value(model_config, "max_horizon", 48))
-        architecture_version = str(
-            _config_value(model_config, "architecture_version", "legacy_v1")
-        )
+        architecture_version = str(_config_value(model_config, "architecture_version", "mac_mot_v2"))
+        if architecture_version != "mac_mot_v2":
+            raise ValueError("RoboNana only supports the mac_mot_v2 architecture")
         chunk_horizon = int(_config_value(model_config, "chunk_horizon", max_horizon))
         value_dim = int(_config_value(model_config, "value_dim", 1))
         expert_hidden_dim = _config_value(model_config, "expert_hidden_dim", None)
         expert_hidden_dim = None if expert_hidden_dim is None else int(expert_hidden_dim)
-        if architecture_version == "mac_mot_v2":
-            if reward_head_type != "binary_chunk" or reward_dim != chunk_horizon:
-                raise ValueError(
-                    "mac_mot_v2 requires reward_head_type='binary_chunk' and reward_dim=chunk_horizon"
-                )
-        elif reward_head_type != "direct" or success_dim != 1:
+        if reward_head_type != "binary_chunk" or reward_dim != chunk_horizon:
             raise ValueError(
-                "current training requires models.reward_head_type='direct' and success_dim=1"
+                "mac_mot_v2 requires reward_head_type='binary_chunk' and reward_dim=chunk_horizon"
             )
         raw_dino_dim = _config_value(model_config, "dino_dim", None)
         dino_dim = None if raw_dino_dim is None else int(raw_dino_dim)
@@ -311,115 +303,19 @@ class RoboNanaTrainer(Trainer):
             raise ValueError("models.params must record the complete FLUX.2 architecture")
         params = Flux2Params(**dict(params_config))
         checkpoint = _config_value(model_config, "checkpoint", None)
-        initialization = str(
-            _config_value(
-                model_config,
-                "initialization",
-                "pretrained" if checkpoint is not None else "scratch",
-            )
+        if checkpoint is None:
+            raise ValueError("trained MAC initialization requires models.checkpoint")
+        model, report = load_flux2_fact_trained_checkpoint(
+            str(checkpoint), action_dim=action_dim, state_dim=state_dim,
+            reward_dim=reward_dim, success_dim=success_dim, q_dim=q_dim,
+            reward_head_type=reward_head_type, max_horizon=max_horizon,
+            dino_dim=dino_dim, pred_action_bidirectional=pred_action_bidirectional,
+            architecture_version=architecture_version, chunk_horizon=chunk_horizon,
+            value_dim=value_dim, expert_hidden_dim=expert_hidden_dim,
+            device=self.device, dtype=self.dtype, params=params,
+            config_path=_config_value(model_config, "checkpoint_config", None),
         )
-        if initialization == "pretrained":
-            if checkpoint is None:
-                raise ValueError("pretrained initialization requires models.checkpoint")
-            model, report = load_flux2_fact_checkpoint(
-                str(checkpoint),
-                action_dim=action_dim,
-                state_dim=state_dim,
-                reward_dim=reward_dim,
-                success_dim=success_dim,
-                q_dim=q_dim,
-                max_horizon=max_horizon,
-                dino_dim=dino_dim,
-                pred_action_bidirectional=pred_action_bidirectional,
-                device=self.device,
-                dtype=self.dtype,
-                params=params,
-                architecture_version=architecture_version,
-                chunk_horizon=chunk_horizon,
-                value_dim=value_dim,
-                expert_hidden_dim=expert_hidden_dim,
-            )
-            initialization_label = f"pretrained checkpoint parameters={report.checkpoint_parameters}"
-        elif initialization == "trained":
-            if checkpoint is None:
-                raise ValueError("trained initialization requires models.checkpoint")
-            model, report = load_flux2_fact_trained_checkpoint(
-                str(checkpoint),
-                action_dim=action_dim,
-                state_dim=state_dim,
-                reward_dim=reward_dim,
-                success_dim=success_dim,
-                q_dim=q_dim,
-                reward_head_type=reward_head_type,
-                max_horizon=max_horizon,
-                dino_dim=dino_dim,
-                pred_action_bidirectional=pred_action_bidirectional,
-                architecture_version=architecture_version,
-                chunk_horizon=chunk_horizon,
-                value_dim=value_dim,
-                expert_hidden_dim=expert_hidden_dim,
-                device=self.device,
-                dtype=self.dtype,
-                params=params,
-                config_path=_config_value(model_config, "checkpoint_config", None),
-            )
-            initialization_label = (
-                f"trained checkpoint parameters={report.checkpoint_parameters}; "
-                f"new_parameters={len(report.initialized_robot_parameters)}"
-            )
-        elif initialization == "mac_from_legacy":
-            if checkpoint is None:
-                raise ValueError("mac_from_legacy initialization requires models.checkpoint")
-            checkpoint_config = _config_value(model_config, "checkpoint_config", None)
-            if checkpoint_config is None:
-                raise ValueError(
-                    "mac_from_legacy initialization requires the exact 120k checkpoint_config"
-                )
-            model, report = load_mac_from_legacy_checkpoint(
-                str(checkpoint),
-                config_path=str(checkpoint_config),
-                action_dim=action_dim,
-                state_dim=state_dim,
-                reward_dim=reward_dim,
-                success_dim=success_dim,
-                q_dim=q_dim,
-                value_dim=value_dim,
-                expert_hidden_dim=1024 if expert_hidden_dim is None else expert_hidden_dim,
-                chunk_horizon=chunk_horizon,
-                dino_dim=dino_dim,
-                device=self.device,
-                dtype=self.dtype,
-                params=params,
-            )
-            initialization_label = (
-                f"120k MAC migration loaded={len(report.loaded_parameter_names)}; "
-                f"skipped={len(report.skipped_checkpoint_parameters)}; "
-                f"new={len(report.initialized_robot_parameters)}"
-            )
-        elif initialization == "scratch":
-            model = initialize_flux2_fact_model(
-                action_dim=action_dim,
-                state_dim=state_dim,
-                reward_dim=reward_dim,
-                success_dim=success_dim,
-                q_dim=q_dim,
-                max_horizon=max_horizon,
-                dino_dim=dino_dim,
-                pred_action_bidirectional=pred_action_bidirectional,
-                device=self.device,
-                dtype=self.dtype,
-                params=params,
-                architecture_version=architecture_version,
-                chunk_horizon=chunk_horizon,
-                value_dim=value_dim,
-                expert_hidden_dim=expert_hidden_dim,
-            )
-            initialization_label = "scratch"
-        else:
-            raise ValueError(
-                "initialization must be pretrained, trained, mac_from_legacy, or scratch, "
-                f"got {initialization!r}"
-            )
+        initialization_label = f"trained MAC checkpoint parameters={report.checkpoint_parameters}"
         train_mode = str(_config_value(model_config, "train_mode", "full"))
         trainable_names = configure_trainable_parameters(model, train_mode)
         if bool(_config_value(model_config, "gradient_checkpointing", True)):
@@ -785,7 +681,7 @@ class RoboNanaTrainer(Trainer):
                         state=eval_state,
                         noisy_pred_action=pred_action_dummy,
                         gt_action_cond=clean_action_cond,
-                        horizon_idx=horizons,
+                        chunk_horizon=horizons,
                         noisy_future_state=sampled_future_state,
                         noisy_reward=reward_query_,
                         noisy_q=sampled_q,
@@ -916,7 +812,7 @@ class RoboNanaTrainer(Trainer):
         action = batch_dict.get("behavior_action", batch_dict["action"]).to(
             device=self.device, dtype=self.dtype
         )
-        horizon = batch_dict["horizon_idx"].to(
+        horizon = batch_dict["chunk_horizon"].to(
             device=self.device, dtype=torch.long
         ).reshape(-1)
         if not bool(torch.all(horizon == 48)):
@@ -976,7 +872,7 @@ class RoboNanaTrainer(Trainer):
             state=values["state"],
             noisy_pred_action=noisy_action,
             gt_action_cond=values["action"],
-            horizon_idx=values["horizon"],
+            chunk_horizon=values["horizon"],
             noisy_future_state=noisy_state,
             noisy_reward=empty,
             noisy_q=empty,
@@ -1139,7 +1035,7 @@ class RoboNanaTrainer(Trainer):
         q = batch_dict["q"].to(device=self.device, dtype=self.dtype).reshape(
             context.shape[0], 1, 1
         )
-        horizon = batch_dict["horizon_idx"].to(device=self.device, dtype=torch.long).reshape(-1)
+        horizon = batch_dict["chunk_horizon"].to(device=self.device, dtype=torch.long).reshape(-1)
         context_mask = batch_dict["context_mask"].to(device=self.device, dtype=torch.bool)
         action_loss_mask = batch_dict["action_loss_mask"].to(device=self.device)
         q_loss_mask = batch_dict.get("q_loss_mask")
@@ -1211,7 +1107,7 @@ class RoboNanaTrainer(Trainer):
             state=state,
             noisy_pred_action=noisy_action,
             gt_action_cond=behavior_action,
-            horizon_idx=horizon,
+            chunk_horizon=horizon,
             noisy_future_state=noisy_future_state,
             noisy_reward=reward_query,
             noisy_q=noisy_q,

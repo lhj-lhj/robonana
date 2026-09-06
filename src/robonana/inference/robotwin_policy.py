@@ -21,7 +21,6 @@ from robonana.sampling import (
     QRejectionSample,
     WorldFlowSample,
     flow_euler_schedule,
-    sample_flux2_action,
     sample_flux2_world,
     sample_q_rejection,
 )
@@ -42,13 +41,9 @@ from world_action_model.pipeline.utils import (
 
 
 class InferenceMode(str, Enum):
-    """Supported RoboNana inference graphs."""
+    """The single maintained live graph: action flow plus Q rejection."""
 
-    ACTION = "action"
     ACTION_Q_REJECTION = "action_q_rejection"
-    ACTION_REWARD_Q = "action_reward_q"
-    WORLD_ALL = "world_all"
-    WORLD_HORIZON = "world_horizon"
 
 
 def _parse_inference_mode(value: str | InferenceMode) -> InferenceMode:
@@ -187,7 +182,7 @@ class RoboNanaRobotWinPolicy:
         action_chunk: int = 48,
         action_dim: int | None = None,
         state_dim: int | None = None,
-        horizon: int = 24,
+        horizon: int = 48,
         max_horizon: int | None = None,
         num_inference_steps: int = 20,
         flow_shift: float = 1.0,
@@ -196,11 +191,9 @@ class RoboNanaRobotWinPolicy:
         main_view_width: int = 256,
         main_view_height: int = 192,
         model_params: Flux2Params | None = None,
-        inference_mode: str | InferenceMode = InferenceMode.ACTION,
+        inference_mode: str | InferenceMode = InferenceMode.ACTION_Q_REJECTION,
         stage2_image_horizon_batch_size: int = 4,
         vae_decode_batch_size: int = 4,
-        return_chunk_q: bool = False,
-        return_stage2_image: bool = False,
         discount: float = 0.999,
         reward_non_goal: float = -1.0,
         reward_goal: float = 0.0,
@@ -223,8 +216,6 @@ class RoboNanaRobotWinPolicy:
         self.inference_mode = _parse_inference_mode(inference_mode)
         self.stage2_image_horizon_batch_size = int(stage2_image_horizon_batch_size)
         self.vae_decode_batch_size = int(vae_decode_batch_size)
-        self.return_chunk_q = bool(return_chunk_q)
-        self.return_stage2_image = bool(return_stage2_image)
         self.discount = float(discount)
         self.reward_non_goal = float(reward_non_goal)
         self.reward_goal = float(reward_goal)
@@ -239,15 +230,6 @@ class RoboNanaRobotWinPolicy:
             raise ValueError("rejection_candidate_count must be positive")
         if self.q_return_scale <= 0:
             raise ValueError("q_return_scale must be positive")
-        if self.return_stage2_image and not self.return_chunk_q:
-            raise ValueError("return_stage2_image requires return_chunk_q Stage-2 sampling")
-        if self.inference_mode is not InferenceMode.ACTION and (
-            self.return_chunk_q or self.return_stage2_image
-        ):
-            raise ValueError(
-                "legacy return_chunk_q/return_stage2_image flags cannot be combined "
-                "with an explicit non-action inference_mode"
-            )
         if (
             self.action_chunk <= 0
             or self.num_inference_steps <= 0
@@ -272,24 +254,16 @@ class RoboNanaRobotWinPolicy:
         self.action_dim = int(self.model.action_dim)
         self.state_dim = int(self.model.state_dim)
         self.max_horizon = int(self.model.max_horizon)
-        if not 1 <= self.horizon <= self.max_horizon:
-            raise ValueError("horizon must lie in [1, max_horizon]")
-        if self.action_chunk > self.max_horizon:
-            raise ValueError("action_chunk cannot exceed the checkpoint's max_horizon")
+        if self.action_chunk != 48 or self.horizon != 48 or self.max_horizon != 48:
+            raise ValueError("mac_mot_v2 live inference requires action_chunk=horizon=max_horizon=48")
         self.model.eval().requires_grad_(False)
         if (
             self.inference_mode is InferenceMode.ACTION_Q_REJECTION
             and getattr(self.model, "architecture_version", None) != "mac_mot_v2"
         ):
             raise ValueError("action_q_rejection requires a mac_mot_v2 checkpoint")
-        if (
-            getattr(self.model, "architecture_version", None) == "mac_mot_v2"
-            and self.inference_mode
-            not in {InferenceMode.ACTION, InferenceMode.ACTION_Q_REJECTION}
-        ):
-            raise ValueError(
-                "mac_mot_v2 live inference supports action or action_q_rejection"
-            )
+        if self.inference_mode is not InferenceMode.ACTION_Q_REJECTION:
+            raise ValueError("the maintained live graph is action_q_rejection")
         self.vae = AutoencoderKLFlux2.from_pretrained(
             self.flux_checkpoint_dir,
             subfolder="vae",
@@ -407,19 +381,7 @@ class RoboNanaRobotWinPolicy:
                 grid_width=self.grid_width,
             )
             return self._last_rejection.action
-        self._last_rejection = None
-        return sample_flux2_action(
-            model=self.model,
-            context=context,
-            current_latents=current,
-            state=state,
-            context_mask=context_mask,
-            action_noise=seeded_randn_like(action_template, sampling_seed),
-            horizon_idx=self.horizon,
-            schedule=self.schedule,
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-        )
+        raise RuntimeError("unreachable: the maintained graph always uses Q rejection")
 
     @torch.inference_mode()
     def _sample_stage2_chunk(
@@ -501,7 +463,7 @@ class RoboNanaRobotWinPolicy:
             state=state,
             context_mask=context_mask,
             clean_action=clean_action,
-            horizon_idx=horizon_matrix,
+            chunk_horizon=horizon_matrix,
             future_noise=future_noise,
             future_state_noise=future_state_noise,
             reward_template=reward_query,
@@ -662,10 +624,7 @@ class RoboNanaRobotWinPolicy:
             if observation.get("sampling_seed") is None
             else int(observation["sampling_seed"])
         )
-        needs_input_action = self.inference_mode in {
-            InferenceMode.WORLD_ALL,
-            InferenceMode.WORLD_HORIZON,
-        }
+        needs_input_action = False
         if needs_input_action:
             if "action_chunk" not in observation:
                 raise KeyError(f"{self.inference_mode.value} requires observation['action_chunk']")
@@ -710,7 +669,7 @@ class RoboNanaRobotWinPolicy:
         conditional_accumulated_reward: float | None = None
         conditional_terminal_horizon: int | None = None
         reward_curve_evaluated = False
-        if self.inference_mode is InferenceMode.ACTION_REWARD_Q:
+        if False:  # removed variable-horizon reward-curve compatibility path
             start = time.perf_counter()
             # A terminal earlier than h=48 necessarily makes the clipped h=48
             # state terminal too.  Query that endpoint first and only pay for
@@ -797,13 +756,13 @@ class RoboNanaRobotWinPolicy:
                 )
             self._sync(self.model_device)
             timing["stage2_sample_ms"] = (time.perf_counter() - start) * 1000.0
-        elif self.inference_mode is InferenceMode.WORLD_ALL:
+        elif False:  # removed offline all-horizons compatibility path
             horizons = torch.arange(1, self.action_chunk + 1, device=self.model_device)
             # Offline return annotation needs the same packed h=1..T world
             # query without paying for dense FLUX image tokens or VAE decode.
             # Keep the public WORLD_ALL default unchanged for existing callers.
             include_image = bool(observation.get("include_image", True))
-        elif self.inference_mode is InferenceMode.WORLD_HORIZON:
+        elif False:  # removed externally supplied horizon compatibility path
             if "horizon" not in observation:
                 raise KeyError("world_horizon requires observation['horizon']")
             requested_horizon = torch.as_tensor(observation["horizon"])
@@ -835,7 +794,7 @@ class RoboNanaRobotWinPolicy:
         # scripts. New callers should select one of the four explicit modes.
         legacy_world: WorldFlowSample | None = None
         legacy_stage2_image: Tensor | None = None
-        if self.return_chunk_q:
+        if False:  # removed legacy single-horizon stage-2 response path
             start = time.perf_counter()
             legacy_world = self._sample_world(
                 context=context,

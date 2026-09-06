@@ -110,7 +110,7 @@ def write_manifest(task_dir: Path, checkpoint: Path) -> None:
                 "shape_per_frame": [EXPECTED_IMAGE_TOKENS, EXPECTED_LATENT_CHANNELS],
                 "dtype": "bfloat16",
                 "current_latent": "frame_latents[current_index]",
-                "future_latent": "frame_latents[min(current_index + idx_h, episode_length - 1)]",
+                "future_latent": "frame_latents[min(current_index + 48, episode_length - 1)]",
             },
             "checkpoint": str(checkpoint),
         },

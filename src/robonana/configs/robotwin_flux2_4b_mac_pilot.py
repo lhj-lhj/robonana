@@ -6,7 +6,7 @@ sets experiment budget and checkpoint retention, not an alternative trainer.
 
 import copy
 
-from .robotwin_flux2_4b_mac_from120k import config as _mac_config
+from .robotwin_flux2_4b_mac import config as _mac_config
 
 
 def apply_pilot_config(base):

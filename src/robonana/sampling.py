@@ -113,16 +113,16 @@ def flow_euler_step(sample: Tensor, velocity: Tensor, sigma: Tensor, sigma_next:
 
 
 def _as_batch_horizon(
-    horizon_idx: int | Tensor,
+    chunk_horizon: int | Tensor,
     *,
     batch_size: int,
     device: torch.device,
 ) -> Tensor:
-    horizon = torch.as_tensor(horizon_idx, device=device, dtype=torch.long)
+    horizon = torch.as_tensor(chunk_horizon, device=device, dtype=torch.long)
     if horizon.ndim == 0:
         horizon = horizon.expand(batch_size)
     if horizon.ndim not in (1, 2) or horizon.shape[0] != batch_size:
-        raise ValueError("horizon_idx must be scalar, [B], or [B,K]")
+        raise ValueError("chunk_horizon must be scalar, [B], or [B,K]")
     return horizon
 
 
@@ -134,7 +134,7 @@ def sample_flux2_action(
     state: Tensor,
     context_mask: Tensor,
     action_noise: Tensor,
-    horizon_idx: int | Tensor,
+    chunk_horizon: int | Tensor,
     schedule: Tensor,
     grid_height: int,
     grid_width: int,
@@ -151,7 +151,7 @@ def sample_flux2_action(
     if context.shape[0] != batch_size or current_latents.shape[0] != batch_size:
         raise ValueError("action sampling inputs must share one batch dimension")
     device = action_noise.device
-    horizon = _as_batch_horizon(horizon_idx, batch_size=batch_size, device=device)
+    horizon = _as_batch_horizon(chunk_horizon, batch_size=batch_size, device=device)
     if horizon.ndim != 1:
         raise ValueError("Stage-1 action sampling requires one horizon per sample")
     context_ids = text_position_ids(batch_size, context.shape[1], device)
@@ -169,7 +169,7 @@ def sample_flux2_action(
     model_spec = getattr(model, "module", model)
     if getattr(model_spec, "architecture_version", None) == "mac_mot_v2":
         if not bool(torch.all(horizon == model_spec.chunk_horizon)):
-            raise ValueError("mac_mot_v2 action sampling requires horizon_idx=48")
+            raise ValueError("mac_mot_v2 action sampling requires chunk_horizon=48")
         cache = model_spec.prefill_condition_cache(
             context=context, context_ids=context_ids, current_latents=current_latents,
             current_ids=current_ids, state=state, context_mask=context_mask,
@@ -199,7 +199,7 @@ def sample_flux2_action(
             state=state,
             noisy_pred_action=sampled_action,
             gt_action_cond=clean_gt_action,
-            horizon_idx=horizon,
+            chunk_horizon=horizon,
             noisy_future_state=empty_state,
             noisy_reward=empty_scalar,
             noisy_q=empty_scalar,
@@ -224,7 +224,7 @@ def sample_flux2_world(
     state: Tensor,
     context_mask: Tensor,
     clean_action: Tensor,
-    horizon_idx: int | Tensor,
+    chunk_horizon: int | Tensor,
     future_noise: Tensor,
     future_state_noise: Tensor,
     reward_template: Tensor,
@@ -237,7 +237,7 @@ def sample_flux2_world(
 
     batch_size = clean_action.shape[0]
     device = clean_action.device
-    horizon = _as_batch_horizon(horizon_idx, batch_size=batch_size, device=device)
+    horizon = _as_batch_horizon(chunk_horizon, batch_size=batch_size, device=device)
     packed = horizon.ndim == 2
     if packed:
         if future_noise.ndim != 4 or future_noise.shape[:2] != horizon.shape:
@@ -299,7 +299,7 @@ def sample_flux2_world(
             state=state,
             noisy_pred_action=empty_pred_action,
             gt_action_cond=sampled_action,
-            horizon_idx=horizon,
+            chunk_horizon=horizon,
             noisy_future_state=sampled_future_state,
             noisy_reward=reward_query,
             noisy_q=sampled_q,
@@ -477,7 +477,7 @@ def evaluate_mac_critics(
         state=state,
         noisy_pred_action=empty_action,
         gt_action_cond=clean_action,
-        horizon_idx=horizon,
+        chunk_horizon=horizon,
         noisy_future_state=empty_state,
         noisy_reward=empty_scalar,
         noisy_q=empty_scalar,
@@ -587,7 +587,7 @@ def sample_mac_world(
             state=state,
             noisy_pred_action=empty_action,
             gt_action_cond=clean_action,
-            horizon_idx=horizon,
+            chunk_horizon=horizon,
             noisy_future_state=sampled_state,
             noisy_reward=empty_scalar,
             noisy_q=empty_scalar,

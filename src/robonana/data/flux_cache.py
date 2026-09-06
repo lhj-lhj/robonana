@@ -69,20 +69,20 @@ def episode_language_context_path(task_dir: str | Path, episode_index: int) -> P
 def select_current_future_latents(
     frame_latents: Tensor,
     current_index: int,
-    horizon_idx: int,
+    chunk_horizon: int,
 ) -> tuple[Tensor, Tensor]:
     """Index one frame cache as ``current_latent`` and ``future_latent_h``.
 
     Each image is encoded once.  The horizon-conditioned future is selected at
     load time, so caching does not duplicate the same frame for every possible
-    ``idx_h``.
+    fixed chunk horizon.
     """
 
     if frame_latents.ndim != 3:
         raise ValueError(f"frame_latents must be [T, image_tokens, channels], got {tuple(frame_latents.shape)}")
     if not 0 <= current_index < frame_latents.shape[0]:
         raise IndexError(f"current_index={current_index} is outside [0, {frame_latents.shape[0]})")
-    if horizon_idx < 1:
-        raise ValueError(f"horizon_idx must be positive, got {horizon_idx}")
-    future_index = min(current_index + horizon_idx, frame_latents.shape[0] - 1)
+    if chunk_horizon < 1:
+        raise ValueError(f"chunk_horizon must be positive, got {chunk_horizon}")
+    future_index = min(current_index + chunk_horizon, frame_latents.shape[0] - 1)
     return frame_latents[current_index], frame_latents[future_index]

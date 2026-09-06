@@ -10,8 +10,8 @@ from pathlib import Path
 from fact_train import launch_from_config
 
 
-DEFAULT_TRAIN_CONFIG = "robonana.configs.robotwin_flux2_4b_dino.config"
-DEFAULT_PROJECT_DIR = "experiments/robotwin_flux2_4b_dino_bs256_120k"
+DEFAULT_TRAIN_CONFIG = "robonana.configs.robotwin_flux2_4b_mac.config"
+DEFAULT_PROJECT_DIR = "experiments/hanging_mug_mac"
 
 
 def main() -> int:

@@ -48,7 +48,7 @@ def main() -> int:
     parser.add_argument("--text-encoder-device", default="cpu")
     parser.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
     parser.add_argument("--action-chunk", type=int, default=48)
-    parser.add_argument("--horizon", type=int, default=24)
+    parser.add_argument("--horizon", type=int, default=48)
     parser.add_argument("--num-inference-steps", type=int, default=20)
     parser.add_argument("--discount", type=float, default=0.999)
     parser.add_argument("--reward-non-goal", type=float, default=-1.0)
@@ -57,14 +57,9 @@ def main() -> int:
     parser.add_argument("--q-return-scale", type=float, default=1000.0)
     parser.add_argument(
         "--inference-mode",
-        choices=tuple(mode.value for mode in InferenceMode),
-        default=InferenceMode.ACTION.value,
-        help=(
-            "action: Stage-1 only; action_reward_q: Stage-1 plus conditional horizon "
-            "state/reward/success/Q; "
-            "world_all: supplied action_chunk plus all horizon state/reward/Q/image; "
-            "world_horizon: supplied action_chunk and horizon plus one world image."
-        ),
+        choices=(InferenceMode.ACTION_Q_REJECTION.value,),
+        default=InferenceMode.ACTION_Q_REJECTION.value,
+        help="Sample 48-step action candidates and select argmax Q.",
     )
     parser.add_argument(
         "--stage2-image-horizon-batch-size",
@@ -77,16 +72,6 @@ def main() -> int:
         type=int,
         default=4,
         help="Number of generated horizon latents decoded by the VAE at once.",
-    )
-    parser.add_argument(
-        "--return-chunk-q",
-        action="store_true",
-        help="Compatibility path: return one h=--horizon reward and Q after Stage-1.",
-    )
-    parser.add_argument(
-        "--return-stage2-image",
-        action="store_true",
-        help="Compatibility path: decode that one Stage-2 image (requires --return-chunk-q).",
     )
     args = parser.parse_args()
     dtype = {
@@ -114,8 +99,6 @@ def main() -> int:
         inference_mode=args.inference_mode,
         stage2_image_horizon_batch_size=args.stage2_image_horizon_batch_size,
         vae_decode_batch_size=args.vae_decode_batch_size,
-        return_chunk_q=args.return_chunk_q,
-        return_stage2_image=args.return_stage2_image,
     )
     resolved = policy.load_report.model_config
     print(

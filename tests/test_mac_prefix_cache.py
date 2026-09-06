@@ -57,7 +57,7 @@ def full_action(model, inputs, action, sigma):
         **inputs, noisy_future_latents=action.new_empty(batch, 0, 8),
         future_ids=torch.empty(batch, 0, 4, dtype=torch.long),
         noisy_pred_action=action, gt_action_cond=action[:, :0],
-        horizon_idx=torch.full((batch,), 48),
+        chunk_horizon=torch.full((batch,), 48),
         noisy_future_state=action.new_empty(batch, 0, 6),
         noisy_reward=action.new_empty(batch, 0, 1), noisy_q=action.new_empty(batch, 0, 1),
         action_timestep=sigma.expand(batch), wm_timestep=torch.zeros(batch),
@@ -119,7 +119,7 @@ def test_cached_actor_matches_full_flow_and_rejection_prefills_once():
     with patch.object(model, "prefill_condition_cache", wraps=model.prefill_condition_cache) as prefill:
         single = sample_flux2_action(
             model=model, **sampling_inputs(inputs), action_noise=noise[:, 0],
-            schedule=schedule, horizon_idx=48, grid_height=1, grid_width=2,
+            schedule=schedule, chunk_horizon=48, grid_height=1, grid_width=2,
         )
         assert prefill.call_count == 1
     torch.testing.assert_close(single, expected[:, 0], atol=3e-6, rtol=2e-5)

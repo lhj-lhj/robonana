@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -39,7 +38,7 @@ NUM_INFERENCE_STEPS = int(os.environ.get("ROBONANA_NUM_INFERENCE_STEPS", "20"))
 DISCOUNT = float(os.environ.get("ROBONANA_DISCOUNT", "0.999"))
 REWARD_NON_GOAL = float(os.environ.get("ROBONANA_REWARD_NON_GOAL", "-1.0"))
 REWARD_GOAL = float(os.environ.get("ROBONANA_REWARD_GOAL", "0.0"))
-Q_TARGET_MODE = os.environ.get("ROBONANA_Q_TARGET_MODE", "mc_success")
+Q_TARGET_MODE = "mac_mot_v2"
 EARLY_CHECKPOINT_STEPS = tuple(
     int(value)
     for value in os.environ.get("ROBONANA_EARLY_CHECKPOINT_STEPS", "100").split(",")
@@ -52,44 +51,7 @@ DISABLE_CHECKPOINTING = os.environ.get("ROBONANA_DISABLE_CHECKPOINTING", "0").lo
 }
 
 
-def _parse_bool(value: str, *, name: str) -> bool:
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes"}:
-        return True
-    if normalized in {"0", "false", "no"}:
-        return False
-    raise ValueError(f"{name} must be one of 1/0, true/false, or yes/no")
-
-
-def _resolve_pred_action_bidirectional(project_dir: str | Path) -> bool:
-    """Preserve legacy causal runs while enabling the hybrid layout for new runs."""
-
-    override = os.environ.get("ROBONANA_PRED_ACTION_BIDIRECTIONAL")
-    if override is not None:
-        return _parse_bool(override, name="ROBONANA_PRED_ACTION_BIDIRECTIONAL")
-
-    saved_config = Path(project_dir) / "config.json"
-    if not saved_config.is_file():
-        return True
-    payload = json.loads(saved_config.read_text(encoding="utf-8"))
-    models = payload.get("models")
-    if not isinstance(models, dict):
-        raise ValueError(f"existing experiment has no models mapping: {saved_config}")
-    nested = models.get("train")
-    if isinstance(nested, dict):
-        models = nested
-    if "pred_action_bidirectional" not in models:
-        return False
-    value = models["pred_action_bidirectional"]
-    if not isinstance(value, bool):
-        raise ValueError(
-            "existing models.pred_action_bidirectional must be a JSON boolean: "
-            f"{saved_config}"
-        )
-    return value
-
-
-PRED_ACTION_BIDIRECTIONAL = _resolve_pred_action_bidirectional(PROJECT_DIR)
+PRED_ACTION_BIDIRECTIONAL = True
 
 DEEPSPEED_CONFIG = (
     REPO_ROOT / "third_party" / "FACT" / "fact_train" / "distributed" / "accelerate_configs" / "zero2.json"
@@ -166,17 +128,22 @@ config = dict(
         test=dict(),
     ),
     models=dict(
+        architecture_version="mac_mot_v2",
+        initialization="trained",
         checkpoint=str(BACKBONE_CHECKPOINT),
         checkpoint_dir=str(CHECKPOINT_DIR),
         params=KLEIN4B_MODEL_PARAMS,
         action_dim=14,
         state_dim=14,
-        reward_dim=1,
+        reward_dim=48,
         success_dim=1,
         q_dim=1,
-        reward_head_type="direct",
+        reward_head_type="binary_chunk",
         max_horizon=48,
         pred_action_bidirectional=PRED_ACTION_BIDIRECTIONAL,
+        chunk_horizon=48,
+        value_dim=1,
+        expert_hidden_dim=1024,
         train_mode=TRAIN_MODE,
         gradient_checkpointing=True,
         vae_dtype="float32",
@@ -220,7 +187,7 @@ config = dict(
         discount=DISCOUNT,
         reward_non_goal=REWARD_NON_GOAL,
         reward_goal=REWARD_GOAL,
-        q_target_mode=Q_TARGET_MODE,
+        q_target_mode="mac_mot_v2",
         loss_weights=dict(
             image_loss=1.0,
             action_loss=10.0,

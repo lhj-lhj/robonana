@@ -16,7 +16,7 @@ from robonana.inference.robotwin_policy import (
     postprocess_action,
     seeded_randn_like,
 )
-from robonana.sampling import QRejectionSample, sample_flux2_action, sample_q_rejection
+from robonana.sampling import QRejectionSample, sample_q_rejection
 from world_action_model.image_layouts import (
     ROBOTWIN_VIEW_KEYS,
     build_robotwin_ref_tensor,
@@ -35,17 +35,8 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
     supports_true_batch = True
 
     def _validate_action_only_batch(self) -> None:
-        if self.inference_mode not in {
-            InferenceMode.ACTION,
-            InferenceMode.ACTION_Q_REJECTION,
-        }:
-            raise ValueError(
-                "batched RoboTwin eval requires action or action_q_rejection"
-            )
-        if bool(getattr(self, "return_chunk_q", False)) or self.return_stage2_image:
-            raise ValueError(
-                "batched RoboTwin eval is Stage-1-only; disable auxiliary Stage-2 returns"
-            )
+        if self.inference_mode is not InferenceMode.ACTION_Q_REJECTION:
+            raise ValueError("batched RoboTwin eval requires action_q_rejection")
 
     def _batched_context(
         self, observations: Sequence[dict[str, Any]]
@@ -141,12 +132,6 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
         sampling_seeds: Sequence[int | None],
     ) -> Tensor:
         batch_size = state.shape[0]
-        horizon = torch.full(
-            (batch_size,),
-            self.horizon,
-            device=self.model_device,
-            dtype=torch.long,
-        )
         clean_gt_action = torch.zeros(
             batch_size,
             self.action_chunk,
@@ -154,14 +139,7 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
             device=self.model_device,
             dtype=self.dtype,
         )
-        action_noise = torch.cat(
-            [
-                seeded_randn_like(clean_gt_action[index : index + 1], seed)
-                for index, seed in enumerate(sampling_seeds)
-            ],
-            dim=0,
-        )
-        if getattr(self, "inference_mode", InferenceMode.ACTION) is InferenceMode.ACTION_Q_REJECTION:
+        if getattr(self, "inference_mode", InferenceMode.ACTION_Q_REJECTION) is InferenceMode.ACTION_Q_REJECTION:
             noise_rows = []
             for batch_index, seed in enumerate(sampling_seeds):
                 candidates = []
@@ -191,19 +169,7 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
                 grid_width=self.grid_width,
             )
             return self._last_batch_rejection.action
-        self._last_batch_rejection = None
-        return sample_flux2_action(
-            model=self.model,
-            context=context,
-            current_latents=current,
-            state=state,
-            context_mask=context_mask,
-            action_noise=action_noise,
-            horizon_idx=horizon,
-            schedule=self.schedule,
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-        )
+        raise RuntimeError("unreachable: the maintained graph always uses Q rejection")
 
     @torch.inference_mode()
     def inference_batch(

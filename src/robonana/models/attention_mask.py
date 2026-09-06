@@ -244,36 +244,35 @@ def build_attention_bias(
     batch_size: int,
     dtype: torch.dtype,
     device: torch.device | str,
-    horizon_idx: torch.Tensor,
+    chunk_horizon: torch.Tensor,
     pred_action_bidirectional: bool = False,
     context_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build additive attention bias with ``0`` allowed and ``-inf`` blocked.
 
     A is an isolated diffusion sink. New runs use bidirectional attention inside
-    A to denoise the action chunk jointly; the default remains causal so legacy
-    checkpoints without explicit mask metadata retain their original semantics.
+    A to denoise the action chunk jointly.
     G is always causal. Each H/S/R/U/Q/I/D block can read only the first
-    ``idx_h`` full-clean G tokens and its own within-block prefix. Packed world
+    fixed-chunk full-clean G tokens and its own within-block prefix. Packed world
     blocks cannot read one another. G and all future targets cannot read A.
     """
 
     if not dtype.is_floating_point:
         raise TypeError(f"attention bias requires a floating dtype, got {dtype}")
-    if horizon_idx.ndim == 1:
-        horizon_idx = horizon_idx[:, None]
+    if chunk_horizon.ndim == 1:
+        chunk_horizon = chunk_horizon[:, None]
     expected_horizons = (batch_size, len(segments.world_blocks))
-    if horizon_idx.ndim != 2 or tuple(horizon_idx.shape) != expected_horizons:
+    if chunk_horizon.ndim != 2 or tuple(chunk_horizon.shape) != expected_horizons:
         raise ValueError(
-            f"horizon_idx must have shape {(batch_size,)} for one block or "
-            f"{expected_horizons}, got {tuple(horizon_idx.shape)}"
+            f"chunk_horizon must have shape {(batch_size,)} for one block or "
+            f"{expected_horizons}, got {tuple(chunk_horizon.shape)}"
         )
 
     gt_action_length = segments.gt_action.stop - segments.gt_action.start
-    horizon_idx = horizon_idx.to(device=device, dtype=torch.long)
-    if torch.any(horizon_idx < 1) or torch.any(horizon_idx > gt_action_length):
+    chunk_horizon = chunk_horizon.to(device=device, dtype=torch.long)
+    if torch.any(chunk_horizon < 1) or torch.any(chunk_horizon > gt_action_length):
         raise ValueError(
-            f"horizon_idx must lie in [1, {gt_action_length}] so future targets have a valid G prefix"
+            f"chunk_horizon must lie in [1, {gt_action_length}] so future targets have a valid G prefix"
         )
 
     n = segments.total_length
@@ -292,7 +291,7 @@ def build_attention_bias(
 
     action_positions = torch.arange(gt_action_length, device=device)[None, :]
     for block_index, block in enumerate(segments.world_blocks):
-        visible_gt = action_positions < horizon_idx[:, block_index, None]
+        visible_gt = action_positions < chunk_horizon[:, block_index, None]
         queries = (
             block.horizon,
             block.future_state,

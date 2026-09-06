@@ -106,8 +106,7 @@ class Flux2FACTModel(Flux2):
         self.q_in = nn.Linear(q_dim, self.hidden_size, bias=False)
         self.horizon_embed = nn.Embedding(max_horizon + 1, self.hidden_size)
         self.segment_embed = nn.Embedding(8, self.hidden_size)
-        # Preserve the eight-row embedding used by legacy checkpoints; Q is
-        # the one new semantic segment introduced between reward and image.
+        # Keep the eight-row embedding used by the official FACT backbone.
         self.q_segment_embed = nn.Embedding(1, self.hidden_size)
 
         self.action_out = nn.Linear(self.hidden_size, action_dim, bias=False)
@@ -182,7 +181,7 @@ class Flux2FACTModel(Flux2):
         state: Tensor,
         noisy_pred_action: Tensor,
         gt_action_cond: Tensor,
-        horizon_idx: Tensor,
+        chunk_horizon: Tensor,
         noisy_future_state: Tensor,
         noisy_reward: Tensor,
         noisy_q: Tensor,
@@ -194,16 +193,16 @@ class Flux2FACTModel(Flux2):
         guidance: Tensor | None = None,
     ) -> Flux2FACTOutput:
         batch_size = context.shape[0]
-        packed_world = horizon_idx.ndim == 2
-        if horizon_idx.ndim == 1 and horizon_idx.shape[0] == batch_size:
-            horizon_matrix = horizon_idx[:, None]
-        elif horizon_idx.ndim == 2 and horizon_idx.shape[0] == batch_size and horizon_idx.shape[1] > 0:
-            horizon_matrix = horizon_idx
+        packed_world = chunk_horizon.ndim == 2
+        if chunk_horizon.ndim == 1 and chunk_horizon.shape[0] == batch_size:
+            horizon_matrix = chunk_horizon[:, None]
+        elif chunk_horizon.ndim == 2 and chunk_horizon.shape[0] == batch_size and chunk_horizon.shape[1] > 0:
+            horizon_matrix = chunk_horizon
         else:
-            raise ValueError("horizon_idx must have shape [B] or non-empty [B, K]")
+            raise ValueError("chunk_horizon must have shape [B] or non-empty [B, K]")
         horizon_count = horizon_matrix.shape[1]
         if torch.any(horizon_matrix < 1) or torch.any(horizon_matrix > self.max_horizon):
-            raise ValueError(f"horizon_idx must be in [1, {self.max_horizon}]")
+            raise ValueError(f"chunk_horizon must be in [1, {self.max_horizon}]")
         if current_ids.shape[-1] != 4 or context_ids.shape[-1] != 4:
             raise ValueError("FLUX.2 position IDs must have four axes")
         if packed_world:
@@ -415,7 +414,7 @@ class Flux2FACTModel(Flux2):
             batch_size=batch_size,
             dtype=dtype,
             device=device,
-            horizon_idx=horizon_matrix,
+            chunk_horizon=horizon_matrix,
             pred_action_bidirectional=self.pred_action_bidirectional,
             context_mask=context_mask,
         )

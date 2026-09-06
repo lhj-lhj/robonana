@@ -35,19 +35,17 @@ def main():
     def status(stage, **extra):
         status_file.write_text(json.dumps(dict(stage=stage, pid=os.getpid(), **extra), indent=2) + "\n")
         print(f"pilot stage: {stage}", flush=True)
-    def probe(checkpoint, model_config, name, legacy=False):
+    def probe(checkpoint, model_config, name):
         command = [sys.executable, "scripts/probe_mac_world_fit.py", "--checkpoint", str(checkpoint),
                    "--model-config", str(model_config), "--data-config", str(snapshot),
                    "--output-dir", str(project / name)]
-        if legacy:
-            command.append("--legacy")
         # Training uses physical GPUs 6,7; the serial probes need just GPU 6.
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": os.environ["ROBONANA_GPU_IDS"].split(",")[0]}
         with (project / f"{name}.log").open("x") as log:
             subprocess.run(command, cwd=repo, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
     try:
         status("baseline_probe")
-        probe(config["models"]["checkpoint"], config["models"]["checkpoint_config"], "probe_initial", True)
+        probe(config["models"]["checkpoint"], config["models"]["checkpoint_config"], "probe_initial")
         status("world_training")
         subprocess.run(["bash", "scripts/run_robotwin_train.sh", "--config",
                         "robonana.configs.robotwin_flux2_4b_mac_pilot.config"], cwd=repo, check=True)

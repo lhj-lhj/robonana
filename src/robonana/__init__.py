@@ -13,7 +13,6 @@ __all__ = [
     "WorldBlockMap",
     "build_attention_bias",
     "configure_trainable_parameters",
-    "load_flux2_fact_checkpoint",
     "load_flux2_fact_trained_checkpoint",
 ]
 
@@ -25,7 +24,6 @@ def __getattr__(name: str):
         return getattr(import_module(".models.flux2_fact", __name__), name)
     if name in {
         "configure_trainable_parameters",
-        "load_flux2_fact_checkpoint",
         "load_flux2_fact_trained_checkpoint",
     }:
         return getattr(import_module(".models.pretrained", __name__), name)

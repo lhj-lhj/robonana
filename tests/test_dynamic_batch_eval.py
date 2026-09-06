@@ -105,9 +105,7 @@ def test_fact_tcp_server_batches_two_persistent_clients():
 
 def test_batched_policy_returns_one_action_chunk_per_observation():
     policy = object.__new__(BatchedRoboNanaRobotWinPolicy)
-    policy.inference_mode = InferenceMode.ACTION
-    policy.return_chunk_q = False
-    policy.return_stage2_image = False
+    policy.inference_mode = InferenceMode.ACTION_Q_REJECTION
     policy.model_device = torch.device("cpu")
     policy.vae_device = torch.device("cpu")
     policy.dtype = torch.float32

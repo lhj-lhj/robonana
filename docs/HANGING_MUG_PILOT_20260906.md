@@ -7,7 +7,7 @@
 
 - 独立目录：`experiments/hanging_mug_mac_pilot_20260906/world_policy`。
 - GPU 6、7；每卡 batch=4、累积=2，global batch=16；seed=20260906。
-- 120k 原始 checkpoint 迁移，排除旧 heads；不用 readiness 短测权重。
+- 从当前 1,000-step `mac_mot_v2` checkpoint 启动；不再在运行时迁移 120k 权重。
 - world/policy 5,000 步，warmup=250；backbone LR=2e-5，robot LR=1e-4。
 - 使用原始成功 50 条及当前 replay（成功 5 条、失败 45 条）；当前空历史
   失败池的权重转给最新失败池，成功/失败采样合计约 50%/50%。
@@ -21,7 +21,7 @@ warmup、保留数量，继续使用当前维护的模型、数据和 FACT train
 `scripts/start_mac_world_pilot.py` 拒绝覆盖已有实验目录，依次运行：
 
 1. 保存 `pilot_config.json`、源码 SHA256 清单和 source commit。
-2. 120k 迁移后的固定窗口 `probe_initial` 基线。
+2. 1,000-step MAC 权重的固定窗口 `probe_initial` 基线。
 3. 真实两卡 world/policy 训练 5,000 步。
 4. `probe_step5000`；完成后停在 `world_complete_review_required`，不因训练
    结束就无条件启动 critic。

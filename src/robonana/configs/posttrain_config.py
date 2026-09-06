@@ -58,46 +58,23 @@ def _replay_dataset_config(
     return config
 
 def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
-    """Build one phase of fixed-48/H=1 MAC from the immutable 120k run."""
+    """Build one fixed-48/H=1 MAC phase from a trained MAC checkpoint."""
 
     config = copy.deepcopy(config)
     repo_root = Path(__file__).resolve().parents[3]
-    source_run = Path(
-        os.environ.get(
-            "ROBONANA_SOURCE_RUN",
-            repo_root
-            / "experiments"
-            / "robotwin_flux2_4b_dino_grouped_lr_A_bidir_G_causal_bs256_120k",
-        )
-    ).expanduser()
+    source_run = Path(os.environ.get(
+        "ROBONANA_MAC_SOURCE_RUN",
+        "/data3/hongjia/robonana/experiments/hanging_mug_mac_pilot_20260906/world_policy",
+    )).expanduser()
     source_checkpoint = Path(
         os.environ.get(
             "ROBONANA_MAC_PRETRAIN_CHECKPOINT",
-            source_run
-            / "models"
-            / "checkpoint_epoch_6_step_120000"
-            / "transformer"
-            / "diffusion_pytorch_model.bin",
+            source_run / "models/checkpoint_epoch_1_step_1000/transformer/diffusion_pytorch_model.bin",
         )
     ).expanduser()
     source_config = Path(
         os.environ.get("ROBONANA_MAC_PRETRAIN_CONFIG", source_run / "config.json")
     ).expanduser()
-    initialization = os.environ.get(
-        "ROBONANA_MAC_INITIALIZATION", "mac_from_legacy"
-    ).strip()
-    if initialization not in {"mac_from_legacy", "trained"}:
-        raise ValueError(
-            "ROBONANA_MAC_INITIALIZATION must be mac_from_legacy or trained"
-        )
-    if initialization == "trained" and (
-        not os.environ.get("ROBONANA_MAC_PRETRAIN_CHECKPOINT", "").strip()
-        or not os.environ.get("ROBONANA_MAC_PRETRAIN_CONFIG", "").strip()
-    ):
-        raise ValueError(
-            "trained MAC continuation requires explicit "
-            "ROBONANA_MAC_PRETRAIN_CHECKPOINT and ROBONANA_MAC_PRETRAIN_CONFIG"
-        )
     replay_root = Path(
         os.environ.get(
             "ROBONANA_REPLAY_ROOT",
@@ -184,7 +161,7 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
     )
     config["models"].update(
         architecture_version="mac_mot_v2",
-        initialization=initialization,
+        initialization="trained",
         checkpoint=str(source_checkpoint),
         checkpoint_config=str(source_config),
         action_dim=14,
@@ -272,9 +249,9 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
         config["optimizers"].update(lr=critic_lr, robot_lr=critic_lr)
     config["project_dir"] = os.environ.get(
         "ROBONANA_PROJECT_DIR",
-        str(repo_root / "experiments" / "hanging_mug_mac_from120k_h1"),
+        str(repo_root / "experiments" / "hanging_mug_mac"),
     )
     config["train"]["tracker_init_kwargs"]["wandb"].update(
-        name=os.environ.get("WANDB_NAME", "hanging-mug-mac-from120k-h1")
+        name=os.environ.get("WANDB_NAME", "hanging-mug-mac")
     )
     return config

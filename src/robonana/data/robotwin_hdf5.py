@@ -87,52 +87,6 @@ def mac_binary_chunk_targets(
     return target, valid_mask
 
 
-def mac_success_targets(
-    *,
-    frame_index: int,
-    horizon_idx: int,
-    episode_length: int,
-    discount: float = 0.999,
-    reward_non_goal: float = -1.0,
-    reward_goal: float = 0.0,
-) -> tuple[int, int, float, float]:
-    """Return ``(future_index, delta, reward_h, q_mc)`` for a successful episode.
-
-    ``reward_h`` covers only the clipped action prefix ``t:t+delta``. ``q_mc``
-    is the complete discounted return from the current frame ``t`` and is
-    therefore independent of the sampled horizon.
-    """
-
-    frame_index = int(frame_index)
-    horizon_idx = int(horizon_idx)
-    episode_length = int(episode_length)
-    discount = float(discount)
-    if episode_length <= 0:
-        raise ValueError("episode_length must be positive")
-    if not 0 <= frame_index < episode_length:
-        raise ValueError("frame_index must lie inside the episode")
-    if horizon_idx < 0:
-        raise ValueError("horizon_idx must be non-negative")
-    if not 0.0 < discount <= 1.0:
-        raise ValueError("discount must lie in (0, 1]")
-
-    final_index = episode_length - 1
-    future_index = min(frame_index + horizon_idx, final_index)
-    delta = future_index - frame_index
-    reward_h = discounted_chunk_reward(
-        delta, discount=discount, reward_non_goal=reward_non_goal
-    )
-    remaining_non_goal = final_index - frame_index
-    q_mc = sum(
-        discount**offset * float(reward_non_goal)
-        for offset in range(remaining_non_goal)
-    )
-    q_mc += discount**remaining_non_goal * float(reward_goal)
-    return future_index, delta, float(reward_h), float(q_mc)
-
-
-
-
 @dataclass(frozen=True)
 class EpisodeRecord:
     task_name: str
@@ -268,7 +222,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         discount: float = 0.999,
         reward_non_goal: float = -1.0,
         reward_goal: float = 0.0,
-        q_target_mode: str = "mc_success",
+        q_target_mode: str = "mac_mot_v2",
         episode_filter: str | None = None,
         pool_name: str = "original_success",
         round_min: int | None = None,
@@ -299,10 +253,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self.reward_non_goal = float(reward_non_goal)
         self.reward_goal = float(reward_goal)
         self.q_target_mode = str(q_target_mode)
-        self.episode_filter = str(
-            episode_filter
-            or ("success" if self.q_target_mode == "mc_success" else "all")
-        )
+        self.episode_filter = str(episode_filter or "all")
         self.pool_name = str(pool_name)
         self.round_min = None if round_min is None else int(round_min)
         self.round_max = None if round_max is None else int(round_max)
@@ -326,14 +277,9 @@ class RoboTwinHDF5Dataset(BaseDataset):
             raise ValueError("dino_image_size must be (height, width) with positive values")
         if not 0.0 < self.discount <= 1.0:
             raise ValueError("discount must lie in (0, 1]")
-        if self.q_target_mode not in {
-            "mc_success",
-            "mac_mot_v2",
-        }:
-            raise ValueError(
-                "q_target_mode must be mc_success or mac_mot_v2"
-            )
-        if self.q_target_mode == "mac_mot_v2" and (
+        if self.q_target_mode != "mac_mot_v2":
+            raise ValueError("the maintained dataset format is mac_mot_v2 only")
+        if (
             self.action_chunk != 48
             or self.max_horizon != self.action_chunk
             or self.fixed_horizon not in (0, self.action_chunk)
@@ -345,8 +291,6 @@ class RoboTwinHDF5Dataset(BaseDataset):
             raise ValueError("episode_filter must be all, success, or failure")
         if self.pool_name not in POSTTRAIN_POOL_IDS:
             raise ValueError(f"unknown posttrain pool_name: {self.pool_name}")
-        if self.q_target_mode == "mc_success" and self.episode_filter != "success":
-            raise ValueError("mc_success pretraining only accepts successful episodes")
         if self.selected_round_id is not None and (
             self.round_min is not None or self.round_max is not None
         ):
@@ -403,8 +347,6 @@ class RoboTwinHDF5Dataset(BaseDataset):
         # Our success exception is deliberate: RoboTwin stops immediately on
         # success, so dropping its tail would discard terminal supervision.
         def window_count(record):
-            if self.q_target_mode != "mac_mot_v2":
-                return record.length  # Preserve legacy h_idx sampling.
             return max(0, record.length - (1 if record.success else self.action_chunk))
 
         records = [record for record in records if window_count(record) > 0]
@@ -414,10 +356,6 @@ class RoboTwinHDF5Dataset(BaseDataset):
                 self.episode_starts = np.empty((0,), dtype=np.int64)
                 self.episode_stops = np.empty((0,), dtype=np.int64)
                 return
-            if self.q_target_mode == "mc_success":
-                raise FileNotFoundError(
-                    "q_target_mode='mc_success' requires at least one successful episode"
-                )
             raise FileNotFoundError(f"posttrain pool {self.pool_name!r} contains no episodes")
         lengths = np.asarray([window_count(record) for record in self.records], dtype=np.int64)
         self.episode_stops = np.cumsum(lengths)
@@ -545,11 +483,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         return self.records[episode_pos], int(index - self.episode_starts[episode_pos])
 
     def _sample_horizon(self) -> int:
-        if getattr(self, "q_target_mode", "legacy") == "mac_mot_v2":
-            return self.action_chunk
-        if self.fixed_horizon:
-            return self.fixed_horizon
-        return int(torch.randint(1, self.max_horizon + 1, ()).item())
+        return self.action_chunk
 
     def load_eval_future_latents(
         self,
@@ -577,39 +511,27 @@ class RoboTwinHDF5Dataset(BaseDataset):
 
     def _get_data(self, index: int) -> dict[str, Any]:
         record, frame_index = self._locate(int(index))
-        horizon_idx = self._sample_horizon()
-        future_index = min(frame_index + horizon_idx, record.length - 1)
+        chunk_horizon = self._sample_horizon()
+        future_index = min(frame_index + chunk_horizon, record.length - 1)
         transition_valid = self._episode_transition_valid(record)
         delta_steps = int(transition_valid[frame_index:future_index].sum())
-        if self.q_target_mode == "mac_mot_v2":
-            expected_delta = min(self.action_chunk, record.length - 1 - frame_index)
-            if delta_steps != expected_delta or (not record.success and delta_steps != 48):
-                raise RuntimeError(
-                    "MAC window contains missing transitions or an incomplete failure chunk: "
-                    f"{record.source}, frame={frame_index}, delta={delta_steps}"
-                )
+        expected_delta = min(self.action_chunk, record.length - 1 - frame_index)
+        if delta_steps != expected_delta or (not record.success and delta_steps != self.action_chunk):
+            raise RuntimeError(
+                "MAC window contains missing transitions or an incomplete failure chunk: "
+                f"{record.source}, frame={frame_index}, delta={delta_steps}"
+            )
         reward_h = discounted_chunk_reward(
             delta_steps,
             discount=self.discount,
             reward_non_goal=self.reward_non_goal,
         )
-        if self.q_target_mode == "mc_success":
-            _, _, _, q_clean = mac_success_targets(
-                frame_index=frame_index,
-                horizon_idx=horizon_idx,
-                episode_length=record.length,
-                discount=self.discount,
-                reward_non_goal=self.reward_non_goal,
-                reward_goal=self.reward_goal,
-            )
-        else:
-            # V2 critics are trained from fresh imaginary transitions, so the
-            # real-data loader does not fabricate a Q label.
-            q_clean = 0.0
+        # Critics are trained from fresh imaginary transitions, so real replay
+        # never fabricates a Q label.
+        q_clean = 0.0
         action_indices = np.clip(
             frame_index + np.arange(self.action_chunk, dtype=np.int64),
-            0,
-            record.length - (2 if self.q_target_mode == "mac_mot_v2" else 1),
+            0, record.length - 2,
         )
 
         # Episodes are short (~140 steps). Reading the small arrays once also
@@ -627,8 +549,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
             )
         state_raw = vector[frame_index]
         action_raw = policy_action[action_indices]
-        # The state target is one frame at t_h=min(t+idx_h, episode_end), not
-        # the last state of the fixed-length action chunk.
+        # The state target is the observation at t+48, clipped only for a
+        # successful terminal suffix that is padded with absorbing frames.
         future_state_raw = vector[future_index]
 
         assert self._stats is not None
@@ -652,7 +574,9 @@ class RoboTwinHDF5Dataset(BaseDataset):
                 f"FLUX cache length {frame_latents.shape[0]} disagrees with HDF5 length "
                 f"{record.length}: {record.source}"
         )
-        current_latent, future_latent = select_current_future_latents(frame_latents, frame_index, horizon_idx)
+        current_latent, future_latent = select_current_future_latents(
+            frame_latents, frame_index, chunk_horizon
+        )
         context = self._context(record)
         success_terminal_h = bool(record.success and future_index == record.length - 1)
         reward_chunk, reward_chunk_mask = mac_binary_chunk_targets(
@@ -682,15 +606,16 @@ class RoboTwinHDF5Dataset(BaseDataset):
                 & transition_valid[action_indices]
             ),
             "future_state": torch.from_numpy(norm_future_state.copy()),
-            # Keep the legacy scalar reward fields for h_idx training.  The
-            # maintained fixed-48 world model consumes reward_chunk instead.
+            # The maintained world model consumes the fixed-48 binary reward
+            # chunk; scalar reward_h remains a compact compatibility field for
+            # downstream logging only.
             "reward": torch.tensor([direct_reward_h], dtype=torch.float32),
             "reward_chunk": reward_chunk,
             "reward_chunk_mask": reward_chunk_mask,
             "reward_h": torch.tensor([reward_h], dtype=torch.float32),
             "success": torch.tensor([float(success_terminal_h)], dtype=torch.float32),
             "q": torch.tensor([q_clean], dtype=torch.float32),
-            "horizon_idx": torch.tensor(horizon_idx, dtype=torch.long),
+            "chunk_horizon": torch.tensor(chunk_horizon, dtype=torch.long),
             "delta": torch.tensor(delta_steps, dtype=torch.long),
             "delta_steps": torch.tensor(delta_steps, dtype=torch.long),
             "terminal_h": torch.tensor(float(success_terminal_h), dtype=torch.float32),

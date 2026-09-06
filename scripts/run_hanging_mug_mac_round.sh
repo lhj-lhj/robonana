@@ -34,25 +34,10 @@ if ! [[ ${round_id} =~ ^[0-9]+$ && ${world_policy_steps} =~ ^[1-9][0-9]*$ \
 fi
 next_round=$((round_id + 1))
 
-if [[ -n ${ROBONANA_MAC_INITIALIZATION:-} ]]; then
-  initialization=${ROBONANA_MAC_INITIALIZATION}
-elif (( round_id == 0 )); then
-  initialization=mac_from_legacy
-else
-  initialization=trained
-fi
-
-if [[ ${initialization} == mac_from_legacy ]]; then
-  source_run=${ROBONANA_SOURCE_RUN:-${repo_root}/experiments/robotwin_flux2_4b_dino_grouped_lr_A_bidir_G_causal_bs256_120k}
-  source_checkpoint=${ROBONANA_MAC_SOURCE_CHECKPOINT:-${source_run}/models/checkpoint_epoch_6_step_120000/transformer/diffusion_pytorch_model.bin}
-  source_config=${ROBONANA_MAC_SOURCE_CONFIG:-${source_run}/config.json}
-elif [[ ${initialization} == trained ]]; then
-  source_checkpoint=${ROBONANA_MAC_SOURCE_CHECKPOINT:?set the previous MAC checkpoint for round ${round_id}}
-  source_config=${ROBONANA_MAC_SOURCE_CONFIG:?set the previous MAC run config.json for round ${round_id}}
-else
-  echo "ROBONANA_MAC_INITIALIZATION must be mac_from_legacy or trained" >&2
-  exit 2
-fi
+initialization=trained
+source_run=${ROBONANA_MAC_SOURCE_RUN:-/data3/hongjia/robonana/experiments/hanging_mug_mac_pilot_20260906/world_policy}
+source_checkpoint=${ROBONANA_MAC_SOURCE_CHECKPOINT:-${source_run}/models/checkpoint_epoch_1_step_1000/transformer/diffusion_pytorch_model.bin}
+source_config=${ROBONANA_MAC_SOURCE_CONFIG:-${source_run}/config.json}
 
 for required in "${source_checkpoint}" "${source_config}" "${model_python}" \
   "${robotwin_python}" "${initial_dataset_root}/robonana_norm_stats.json"; do
@@ -106,7 +91,7 @@ if [[ ! -f ${state_dir}/world_policy.done ]]; then
       WANDB_MODE="${WANDB_MODE:-online}" \
       WANDB_NAME="${WANDB_NAME:-hanging-mug-mac-round${round_id}-world-policy}" \
       bash "${repo_root}/scripts/run_robotwin_train.sh" \
-        --config robonana.configs.robotwin_flux2_4b_mac_from120k.config
+        --config robonana.configs.robotwin_flux2_4b_mac.config
     world_checkpoint=$(find_trained_checkpoint "${world_project}" "${world_policy_steps}")
   fi
   if [[ -z ${world_checkpoint} ]]; then
@@ -147,7 +132,7 @@ if [[ ! -f ${state_dir}/critic.done ]]; then
       WANDB_MODE="${WANDB_MODE:-online}" \
       WANDB_NAME="${WANDB_NAME:-hanging-mug-mac-round${round_id}-critic}" \
       bash "${repo_root}/scripts/run_robotwin_train.sh" \
-        --config robonana.configs.robotwin_flux2_4b_mac_from120k.config
+        --config robonana.configs.robotwin_flux2_4b_mac.config
     trained_checkpoint=$(find_trained_checkpoint "${critic_project}" "${critic_steps}")
   fi
   if [[ -z ${trained_checkpoint} ]]; then

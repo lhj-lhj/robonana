@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build mac_mot_v2 from a legacy checkpoint and audit its parameter surface."""
+"""Audit a complete mac_mot_v2 checkpoint and its critic surface."""
 
 from __future__ import annotations
 
@@ -8,25 +8,21 @@ import json
 
 import torch
 
-from robonana.models.pretrained import (
-    configure_trainable_parameters,
-    load_mac_from_legacy_checkpoint,
-)
+from robonana.models.pretrained import configure_trainable_parameters, load_flux2_fact_trained_checkpoint
 from robonana.models.position_ids import image_position_ids, text_position_ids
 from robonana.training.posttraining import ValueExpertEMA
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--model-config", required=True)
+    parser.add_argument("--checkpoint", required=True, help="complete mac_mot_v2 checkpoint")
+    parser.add_argument("--model-config", required=True, help="saved MAC config.json")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--expert-hidden-dim", type=int, default=1024)
     parser.add_argument("--smoke-forward", action="store_true")
     args = parser.parse_args()
-    model, report = load_mac_from_legacy_checkpoint(
+    model, report = load_flux2_fact_trained_checkpoint(
         args.checkpoint,
-        config_path=args.model_config,
         action_dim=14,
         state_dim=14,
         reward_dim=48,
@@ -53,7 +49,7 @@ def main() -> None:
         "chunk_horizon": model.chunk_horizon,
         "expert_hidden_dim": model.expert_hidden_dim,
         "loaded_parameter_tensors": len(report.loaded_parameter_names),
-        "skipped_legacy_tensors": len(report.skipped_checkpoint_parameters),
+        "skipped_checkpoint_tensors": len(report.skipped_checkpoint_parameters),
         "critic_trainable_tensors": len(trainable),
         "value_expert_parameters": sum(p.numel() for p in model.value_expert.parameters()),
         "q_expert_parameters": sum(p.numel() for p in model.q_expert.parameters()),

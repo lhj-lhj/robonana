@@ -83,8 +83,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
         if self.expert_hidden_dim <= 0:
             raise ValueError("expert_hidden_dim must be positive")
 
-        # Remove every variable-horizon/flow-Q module.  Only the action/state
-        # projections survive the 120k migration; all heads below are new.
+        # Remove variable-horizon/flow-Q modules; MAC scalar heads below are new.
         del self.q_in
         del self.horizon_embed
         del self.segment_embed
@@ -151,7 +150,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
         state: Tensor,
         noisy_pred_action: Tensor,
         gt_action_cond: Tensor,
-        horizon_idx: Tensor,
+        chunk_horizon: Tensor,
         noisy_future_state: Tensor,
         noisy_reward: Tensor,
         noisy_q: Tensor,
@@ -212,12 +211,12 @@ class MacFlux2FACTModel(Flux2FACTModel):
                 )
             raise ValueError("critic_kind must be both, value, q, or None")
         batch = context.shape[0]
-        horizon_idx = horizon_idx.reshape(-1)
-        if tuple(horizon_idx.shape) != (batch,) or not bool(
-            torch.all(horizon_idx == self.chunk_horizon)
+        chunk_horizon = chunk_horizon.reshape(-1)
+        if tuple(chunk_horizon.shape) != (batch,) or not bool(
+            torch.all(chunk_horizon == self.chunk_horizon)
         ):
-            raise ValueError("mac_mot_v2 actor/world forward requires horizon_idx=48")
-        del horizon_idx, noisy_reward, noisy_q
+            raise ValueError("mac_mot_v2 actor/world forward requires chunk_horizon=48")
+        del chunk_horizon, noisy_reward, noisy_q
         if noisy_future_dino is not None or dino_ids is not None:
             raise ValueError("mac_mot_v2 does not accept DINO future tokens")
         if context_ids.shape != (*context.shape[:2], 4):

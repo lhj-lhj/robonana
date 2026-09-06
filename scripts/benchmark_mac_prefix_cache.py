@@ -16,7 +16,7 @@ import time
 import torch
 
 from robonana.models.position_ids import image_position_ids, text_position_ids
-from robonana.models.pretrained import load_mac_from_legacy_checkpoint
+from robonana.models.pretrained import load_flux2_fact_trained_checkpoint
 from robonana.sampling import (
     QRejectionSample, flow_euler_schedule, sample_action_flow, sample_q_rejection,
 )
@@ -44,7 +44,7 @@ def full_rejection(model, inputs, noise, schedule):
             **common, noisy_pred_action=action, gt_action_cond=empty_action,
             noisy_future_latents=empty_image, future_ids=torch.empty(flat_batch, 0, 4, device=device, dtype=torch.long),
             noisy_future_state=empty_state, noisy_reward=empty_scalar, noisy_q=empty_scalar,
-            horizon_idx=torch.full((flat_batch,), 48, device=device),
+            chunk_horizon=torch.full((flat_batch,), 48, device=device),
             action_timestep=sigma.expand(flat_batch), wm_timestep=zeros,
         ).action
 
@@ -90,7 +90,7 @@ def main():
     parser.add_argument("--repeats", type=int, default=2)
     args = parser.parse_args()
     torch.manual_seed(42)
-    model, _ = load_mac_from_legacy_checkpoint(
+    model, _ = load_flux2_fact_trained_checkpoint(
         args.checkpoint, config_path=args.model_config, action_dim=14, state_dim=14,
         expert_hidden_dim=1024, device="cuda:0", dtype=torch.bfloat16,
     )

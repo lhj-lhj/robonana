@@ -42,12 +42,12 @@ def main() -> int:
     parser.add_argument("--text-encoder-device", default="cpu")
     parser.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
     parser.add_argument("--action-chunk", type=int, default=48)
-    parser.add_argument("--horizon", type=int, default=24)
+    parser.add_argument("--horizon", type=int, default=48)
     parser.add_argument("--num-inference-steps", type=int, default=20)
     parser.add_argument(
         "--inference-mode",
-        choices=(InferenceMode.ACTION.value, InferenceMode.ACTION_Q_REJECTION.value),
-        default=InferenceMode.ACTION.value,
+        choices=(InferenceMode.ACTION_Q_REJECTION.value,),
+        default=InferenceMode.ACTION_Q_REJECTION.value,
     )
     parser.add_argument("--rejection-candidate-count", type=int, default=32)
     parser.add_argument("--q-return-scale", type=float, default=1000.0)
