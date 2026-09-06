@@ -61,6 +61,7 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
     """Build one fixed-48/H=1 MAC phase from a trained MAC checkpoint."""
 
     config = copy.deepcopy(config)
+    config.setdefault("optimizers", {})
     repo_root = Path(__file__).resolve().parents[3]
     source_run = Path(os.environ.get(
         "ROBONANA_MAC_SOURCE_RUN",

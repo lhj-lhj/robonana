@@ -141,9 +141,10 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
         )
         if getattr(self, "inference_mode", InferenceMode.ACTION_Q_REJECTION) is InferenceMode.ACTION_Q_REJECTION:
             noise_rows = []
+            candidate_count = int(getattr(self, "rejection_candidate_count", 32))
             for batch_index, seed in enumerate(sampling_seeds):
                 candidates = []
-                for candidate_index in range(self.rejection_candidate_count):
+                for candidate_index in range(candidate_count):
                     candidate_seed = (
                         None
                         if seed is None
@@ -162,7 +163,7 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
                 current_latents=current,
                 state=state,
                 context_mask=context_mask,
-                candidate_count=self.rejection_candidate_count,
+                candidate_count=candidate_count,
                 action_noise=torch.stack(noise_rows, dim=0),
                 schedule=self.schedule,
                 grid_height=self.grid_height,
