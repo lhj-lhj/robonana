@@ -45,8 +45,8 @@ def test_hanging_mug_round_serializes_world_then_critic_then_collection() -> Non
 
     assert "ROBONANA_MAC_PHASE=world_policy" in script
     assert "ROBONANA_MAC_PHASE=critic" in script
-    assert "target_value_expert.safetensors" in script
-    assert 'ROBONANA_MAC_TARGET_VALUE_CHECKPOINT="${target_value_checkpoint}"' in script
+    assert "ROBONANA_MAC_TARGET_VALUE_CHECKPOINT" not in script
+    assert "ROBONANA_MAC_TARGET_VALUE_STATE" not in script
     assert script.index('touch "${state_dir}/world_policy.done"') < script.index(
         'touch "${state_dir}/critic.done"'
     )

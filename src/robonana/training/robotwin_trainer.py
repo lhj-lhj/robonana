@@ -36,9 +36,11 @@ from robonana.sampling import (
     generate_mac_imaginary_rollout_h1,
     sample_world_flow,
 )
+from robonana.training.checkpointing import full_deepspeed_checkpoint
 from robonana.training.losses import (
     deterministic_return_loss,
     joint_flow_loss,
+    masked_action_mse,
     masked_bce_with_logits,
     masked_elementwise_bce_with_logits,
     masked_mse,
@@ -133,7 +135,6 @@ class RoboNanaTrainer(Trainer):
             raise ValueError("num_inference_steps must be positive")
         self._pending_pixel_eval: dict[str, Tensor] | None = None
         self._optimizer_step_succeeded = False
-        self._accumulation_invalid = False
         self.vae_checkpoint_dir: str | None = None
         self.vae_dtype = torch.float32
         self.dino_dim: int | None = None
@@ -209,25 +210,15 @@ class RoboNanaTrainer(Trainer):
             start_step=int(ema["start_step"]),
             device=self.device,
         )
-        initial_checkpoint = str(ema.get("initial_checkpoint", "")).strip()
-        initial_state = str(ema.get("initial_state", "")).strip()
-        if initial_checkpoint:
-            target_path = Path(initial_checkpoint).expanduser()
-            if not target_path.is_file():
-                raise FileNotFoundError(
-                    f"target Value initialization checkpoint not found: {target_path}"
-                )
-            self.target_value_ema.load_state_dict(
-                load_file(str(target_path), device="cpu")
-            )
-            if initial_state:
-                state_path = Path(initial_state).expanduser()
-                if not state_path.is_file():
-                    raise FileNotFoundError(
-                        f"target Value initialization state not found: {state_path}"
-                    )
-                state = json.loads(state_path.read_text(encoding="utf-8"))
-                self.target_value_ema.update_count = int(state.get("update_count", 0))
+        # A fresh critic phase loads the current round's phase-1 checkpoint,
+        # which already carries the preceding round's trained *online* Value.
+        # Phase 1 changes FLUX while freezing that expert, so start a new
+        # Polyak trajectory from an exact online copy instead of carrying the
+        # preceding round's lagging target across the representation change.
+        # If this critic phase itself is resumed, ``load_model_hook`` below
+        # replaces this copy with the target saved by the same critic run.
+        self.target_value_ema.exact_copy_from(self.models[0].value_expert)
+        self.target_value_ema.update_count = 0
 
     def prepare(self, dataloaders: Any, models: Any, optimizers: Any, schedulers: Any) -> None:
         super().prepare(dataloaders, models, optimizers, schedulers)
@@ -532,24 +523,25 @@ class RoboNanaTrainer(Trainer):
         if self.target_value_ema is not None:
             target_path = Path(input_dir) / "target_value_expert.safetensors"
             state_path = Path(input_dir) / "value_ema_state.json"
-            if target_path.is_file():
-                self.target_value_ema.load_state_dict(
-                    load_file(str(target_path), device="cpu")
+            missing = [
+                str(path)
+                for path in (target_path, state_path)
+                if not path.is_file()
+            ]
+            if missing:
+                raise FileNotFoundError(
+                    "critic resume checkpoint is incomplete; missing Value EMA files: "
+                    + ", ".join(missing)
                 )
-                if state_path.is_file():
-                    state = json.loads(state_path.read_text(encoding="utf-8"))
-                    self.target_value_ema.update_count = int(state.get("update_count", 0))
-                    self.current_collection_round = int(
-                        state.get("current_collection_round", self.current_collection_round)
-                    )
-                source = str(target_path)
-            else:
-                online = self.accelerator.unwrap_model(
-                    self.model, keep_torch_compile=False
-                )
-                self.target_value_ema.exact_copy_from(online.value_expert)
-                self.target_value_ema.update_count = 0
-                source = "exact-copy online Value (new critic phase)"
+            self.target_value_ema.load_state_dict(
+                load_file(str(target_path), device="cpu")
+            )
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.target_value_ema.update_count = int(state["update_count"])
+            self.current_collection_round = int(
+                state.get("current_collection_round", self.current_collection_round)
+            )
+            source = str(target_path)
             for optimizer in self.optimizers:
                 self.target_value_ema.assert_not_in_optimizer(optimizer)
             if self.is_main_process:
@@ -571,46 +563,40 @@ class RoboNanaTrainer(Trainer):
         if bool(self.kwargs.get("disable_checkpointing", False)):
             return
         early_steps = {int(step) for step in self.kwargs.get("early_checkpoint_steps", ())}
-        if self.cur_step in early_steps and self.cur_step % int(self.checkpoint_interval):
-            checkpoint_interval = self.checkpoint_interval
+        checkpoint_interval = self.checkpoint_interval
+        with full_deepspeed_checkpoint(getattr(self, "accelerator", None)):
             try:
-                self.checkpoint_interval = 1
+                if self.cur_step in early_steps and self.cur_step % int(checkpoint_interval):
+                    self.checkpoint_interval = 1
                 super().save_checkpoint_step()
             finally:
                 self.checkpoint_interval = checkpoint_interval
-            return
-        super().save_checkpoint_step()
 
     def backward_step(self, loss: Tensor) -> None:
-        finite_flag = torch.isfinite(loss.detach()).all().to(
+        bad_flag = (~torch.isfinite(loss.detach()).all()).to(
             device=loss.device, dtype=torch.int32
         )
         if int(getattr(self.accelerator, "num_processes", 1)) > 1:
-            finite_flag = self.accelerator.reduce(finite_flag, reduction="min")
-        loss_is_finite = bool(finite_flag.item())
-        if not loss_is_finite:
-            self._accumulation_invalid = True
-        if bool(getattr(self, "_accumulation_invalid", False)):
+            # Accelerate supports SUM, not MIN. [finite, nonfinite] must abort
+            # both ranks, including when the bad value appears mid-accumulation.
+            bad_flag = self.accelerator.reduce(bad_flag, reduction="sum")
+        if bool(bad_flag.item()):
             self._optimizer_step_succeeded = False
-            # One bad accumulation micro-step invalidates the whole optimizer
-            # step on every rank.  Clear partial gradients at the synchronization
-            # boundary and deliberately do not advance the scheduler or EMA.
-            if self.accelerator.sync_gradients:
-                for optimizer in self.optimizers:
-                    optimizer.zero_grad()
-                self._accumulation_invalid = False
-            if self.is_main_process:
-                self.logger.info(
-                    "loss is non-finite, cancel accumulated backward/optimizer/scheduler/EMA"
-                )
-            return
+            # Do not continue with an unfinished DDP reducer or a partially
+            # accumulated ZeRO optimizer. All ranks fail before backward/step;
+            # recover from the last complete checkpoint, never catch-and-retry
+            # this batch inside the same training loop.
+            raise FloatingPointError(
+                "Non-finite loss on at least one rank; aborting all ranks before "
+                "backward/optimizer/scheduler/Value-EMA. Resume from a complete checkpoint."
+            )
         super().backward_step(loss)
         optimizer_skipped = any(
             bool(getattr(optimizer, "step_was_skipped", False))
             for optimizer in self.optimizers
         )
         self._optimizer_step_succeeded = (
-            loss_is_finite and self.accelerator.sync_gradients and not optimizer_skipped
+            self.accelerator.sync_gradients and not optimizer_skipped
         )
         if self.target_value_ema is not None:
             online = self.accelerator.unwrap_model(
@@ -1006,7 +992,10 @@ class RoboNanaTrainer(Trainer):
             "image_loss": masked_mse(output.image, image_target),
             # Dataset sets this mask to success.  Failure trajectories train
             # every world target below but cannot pull the BC policy backward.
-            "action_loss": masked_mse(output.action, action_target, action_mask),
+            "action_loss": masked_action_mse(
+                output.action, action_target,
+                batch_dict["action_valid_mask"].to(device=self.device), action_mask,
+            ),
             "future_state_loss": masked_mse(output.future_state, state_target),
             "reward_loss": masked_elementwise_bce_with_logits(
                 output.reward,

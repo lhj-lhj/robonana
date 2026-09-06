@@ -222,14 +222,6 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
             storage_dtype="float32",
             forward_autocast_dtype="bfloat16",
             target="value_expert_only",
-            # Later rounds pass the preceding critic's target explicitly so
-            # the Polyak trajectory survives the intervening world phase.
-            initial_checkpoint=os.environ.get(
-                "ROBONANA_MAC_TARGET_VALUE_CHECKPOINT", ""
-            ).strip(),
-            initial_state=os.environ.get(
-                "ROBONANA_MAC_TARGET_VALUE_STATE", ""
-            ).strip(),
         ),
         imagination=dict(
             rollout_chunks=1,

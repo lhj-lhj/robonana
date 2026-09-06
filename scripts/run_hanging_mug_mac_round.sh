@@ -54,20 +54,6 @@ else
   exit 2
 fi
 
-# A v2 critic checkpoint stores the Value-only target beside transformer/.
-# Carry it across the next round's frozen-expert world phase. The first legacy
-# migration has no target file and intentionally starts from an exact online-V
-# copy when its critic phase begins.
-source_checkpoint_root=$(dirname "$(dirname "${source_checkpoint}")")
-target_value_checkpoint=${ROBONANA_MAC_TARGET_VALUE_CHECKPOINT:-}
-target_value_state=${ROBONANA_MAC_TARGET_VALUE_STATE:-}
-if [[ -z ${target_value_checkpoint} && -f ${source_checkpoint_root}/target_value_expert.safetensors ]]; then
-  target_value_checkpoint=${source_checkpoint_root}/target_value_expert.safetensors
-fi
-if [[ -z ${target_value_state} && -f ${source_checkpoint_root}/value_ema_state.json ]]; then
-  target_value_state=${source_checkpoint_root}/value_ema_state.json
-fi
-
 for required in "${source_checkpoint}" "${source_config}" "${model_python}" \
   "${robotwin_python}" "${initial_dataset_root}/robonana_norm_stats.json"; do
   if [[ ! -f ${required} ]]; then
@@ -155,8 +141,6 @@ if [[ ! -f ${state_dir}/critic.done ]]; then
       ROBONANA_MAC_INITIALIZATION=trained \
       ROBONANA_MAC_PRETRAIN_CHECKPOINT="${world_checkpoint}" \
       ROBONANA_MAC_PRETRAIN_CONFIG="${world_config}" \
-      ROBONANA_MAC_TARGET_VALUE_CHECKPOINT="${target_value_checkpoint}" \
-      ROBONANA_MAC_TARGET_VALUE_STATE="${target_value_state}" \
       ROBONANA_RESUME="${ROBONANA_RESUME:-1}" \
       ROBONANA_CHECKPOINT_INTERVAL="${ROBONANA_CHECKPOINT_INTERVAL:-100}" \
       ROBONANA_EARLY_CHECKPOINT_STEPS="${ROBONANA_EARLY_CHECKPOINT_STEPS:-10}" \

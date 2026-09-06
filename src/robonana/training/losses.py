@@ -17,6 +17,19 @@ def masked_mse(prediction: Tensor, target: Tensor, sample_mask: Tensor | None = 
     return (per_sample * mask).sum() / mask.sum().clamp_min(1e-8)
 
 
+def masked_action_mse(
+    prediction: Tensor, target: Tensor, step_mask: Tensor, success_mask: Tensor
+) -> Tensor:
+    """Success-only BC on real actions, excluding absorbing padding steps."""
+    per_step = (prediction.float() - target.float()).square().mean(dim=-1)
+    if per_step.shape != step_mask.shape:
+        raise ValueError("action_valid_mask must match [batch, action_horizon]")
+    valid = step_mask.to(per_step)
+    per_sample = (per_step * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+    success = success_mask.to(per_sample).reshape(-1)
+    return (per_sample * success).sum() / success.sum().clamp_min(1)
+
+
 def masked_bce_with_logits(
     logits: Tensor,
     target: Tensor,

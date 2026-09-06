@@ -43,7 +43,8 @@ def test_mac_posttrain_is_fixed_h1_and_uses_120k_migration(monkeypatch, tmp_path
     assert posttrain["environment_policy"]["candidate_count"] == 32
     assert posttrain["ema"]["decay"] == 0.995
     assert posttrain["ema"]["target"] == "value_expert_only"
-    assert posttrain["ema"]["initial_checkpoint"] == ""
+    assert "initial_checkpoint" not in posttrain["ema"]
+    assert "initial_state" not in posttrain["ema"]
     pools = config["dataloaders"]["train"]["data_or_config"]
     assert all(pool["fixed_horizon"] == 48 for pool in pools)
     assert all(pool["q_target_mode"] == "mac_mot_v2" for pool in pools)
@@ -53,12 +54,6 @@ def test_mac_critic_phase_freezes_flux_surface_in_config(monkeypatch, tmp_path):
     monkeypatch.setenv("ROBONANA_REPLAY_ROOT", str(tmp_path / "replay"))
     monkeypatch.setenv("ROBONANA_SOURCE_RUN", str(tmp_path / "run120k"))
     monkeypatch.setenv("ROBONANA_MAC_PHASE", "critic")
-    monkeypatch.setenv(
-        "ROBONANA_MAC_TARGET_VALUE_CHECKPOINT", str(tmp_path / "target.safetensors")
-    )
-    monkeypatch.setenv(
-        "ROBONANA_MAC_TARGET_VALUE_STATE", str(tmp_path / "target-state.json")
-    )
     base = {
         "project_dir": str(tmp_path / "base"),
         "dataloaders": {"train": {"data_or_config": {
@@ -73,9 +68,8 @@ def test_mac_critic_phase_freezes_flux_surface_in_config(monkeypatch, tmp_path):
     assert config["models"]["train_mode"] == "critic"
     assert config["train"]["posttrain"]["phase"] == "critic"
     assert config["optimizers"]["lr"] == config["optimizers"]["robot_lr"]
-    assert config["train"]["posttrain"]["ema"]["initial_checkpoint"] == str(
-        tmp_path / "target.safetensors"
-    )
+    assert "initial_checkpoint" not in config["train"]["posttrain"]["ema"]
+    assert "initial_state" not in config["train"]["posttrain"]["ema"]
 
 
 def test_mac_posttrain_can_continue_from_an_exact_mac_checkpoint(

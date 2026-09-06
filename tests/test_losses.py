@@ -3,12 +3,22 @@ from types import SimpleNamespace
 import torch
 
 from robonana.training.losses import (
+    masked_action_mse,
     deterministic_return_loss,
     joint_flow_loss,
     masked_bce_with_logits,
     masked_elementwise_bce_with_logits,
     masked_mse,
 )
+
+
+def test_absorbing_padding_and_failed_actions_have_zero_bc_gradient():
+    prediction = torch.tensor([[[1.0], [100.0]], [[100.0], [100.0]]], requires_grad=True)
+    loss = masked_action_mse(prediction, torch.zeros_like(prediction),
+                             torch.tensor([[1, 0], [1, 1]]), torch.tensor([1, 0]))
+    assert loss.item() == 1
+    loss.backward()
+    torch.testing.assert_close(prediction.grad, torch.tensor([[[2.0], [0.0]], [[0.0], [0.0]]]))
 
 
 def test_failure_mask_removes_action_sample():

@@ -394,6 +394,20 @@ class RoboTwinHDF5Dataset(BaseDataset):
                 "posttraining replay requires reset-pre final observations; recollect these episodes: "
                 + ", ".join(str(path) for path in missing_final[:5])
             )
+        # MAC samples action-start indices, not every observation row. With T
+        # real actions there are T+1 observations; the last row has no outgoing
+        # transition. Success starts are 0..T-1 (up to 47 absorbing pad steps),
+        # while failure starts are 0..T-48 inclusive (no padding at all).
+        # MAC's upstream samplers also precompute complete-chunk starts:
+        # https://github.com/kwanyoungpark/MAC/blob/main/utils/datasets.py#L618-L628
+        # Our success exception is deliberate: RoboTwin stops immediately on
+        # success, so dropping its tail would discard terminal supervision.
+        def window_count(record):
+            if self.q_target_mode != "mac_mot_v2":
+                return record.length  # Preserve legacy h_idx sampling.
+            return max(0, record.length - (1 if record.success else self.action_chunk))
+
+        records = [record for record in records if window_count(record) > 0]
         self.records = records
         if not self.records:
             if self.allow_empty:
@@ -405,7 +419,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
                     "q_target_mode='mc_success' requires at least one successful episode"
                 )
             raise FileNotFoundError(f"posttrain pool {self.pool_name!r} contains no episodes")
-        lengths = np.asarray([record.length for record in self.records], dtype=np.int64)
+        lengths = np.asarray([window_count(record) for record in self.records], dtype=np.int64)
         self.episode_stops = np.cumsum(lengths)
         self.episode_starts = self.episode_stops - lengths
 
@@ -567,6 +581,13 @@ class RoboTwinHDF5Dataset(BaseDataset):
         future_index = min(frame_index + horizon_idx, record.length - 1)
         transition_valid = self._episode_transition_valid(record)
         delta_steps = int(transition_valid[frame_index:future_index].sum())
+        if self.q_target_mode == "mac_mot_v2":
+            expected_delta = min(self.action_chunk, record.length - 1 - frame_index)
+            if delta_steps != expected_delta or (not record.success and delta_steps != 48):
+                raise RuntimeError(
+                    "MAC window contains missing transitions or an incomplete failure chunk: "
+                    f"{record.source}, frame={frame_index}, delta={delta_steps}"
+                )
         reward_h = discounted_chunk_reward(
             delta_steps,
             discount=self.discount,
@@ -588,7 +609,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         action_indices = np.clip(
             frame_index + np.arange(self.action_chunk, dtype=np.int64),
             0,
-            record.length - 1,
+            record.length - (2 if self.q_target_mode == "mac_mot_v2" else 1),
         )
 
         # Episodes are short (~140 steps). Reading the small arrays once also
@@ -654,6 +675,12 @@ class RoboTwinHDF5Dataset(BaseDataset):
             "state": torch.from_numpy(norm_state.copy()),
             "action": torch.from_numpy(norm_action.copy()),
             "behavior_action": torch.from_numpy(norm_action.copy()),
+            # Padding is only a conditioning placeholder after successful
+            # termination; it must not become fabricated action BC targets.
+            "action_valid_mask": torch.from_numpy(
+                (frame_index + np.arange(self.action_chunk) < record.length - 1)
+                & transition_valid[action_indices]
+            ),
             "future_state": torch.from_numpy(norm_future_state.copy()),
             # Keep the legacy scalar reward fields for h_idx training.  The
             # maintained fixed-48 world model consumes reward_chunk instead.

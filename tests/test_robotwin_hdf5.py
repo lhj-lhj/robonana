@@ -246,13 +246,14 @@ def _posttrain_pool(
     round_id=0,
     allow_empty=False,
     q_target_mode="mac_mot_v2",
+    observation_count=65,
 ):
     root = tmp_path / pool_name
     task_dir = root / f"task_{pool_name}" / "robonana_rollout"
     (task_dir / "data").mkdir(parents=True)
     (task_dir / "flux_cache/latents").mkdir(parents=True)
     (task_dir / "flux_cache/language").mkdir(parents=True)
-    states = np.arange(4 * 14, dtype=np.float32).reshape(4, 14)
+    states = np.arange(observation_count * 14, dtype=np.float32).reshape(observation_count, 14)
     with h5py.File(task_dir / "data/episode0.hdf5", "w") as handle:
         handle.attrs.update(
             success=success,
@@ -264,8 +265,8 @@ def _posttrain_pool(
         )
         handle.create_dataset("joint_action/vector", data=states)
         handle.create_dataset("policy_action/vector", data=states + 0.5)
-        handle.create_dataset("transition_valid", data=np.asarray([1, 1, 1, 0], dtype=bool))
-    torch.save(torch.zeros(4, 2, 4), task_dir / "flux_cache/latents/episode_000000.pt")
+        handle.create_dataset("transition_valid", data=np.arange(observation_count) < observation_count - 1)
+    torch.save(torch.arange(observation_count * 8).reshape(observation_count, 2, 4).float(), task_dir / "flux_cache/latents/episode_000000.pt")
     torch.save(torch.zeros(2, 3), task_dir / "flux_cache/language/episode_000000.pt")
     stats_path = root / "norm_stats.json"
     stats_path.write_text(json.dumps(_stats()), encoding="utf-8")
@@ -285,14 +286,15 @@ def _posttrain_pool(
 
 
 
-def test_failure_timeout_uses_real_final_observation_and_zero_length_is_masked(tmp_path):
+def test_failure_last_complete_chunk_ends_at_real_final_observation(tmp_path):
     dataset = _posttrain_pool(
         tmp_path, "latest_failure", success=False, round_id=2
     )
-    penultimate = dataset[2]
-    final = dataset[3]
-    assert penultimate["future_index"].item() == 3
-    assert penultimate["delta_steps"].item() == 1
+    assert len(dataset) == 17  # 64 actions - 48 + 1 legal starts.
+    penultimate = dataset[16]
+    assert penultimate["frame_index"].item() == 16
+    assert penultimate["future_index"].item() == 64
+    assert penultimate["delta_steps"].item() == 48
     assert penultimate["success_terminal_h"].item() == 0
     assert penultimate["reward"].item() == -1
     assert penultimate["success"].item() == 0
@@ -300,11 +302,45 @@ def test_failure_timeout_uses_real_final_observation_and_zero_length_is_masked(t
     assert penultimate["q_loss_mask"].item() == 1
     assert penultimate["round_id"].item() == 2
     assert penultimate["policy_version"] == "theta-k"
-    assert final["delta_steps"].item() == 0
-    assert final["q_loss_mask"].item() == 0
-    assert final["reward_h"].item() == 0
-    assert final["reward"].item() == -1
+    assert penultimate["action_valid_mask"].all()
+    assert penultimate["reward_chunk_mask"].all()
+    torch.testing.assert_close(penultimate["future_latents"], torch.arange(512, 520).reshape(2, 4).float())
+    with pytest.raises(IndexError):
+        dataset._get_data(17)
     assert discounted_chunk_reward(3) == pytest.approx(-2.997001)
+
+
+def test_success_tail_uses_absorbing_observation_but_only_real_actions_for_bc(tmp_path):
+    dataset = _posttrain_pool(tmp_path, "original_success", success=True)
+    assert len(dataset) == 64
+    last = dataset[63]
+    assert last["delta_steps"].item() == 1
+    assert last["success"].item() == 1
+    assert last["future_index"].item() == 64
+    assert last["action_valid_mask"].sum().item() == 1
+    assert last["reward_chunk"].tolist() == [0] + [1] * 47
+    assert last["reward_chunk_mask"].all()
+    torch.testing.assert_close(last["action"], last["action"][:1].expand(48, -1))
+    torch.testing.assert_close(last["future_state"], torch.arange(896, 910).float())
+    with pytest.raises(IndexError):
+        dataset._get_data(64)  # Never use the no-action terminal row as a start.
+
+
+@pytest.mark.parametrize("observations,expected", [(48, 0), (49, 1), (50, 2)])
+def test_failure_chunk_boundary_counts(tmp_path, observations, expected):
+    dataset = _posttrain_pool(tmp_path, "latest_failure", success=False,
+                              observation_count=observations, allow_empty=True)
+    assert len(dataset) == expected
+    if expected:
+        assert dataset[expected - 1]["future_index"].item() == observations - 1
+
+
+def test_failure_sampler_never_draws_incomplete_tail(tmp_path):
+    dataset = _posttrain_pool(tmp_path, "latest_failure", success=False)
+    sampler = RoboTwinEpisodeSampler(dataset, infinite=False, sample_epoch_size=200)
+    samples = [dataset[index] for index in sampler]
+    assert all(s["delta_steps"].item() == 48 for s in samples)
+    assert all(s["frame_index"].item() <= 16 for s in samples)
 
 
 def test_failure_without_reset_pre_final_observation_is_rejected(tmp_path):
