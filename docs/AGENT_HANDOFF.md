@@ -1,6 +1,6 @@
 # RoboNana agent handoff
 
-Last updated: 2026-09-05 (Asia/Shanghai).
+Last updated: 2026-09-06 (Asia/Shanghai).
 
 Read this file before operating the repository. The current maintained RL
 architecture is `mac_mot_v2`; do not reconstruct an older RL path from an old
@@ -52,6 +52,12 @@ query:
 - Q has no target/EMA copy.
 - Only the Value expert has an FP32 target/EMA copy.
 - The actor/world FLUX is completely frozen during critic optimization.
+- C reads only C; each candidate action reads C and its own complete chunk.
+  Rejection prefills C once, shares it across action Euler steps and Q-only
+  scoring, and processes candidates in groups of eight by default. Set
+  `ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE` to change the group size. Caches are
+  request-local. Old Q weights remain loadable but need training/evaluation
+  under this corrected mask before trusting their scores.
 
 The expert block and initialization structure is adapted from ImageWAM at
 pinned commit `5d4a341ed20a95cdb08f0293f3d44778b9a9e05a`; exact source links
@@ -73,6 +79,11 @@ Train the single FLUX actor/world model on real replay:
 
 No full-model EMA is created.
 
+For T real actions and T+1 observations, success windows start at 0..T-1
+(at most 47 absorbing pad steps, excluded from action BC); failure windows
+start only at 0..T-48. Failure tails never pad or substitute an earlier future
+observation for t+48. MAC does not sample the no-action final observation.
+
 ### Phase 2: `critic`
 
 Load the exact phase-1 checkpoint, freeze FLUX and all actor/world adapters,
@@ -88,6 +99,12 @@ Q_target = R_chunk + gamma^48 * nonterminal * online_V(next)
 After a finite, non-skipped optimizer step, update only target Value. The
 checkpoint stores `target_value_expert.safetensors` and
 `value_ema_state.json`.
+
+Both phases save complete DeepSpeed module payloads including frozen weights
+for strict resume. Old frozen-excluding ZeRO checkpoints are not automatically
+repaired. On a nonfinite loss, SUM bad flags across ranks and abort all ranks
+before that microstep's backward/optimizer/scheduler/EMA; never continue the
+partially accumulated reducer. Restart from a complete checkpoint.
 
 ### Environment feedback loop
 
@@ -119,11 +136,14 @@ models/checkpoint_epoch_6_step_120000/transformer/diffusion_pytorch_model.bin
 
 Use the `config.json` in the same experiment directory. Migration keeps
 compatible FLUX/image/action/state tensors, skips all old project heads, and
-initializes the two new slim experts from FLUX using the ImageWAM resize policy.
+initializes the two new slim expert bodies from FLUX using the ImageWAM resize
+policy. Both learned queries and complete scalar heads, including head AdaLN,
+retain fresh initialization; no FLUX final-layer weight is copied into them.
 Later rounds must exact-load the prior `mac_mot_v2` checkpoint and saved
-configuration. The round launcher also forwards the prior critic's
-`target_value_expert.safetensors` and `value_ema_state.json`; do not drop these
-when continuing the Value target across rounds.
+configuration, which preserves the trained online Value and Q experts. A new
+critic phase initializes target Value as an exact copy of the current online
+Value. The separate `target_value_expert.safetensors` and
+`value_ema_state.json` are restored only when resuming that same critic run.
 
 `legacy_v1` remains only for first-stage variable-`idx_h` pretraining and
 strict legacy checkpoint/inference compatibility. Do not mix its token
@@ -145,6 +165,12 @@ semantics or scalar-flow heads into v2.
 | real-checkpoint architecture smoke | `scripts/validate_mac_mot_v2_checkpoint.py` |
 
 ## Verification evidence
+
+The three P1 training-safety fixes passed `182 passed, 1 skipped` on 190 on
+2026-09-06, plus explicit two-GPU ZeRO-2 NaN/Inf and exact resume checks.
+See [the follow-up report](MAC_TRAINING_SAFETY_VALIDATION_20260906.md) for the
+real 4B checkpoint logs, limitations and reproducible commands. These tests
+do not establish world-model/critic quality or end-to-end environment success.
 
 On 2026-09-05, the temporary 190 validation checkout passed:
 
