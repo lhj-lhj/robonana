@@ -39,6 +39,32 @@ and no EMA FLUX. The FP32 EMA Value forward also completed.
 
 ## B200 performance measurement
 
+### Current precision policy (2026-09-06 follow-up)
+
+Every FLUX model constructor now sets
+`torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False`.
+BF16 model storage/autocast remain enabled; only reduced-precision GEMM
+intermediate reductions are disabled. Both legacy and MAC loaders inherit
+this constructor, covering training ranks and independent inference servers.
+
+With that production setting, the real 120k/B200 synthetic benchmark was
+repeated (GPU 5, B=1, 512 language / 288 image tokens, 10 Euler steps,
+group=8, one warmup, two repetitions):
+
+| M | Full seconds | Cached seconds | Cached peak GiB | Max action difference | Max Q difference |
+|---|---:|---:|---:|---:|---:|
+| 1 | 0.244 | 0.181 | 10.39 | 0 | 0 |
+| 8 | 1.076 | 0.263 | 11.04 | 0 | 0 |
+| 32 | 4.120 | 0.795 | 11.04 | 0 | 0 |
+
+The full suite passed **163 tests, 1 skipped** on 190 after this change.
+Exact agreement is evidence for these inputs, not a guarantee for every
+GPU/kernel/input shape. The earlier measurements below used PyTorch's default
+reduced-precision setting and are retained as historical diagnostic evidence.
+Running the reproduction command at the end now uses the current policy.
+
+### Historical measurement (reduced-precision reductions enabled)
+
 GPU 6, NVIDIA B200; actual step-120000 FLUX weights and freshly initialized
 Value/Q experts; BF16, B=1, 512 language tokens, 288 image tokens, 48 actions,
 10 Euler steps. Inputs are synthetic. Each entry has one warmup and two timed

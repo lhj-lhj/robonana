@@ -74,6 +74,13 @@ class Flux2FACTModel(Flux2):
         dino_dim: int | None = None,
         pred_action_bidirectional: bool = False,
     ) -> None:
+        # Keep BF16 storage/autocast, but forbid reduced-precision GEMM
+        # intermediate reductions in every training/inference process. On B200,
+        # the latter amplified batch-shape differences between full and cached
+        # MAC Euler sampling. This is process-wide and intentionally not placed
+        # in robonana.__init__ (the lightweight simulator client needs no torch).
+        # https://docs.pytorch.org/docs/stable/notes/numerical_accuracy.html#reduced-precision-reduction-for-fp16-and-bf16-gemms
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
         super().__init__(params)
         self.action_dim = action_dim
         self.state_dim = state_dim
