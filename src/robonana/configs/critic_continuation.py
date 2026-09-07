@@ -16,4 +16,5 @@ config = build_critic_continuation(
     json.loads(source_config.read_text()), checkpoint=checkpoint,
     source_config=source_config, project_dir=project,
     max_steps=int(os.environ.get("ROBONANA_MAX_STEPS", "10000")),
+    batch_size_per_gpu=int(os.environ.get("ROBONANA_BATCH_SIZE_PER_GPU", "8")),
 )

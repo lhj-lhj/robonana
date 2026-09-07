@@ -15,7 +15,8 @@ def restore_config_tuples(value):
     return value
 
 
-def build_critic_continuation(source, *, checkpoint, source_config, project_dir, max_steps):
+def build_critic_continuation(source, *, checkpoint, source_config, project_dir, max_steps,
+                              batch_size_per_gpu=8):
     """Reuse replay and optimization settings, with current FP32/batch defaults.
 
     This is continuation of the same critic phase, so restore online Q/V,
@@ -24,6 +25,8 @@ def build_critic_continuation(source, *, checkpoint, source_config, project_dir,
     or BF16 execution branch is introduced.
     """
     config = restore_config_tuples(copy.deepcopy(source))
+    if not isinstance(batch_size_per_gpu, int) or batch_size_per_gpu < 1:
+        raise ValueError("batch_size_per_gpu must be a positive integer")
     if config["models"]["train_mode"] != "critic":
         raise ValueError("continuation requires a critic checkpoint")
     if max_steps <= config["train"]["max_steps"]:
@@ -34,7 +37,7 @@ def build_critic_continuation(source, *, checkpoint, source_config, project_dir,
     config["launch"]["until_completion"] = False
     config["models"]["checkpoint"] = str(checkpoint / "transformer/diffusion_pytorch_model.bin")
     config["models"]["checkpoint_config"] = str(source_config)
-    config["dataloaders"]["train"]["batch_size_per_gpu"] = 8
+    config["dataloaders"]["train"]["batch_size_per_gpu"] = batch_size_per_gpu
     config["train"].update(
         max_steps=max_steps, gradient_accumulation_steps=1, mixed_precision="no",
         resume=True, resume_from=str(checkpoint), rebase_scheduler_on_resume=True,

@@ -80,6 +80,14 @@ warmup and optimizer hyperparameters are preserved; execution uses FP32 and
 batch 8 x 2 GPUs x accumulation 1. It is not bitwise equivalent to the historical
 BF16-rollout / batch-4-accumulation-2 execution. Keep the source run untouched.
 
+For an explicitly requested larger continuation batch, set
+`ROBONANA_BATCH_SIZE_PER_GPU` (default 8). Accumulation remains 1 on GPUs 6,7;
+batch 16 therefore means global batch 32, not 16. The adapter does not linearly
+scale the optimizer LR with batch size. `ROBONANA_MAX_STEPS` is the absolute
+endpoint: an additional 10k updates from checkpoint 7k means 17000. Test actual
+forward/backward memory before accepting a larger batch; preserve the source
+checkpoint and use a new project directory for the extended run.
+
 The environment path samples 32 action candidates, computes the L/S/I prefix
 once, scores each candidate with Q, and executes `argmax Q`. One selected
 success trajectory is eligible for the next round's BC pool.

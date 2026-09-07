@@ -30,6 +30,19 @@ def test_continuation_preserves_data_and_optimizer_with_current_execution():
     assert "forward_autocast_dtype" not in config["train"]["posttrain"]["ema"]
     assert "id" not in config["train"]["tracker_init_kwargs"]["wandb"]
     assert config["schedulers"] == dict(warmup_steps=250, decay_steps=10000)
+    larger = build_critic_continuation(source, checkpoint=Path("source/ckpt"),
+                                      source_config=Path("source/config.json"),
+                                      project_dir=Path("larger-run"), max_steps=17000,
+                                      batch_size_per_gpu=16)
+    assert larger["dataloaders"]["train"]["batch_size_per_gpu"] == 16
+    assert larger["train"]["gradient_accumulation_steps"] == 1
+    assert larger["optimizers"] == config["optimizers"]
+    assert larger["schedulers"]["decay_steps"] == 17000
+    with pytest.raises(ValueError, match="positive integer"):
+        build_critic_continuation(source, checkpoint=Path("source/ckpt"),
+                                  source_config=Path("source/config.json"),
+                                  project_dir=Path("bad-run"), max_steps=17000,
+                                  batch_size_per_gpu=0)
 
 
 def test_scheduler_rebase_does_not_advance_progress_or_replace_optimizer():
