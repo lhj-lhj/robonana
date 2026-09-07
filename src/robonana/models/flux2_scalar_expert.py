@@ -41,13 +41,14 @@ class FrozenFluxKVCache:
     prefix_length: int
     parent: FrozenFluxKVCache | None = None
     batch_indices: Tensor | None = None
+    compute_dtype: torch.dtype | None = None
 
     def layers(self, stream: str):
         own = getattr(self, stream)
         if self.parent is None:
             yield from own
             return
-        for shared, branch in zip(getattr(self.parent, stream), own, strict=True):
+        for shared, branch in zip(self.parent.layers(stream), own, strict=True):
             yield {
                 name: torch.cat(
                     (shared[name].index_select(0, self.batch_indices), branch[name]), dim=1

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
@@ -26,6 +28,17 @@ from .flux2_scalar_expert import (
     _flatten_heads,
     _mixed_query_attention,
 )
+
+
+@dataclass(frozen=True)
+class FrozenWorldCache:
+    """Request-local [C,G,R,U] K/V; never persist across FLUX updates."""
+
+    kv: FrozenFluxKVCache
+    segments: MacSegmentMap
+    future_bias: Tensor
+    reward: Tensor
+    success: Tensor
 
 
 class MacFlux2FACTModel(Flux2FACTModel):
@@ -161,10 +174,14 @@ class MacFlux2FACTModel(Flux2FACTModel):
         context_mask: Tensor | None = None,
         guidance: Tensor | None = None,
         critic_kind: str | None = None,
+        condition_cache: FrozenFluxKVCache | None = None,
     ) -> Flux2FACTOutput | Tensor:
         if critic_kind is not None:
             if critic_kind == "both":
-                cache = self.prefill_condition_cache(
+                # BF16 sampling and FP32 regression are distinct computations.
+                # Casting a BF16 cache to FP32 cannot recover lost precision.
+                cache = condition_cache if self.condition_cache_compatible(condition_cache) else None
+                cache = cache if cache is not None else self.prefill_condition_cache(
                     context=context, context_ids=context_ids,
                     current_latents=current_latents, current_ids=current_ids,
                     state=state, context_mask=context_mask,
@@ -374,6 +391,128 @@ class MacFlux2FACTModel(Flux2FACTModel):
         """
         return self.prefill_critic_cache(**kwargs, clean_action=None)
 
+    def cache_compute_dtype(self):
+        device_type = self.img_in.weight.device.type
+        return (torch.get_autocast_dtype(device_type) if torch.is_autocast_enabled(device_type)
+                else self.img_in.weight.dtype)
+
+    def condition_cache_compatible(self, cache):
+        return (cache is not None and cache.parent is None
+                and cache.compute_dtype == self.cache_compute_dtype()
+                and cache.key_mask.device == self.img_in.weight.device)
+
+    @torch.no_grad()
+    def _world_suffix(self, cache, hidden, ids, timestep, bias, *, capture):
+        """Thin cached adapter over official FLUX blocks, not a new transformer.
+
+        Same prepare/RoPE/mixed-attention/residual order as ImageWAM MoT:
+        https://github.com/yuyangalin/ImageWAM/blob/5d4a341ed20a95cdb08f0293f3d44778b9a9e05a/src/imagewam/models/backbones/mot.py#L612-L745
+        Unlike Q's single query, world queries need a rectangular graph mask:
+        R cannot read U; S' cannot read I'. All visible keys share ONE softmax.
+        """
+        if cache.compute_dtype != self.cache_compute_dtype():
+            raise ValueError("world cache precision differs from current execution precision")
+        batch = hidden.shape[0]
+        pe = self.pe_embedder(ids)
+        txt, pe_txt = hidden[:, :0], pe[:, :, :0]
+        vec = self._condition_vec(timestep.expand(batch), None)
+        mod_img = self.double_stream_modulation_img(vec)
+        mod_txt = self.double_stream_modulation_txt(vec)
+
+        def attend(q, k, v, shared):
+            def heads(value):
+                return value.reshape(batch, -1, self.num_heads,
+                                     self.hidden_size // self.num_heads).transpose(1, 2)
+            return _masked_attention(q, torch.cat((heads(shared["k"]), k), dim=2),
+                                     torch.cat((heads(shared["v"]), v), dim=2), bias)
+
+        double, single = [], []
+        for block, shared in zip(self.double_blocks, cache.layers("double"), strict=True):
+            q, k, v, full_pe, _, mods = block._prepare_qkv(
+                hidden, txt, pe, pe_txt, mod_img, mod_txt)
+            q, k = apply_rope(q, k, full_pe)
+            if capture:
+                double.append({"k": _flatten_heads(k).detach(), "v": _flatten_heads(v).detach()})
+            attn = attend(q, k, v, shared)
+            hidden, txt = block._apply_residuals(hidden, txt, attn, attn[:, :0], mods)
+        mod = self.single_stream_modulation(vec)[0]
+        for block, shared in zip(self.single_blocks, cache.layers("single"), strict=True):
+            q, k, v, mlp, gate = block._qkv(hidden, mod)
+            q, k = apply_rope(q, k, pe)
+            if capture:
+                single.append({"k": _flatten_heads(k).detach(), "v": _flatten_heads(v).detach()})
+            hidden = block._out(hidden, attend(q, k, v, shared), mlp, gate)
+        branch = None
+        if capture:
+            key_mask = torch.cat((cache.key_mask, torch.ones(
+                batch, ids.shape[1], device=ids.device, dtype=torch.bool)), dim=1)
+            branch = FrozenFluxKVCache(
+                double=tuple(double), single=tuple(single), key_mask=key_mask,
+                prefix_length=key_mask.shape[1], parent=cache,
+                batch_indices=torch.arange(batch, device=ids.device),
+                compute_dtype=cache.compute_dtype)
+        return hidden, branch
+
+    @torch.no_grad()
+    def prefill_world_cache(self, *, condition_cache, clean_action, language_length,
+                            state_length, image_length, future_state_length,
+                            future_image_length, context_mask):
+        """Compute clean G/R/U once; reuse C from this action-selection request.
+
+        Reward/success are deterministic zero-time tokens, not teacher-forced
+        labels. Their logits and layer K/V cannot depend on future noise.
+        """
+        if not self.condition_cache_compatible(condition_cache):
+            raise ValueError("world prefill requires a same-precision condition-only cache")
+        batch, device = clean_action.shape[0], clean_action.device
+        if clean_action.shape != (batch, self.chunk_horizon, self.action_dim):
+            raise ValueError("world prefill requires one clean 48-step action chunk")
+        segments = MacSegmentMap.from_lengths(
+            language=language_length, state=state_length, ref_image=image_length,
+            pred_action=0, clean_action=self.chunk_horizon, reward=1, success=1,
+            future_state=future_state_length, future_image=future_image_length)
+        if condition_cache.prefix_length != segments.clean_action.start:
+            raise ValueError("world cache condition length mismatch")
+        bias = build_mac_attention_bias(segments, batch_size=batch,
+            dtype=self.img_in.weight.dtype, device=device, context_mask=context_mask)
+        embed = self.actor_world_segment_embed.weight
+        hidden = torch.cat((self.action_in(clean_action.to(self.img_in.weight.dtype)) + embed[3],
+            self.reward_token.weight[None].expand(batch, 1, -1) + embed[4],
+            self.success_token.weight[None].expand(batch, 1, -1) + embed[5]), dim=1)
+        def robot(length, segment, time_ids=None):
+            return self._robot_ids(batch_size=batch, length=length, segment_id=segment,
+                device=device, dtype=torch.long, time_ids=time_ids)
+        ids = torch.cat((robot(48, 4, torch.arange(1, 49, device=device)[None].expand(batch, -1)),
+                         robot(1, 5), robot(1, 6)), dim=1)
+        stop = segments.future_state.start
+        hidden, kv = self._world_suffix(condition_cache, hidden, ids,
+            torch.zeros(batch, device=device), bias[:, :, segments.clean_action.start:stop, :stop],
+            capture=True)
+        return FrozenWorldCache(kv, segments, bias[:, :, stop:, :].contiguous(),
+                                self.reward_out(hidden[:, -2]), self.success_out(hidden[:, -1]))
+
+    @torch.no_grad()
+    def predict_world_cached(self, cache, *, noisy_future_latents, noisy_future_state,
+                             future_ids, wm_timestep):
+        """Advance only [S',I']; the 20-step Euler schedule remains unchanged."""
+        batch, length = noisy_future_state.shape[:2]
+        segments = cache.segments
+        if (length != segments.future_state.stop - segments.future_state.start
+                or noisy_future_latents.shape[1] != segments.future_image.stop - segments.future_image.start):
+            raise ValueError("world cache future shape mismatch")
+        dtype = self.img_in.weight.dtype
+        hidden = torch.cat((self.state_in(noisy_future_state.to(dtype)) + self.actor_world_segment_embed.weight[6],
+                            self.img_in(noisy_future_latents.to(dtype)) + self.actor_world_segment_embed.weight[7]), dim=1)
+        ids = torch.cat((self._robot_ids(batch_size=batch, length=length, segment_id=7,
+            device=hidden.device, dtype=future_ids.dtype), future_ids), dim=1)
+        hidden, _ = self._world_suffix(cache.kv, hidden, ids, wm_timestep, cache.future_bias, capture=False)
+        vec = self._condition_vec(wm_timestep.expand(batch), None)
+        return Flux2FACTOutput(
+            image=self.final_layer(hidden[:, length:], vec),
+            action=hidden.new_empty(batch, 0, self.action_dim),
+            future_state=self.state_out(hidden[:, :length]), reward=cache.reward,
+            success=cache.success, q=None, dino=None, segments=segments)
+
     @torch.no_grad()
     def _action_from_cache(
         self, cache: FrozenFluxKVCache, action: Tensor, *,
@@ -445,6 +584,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
                 double=tuple(double_cache), single=tuple(single_cache),
                 key_mask=key_mask.detach(), prefix_length=key_mask.shape[1],
                 parent=cache, batch_indices=batch_indices,
+                compute_dtype=cache.compute_dtype,
             )
         return hidden, branch
 
@@ -570,6 +710,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
             single=tuple(single_cache),
             key_mask=key_mask.detach(),
             prefix_length=key_mask.shape[1],
+            compute_dtype=self.cache_compute_dtype(),
         )
 
     def _expert_query_pe(self, *, batch: int, device: torch.device, dtype: torch.dtype, segment_id: int) -> Tensor:

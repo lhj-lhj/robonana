@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
 import torch
 from torch import Tensor
 
 from robonana.models.position_ids import image_position_ids, text_position_ids
+
+if TYPE_CHECKING:
+    from robonana.models.flux2_scalar_expert import FrozenFluxKVCache
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,7 @@ class QRejectionSample:
     candidates: Tensor
     candidate_q: Tensor
     best_index: Tensor
+    condition_cache: FrozenFluxKVCache | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,7 @@ class MacImaginaryRollout:
     online_next_value: Tensor
     value_target_return: Tensor
     q_target_return: Tensor
+    condition_cache: FrozenFluxKVCache | None = None
 
 
 def sample_action_flow(
@@ -442,6 +447,7 @@ def evaluate_mac_critics(
     clean_action: Tensor,
     grid_height: int,
     grid_width: int,
+    condition_cache: FrozenFluxKVCache | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Evaluate deterministic ``Value(s)`` and ``Q(s, action_chunk)``."""
 
@@ -485,7 +491,7 @@ def evaluate_mac_critics(
         wm_timestep=zeros,
         context_mask=context_mask,
     )
-    return model(**common, critic_kind="both")
+    return model(**common, critic_kind="both", condition_cache=condition_cache)
 
 
 def evaluate_mac_target_value(
@@ -525,6 +531,7 @@ def evaluate_mac_target_value(
     )
 
 
+@torch.no_grad()
 def sample_mac_world(
     *,
     model,
@@ -538,8 +545,14 @@ def sample_mac_world(
     schedule: Tensor,
     grid_height: int,
     grid_width: int,
+    condition_cache: FrozenFluxKVCache | None = None,
+    use_cache: bool = True,
 ) -> MacWorldSample:
-    """Generate one learned fixed-chunk world transition."""
+    """Generate one fixed-chunk transition with invariant-prefix reuse.
+
+    ``use_cache=False`` is the independent full-forward numerical oracle.
+    This sampler is inference-only; stage-1 training still uses full autograd.
+    """
 
     model_spec = getattr(model, "module", model)
     if getattr(model_spec, "architecture_version", None) != "mac_mot_v2":
@@ -575,8 +588,24 @@ def sample_mac_world(
     zeros = torch.zeros(batch_size, device=device, dtype=torch.float32)
     sampled_future = future_noise
     sampled_future_state = future_state_noise
+    world_cache = None
+    if use_cache:
+        if not model_spec.condition_cache_compatible(condition_cache):
+            condition_cache = prefill_mac_condition(
+                model=model_spec, context=context, current_latents=current_latents,
+                state=state, context_mask=context_mask,
+                grid_height=grid_height, grid_width=grid_width)
+        world_cache = model_spec.prefill_world_cache(
+            condition_cache=condition_cache, clean_action=clean_action,
+            language_length=context.shape[1], state_length=state.shape[1],
+            image_length=current_latents.shape[1], future_state_length=future_state_noise.shape[1],
+            future_image_length=future_noise.shape[1], context_mask=context_mask)
 
     def predict(sampled_image: Tensor, sampled_state: Tensor, sigma: Tensor):
+        if world_cache is not None:
+            return model_spec.predict_world_cached(
+                world_cache, noisy_future_latents=sampled_image, noisy_future_state=sampled_state,
+                future_ids=future_ids, wm_timestep=sigma.expand(batch_size))
         return model(
             context=context,
             context_ids=context_ids,
@@ -604,7 +633,9 @@ def sample_mac_world(
         sampled_future_state = flow_euler_step(
             sampled_future_state, output.future_state, sigma, sigma_next
         )
-    final = predict(sampled_future, sampled_future_state, schedule[-1])
+    # R/U never read S'/I' or world sigma. Their prefill logits are already
+    # final; no 21st full forward is needed after the 20 velocity evaluations.
+    final = world_cache if world_cache is not None else predict(sampled_future, sampled_future_state, schedule[-1])
     return MacWorldSample(
         future=sampled_future,
         future_state=sampled_future_state,
@@ -644,6 +675,7 @@ def sample_q_rejection(
     grid_height: int,
     grid_width: int,
     candidate_batch_size: int | None = None,
+    return_condition_cache: bool = False,
 ) -> QRejectionSample:
     """Sample independent BC chunks and return deterministic-Q argmax."""
 
@@ -704,6 +736,7 @@ def generate_mac_imaginary_rollout_h1(
     *,
     online_model,
     target_value_expert,
+        condition_cache=cache if return_condition_cache else None,
     context: Tensor,
     current_latents: Tensor,
     state: Tensor,
@@ -741,6 +774,7 @@ def generate_mac_imaginary_rollout_h1(
     world = sample_mac_world(
         model=online_model,
         context=context,
+        return_condition_cache=True,
         current_latents=current_latents,
         state=state,
         context_mask=context_mask,
@@ -753,6 +787,7 @@ def generate_mac_imaginary_rollout_h1(
     )
     model_spec = getattr(online_model, "module", online_model)
     next_cache = prefill_mac_condition(
+        condition_cache=rejection.condition_cache,
         model=model_spec, context=context, current_latents=world.future,
         state=world.future_state, context_mask=context_mask,
         grid_height=grid_height, grid_width=grid_width,
@@ -824,3 +859,4 @@ def generate_mac_imaginary_rollout_h1(
         value_target_return=value_target.detach(),
         q_target_return=q_target.detach(),
     )
+        condition_cache=rejection.condition_cache,

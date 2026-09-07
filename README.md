@@ -205,6 +205,13 @@ before backward, optimizer, scheduler, or EMA work.
 
 ## Q rejection and prefix reuse
 
+World rollouts now reuse `[L,S,I,G,R,U]` per-layer K/V and denoise only
+`[future state, future image]` for the original 20 Euler steps. Stage 2 shares
+the selected observation's C cache with world prefill. Q/V regression reuses
+C only at identical compute precision; BF16 sampling caches are recomputed
+for FP32 regression, never merely cast. No stage-1 loss, critic target, or
+checkpoint format changes. See [world-cache design and validation](docs/WORLD_PREFIX_CACHE.md).
+
 For one request, the frozen FLUX prefix is computed once and shared:
 
 ```text

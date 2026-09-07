@@ -159,9 +159,11 @@ def _ddp_critic_worker(rank, rendezvous):
         inputs["state"] += rank * 0.1
         for _ in range(2):
             optimizer.zero_grad(set_to_none=True)
+            cache = model.prefill_condition_cache(**inputs)
             value, q = evaluate_mac_critics(
                 model=wrapped, **sampling_inputs(inputs), clean_action=torch.randn(2, 48, 6),
                 grid_height=1, grid_width=2,
+                condition_cache=cache,
             )
             (value.square().mean() + q.square().mean()).backward()
             for expert in (model.value_expert, model.q_expert):

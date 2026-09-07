@@ -29,6 +29,18 @@ class _FakeMacModel:
     def predict_action_cached(self, cache, action, **kwargs):
         return torch.zeros_like(action)
 
+    def condition_cache_compatible(self, cache):
+        return cache is not None
+
+    def prefill_world_cache(self, *, clean_action, **kwargs):
+        return SimpleNamespace(reward=clean_action.new_zeros(clean_action.shape[0], 48),
+                               success=clean_action.new_full((clean_action.shape[0], 1), -20.0))
+
+    def predict_world_cached(self, cache, *, noisy_future_latents, noisy_future_state, **kwargs):
+        return SimpleNamespace(image=torch.zeros_like(noisy_future_latents),
+                               future_state=torch.zeros_like(noisy_future_state),
+                               reward=cache.reward, success=cache.success)
+
     def score_q_candidates(self, cache, clean_actions, **kwargs):
         return clean_actions.float().mean(dim=(2, 3))
 

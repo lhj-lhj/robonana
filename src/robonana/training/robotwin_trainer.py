@@ -971,6 +971,9 @@ class RoboNanaTrainer(Trainer):
             state=values["state"],
             context_mask=values["context_mask"],
             clean_action=imaginary.selected_action,
+            # Same-step only. The wrapped critic forward rejects a sampling
+            # cache when autocast precision differs (e.g. BF16 -> FP32).
+            condition_cache=imaginary.condition_cache,
             grid_height=self.grid_height,
             grid_width=self.grid_width,
         )
