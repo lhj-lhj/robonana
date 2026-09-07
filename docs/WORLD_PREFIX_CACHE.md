@@ -44,28 +44,42 @@ forward. Expert gradients still pass through DDP/DeepSpeed's model forward;
 only FLUX work is no-grad.
 
 The cache records compute dtype. The critic forward reuses it only when
-device and compute dtype match; otherwise it recomputes C. In the current
-FP32-regression / BF16-autocast-sampling configuration, regression intentionally
-still performs a separate FP32 C prefill. Casting a BF16 cache to FP32 is not
-equivalent to computing the prefix in FP32. Thus this change does **not** claim
-to eliminate that particular cross-precision computation. World generation
-does reuse the sampling C because its execution precision is the same.
+device and compute dtype match; otherwise it recomputes C. Casting a BF16
+cache to FP32 is not equivalent to computing the prefix in FP32.
+
+After the precision-alignment revision, the trainer uses
+`flux_compute_context(rollout_model)` for both imagination and differentiable
+Q/V regression. The loaded FLUX weight dtype is the single compute authority.
+New runs default to `ROBONANA_MIXED_PRECISION=no` (FP32), matching the actual
+recent Stage-1 world training. Explicit `bf16` switches the whole training
+path together. Current C is now reusable from selection through world
+generation to Q/V regression. EMA Value weights and updates remain FP32;
+its forward follows the same compute context as FLUX. Return arithmetic and
+loss reductions also remain FP32 for numerical stability.
 
 Specifically, the saved `hanging_mug_critic_only_5000_to_10000_20260907`
-experiment has `train.mixed_precision="no"`. The trainer nevertheless explicitly
-wraps **the whole no-grad imagination function** in BF16 autocast, using the
-historically named `ema_forward_autocast_dtype`; this includes action/Q
+experiment has `train.mixed_precision="no"`. Its already-running, pre-revision
+trainer nevertheless explicitly wraps **the whole no-grad imagination function**
+in BF16 autocast, using the historically named `ema_forward_autocast_dtype`; this includes action/Q
 selection, world generation, and both next-state Values, not just EMA Value.
-The later differentiable Q/V forward is outside that context. FP32 weight/EMA
-storage therefore does not mean every operation runs in FP32. This predates
-the cache change. The shared base config separately defaults to `"bf16"`, so
-always inspect a run's saved config rather than inferring its precision from
-the current base default. Batch-size changes do not change either policy.
+The later differentiable Q/V forward is outside that context. This mismatch
+predates the cache change and is removed by the precision-alignment revision.
+Old saved `ema.forward_autocast_dtype` fields no longer override the FLUX
+precision in new processes. They are omitted from newly generated configs.
+Existing processes are not hot-patched or restarted. Aligning a previously
+BF16 rollout to FP32 can slow it down; the historical cache-only benchmark
+below is not an end-to-end speedup estimate for this additional change.
 
 Existing BF16 reduced-precision reduction safety settings remain unchanged.
 No EMA FLUX, new weights, optimizer state or checkpoint migration is introduced.
 
 ## Validation on 190, 2026-09-07
+
+Precision-alignment follow-up: full CPU regression **136 passed, 1 skipped**;
+the expanded CPU/CUDA FP32/BF16 precision suite subsequently **6 passed** on
+GPU 6. It verifies one current C prefill across selection/world/regression,
+one next C for both Values, finite expert gradients, and unchanged FP32 EMA
+storage. The batch-default tests cover both phases and explicit overrides.
 
 Validated in `/data3/hongjia/robonana/_tmp/world_cache_validation_20260907`,
 without replacing the running critic-only experiment's source or process.

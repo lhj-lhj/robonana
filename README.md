@@ -115,15 +115,17 @@ It imports the common FACT/FLUX dimensions and applies the MAC overlay:
 | imagined chunks per critic batch | 1 |
 | Value EMA decay | 0.995 |
 | flow sampling steps | 20 |
-| default dtype | BF16 FLUX, FP32 EMA storage |
+| default training dtype | FP32 FLUX/Q/V; FP32 Value EMA storage/update |
 | new trajectories per collection round | 100 total, successes and failures |
 | stage 1 world/policy budget per round | 20,000 optimizer steps |
 | stage 2 Value/Q budget per round | 10,000 optimizer steps |
 | training GPUs / batch per GPU / accumulation | 6,7 / 8 / 1 (effective batch 16) |
 
 These are defaults for new runs, not overrides of saved continuation configs.
-The current critic-only continuation retains FP32 gradient training with BF16
-no-grad imagination; see [the precision boundary](docs/WORLD_PREFIX_CACHE.md#sharing-with-critics-and-precision).
+New processes align imagination and Q/V computation to FLUX using the single
+`ROBONANA_MIXED_PRECISION=no` default (`bf16` is an explicit whole-path override).
+The already-running critic-only continuation retains its old mixed-precision
+behavior until explicitly restarted; see [the precision boundary](docs/WORLD_PREFIX_CACHE.md#sharing-with-critics-and-precision).
 
 The standard round is: collect 100 new trajectories with the current Q-selected
 policy, prepare/cache them and mix with existing replay, train stage 1 for 20k
@@ -213,8 +215,9 @@ before backward, optimizer, scheduler, or EMA work.
 World rollouts now reuse `[L,S,I,G,R,U]` per-layer K/V and denoise only
 `[future state, future image]` for the original 20 Euler steps. Stage 2 shares
 the selected observation's C cache with world prefill. Q/V regression reuses
-C only at identical compute precision; BF16 sampling caches are recomputed
-for FP32 regression, never merely cast. No stage-1 loss, critic target, or
+C only at identical compute precision; the trainer now aligns both passes to
+FLUX. Cross-precision external callers recompute rather than cast a cache.
+No stage-1 loss, critic target, or
 checkpoint format changes. See [world-cache design and validation](docs/WORLD_PREFIX_CACHE.md).
 
 For one request, the frozen FLUX prefix is computed once and shared:
@@ -293,8 +296,11 @@ target from another run.
 
 ## Numerical policy
 
-BF16 is used for FLUX activations and expert forwards on supported GPUs. Value
-EMA storage and updates are FP32. Inference sanitizes decoded actions with a
+Training defaults to FP32 throughout FLUX, imagination and online/target critic
+forwards. Explicit BF16 training uses the same compute policy for all of them.
+Value EMA storage/updates and return/loss reductions remain FP32. The separate
+environment inference dtype is not changed by a training config. Inference
+sanitizes decoded actions with a
 finite fallback and clips to normalization bounds. When diagnosing instability,
 first lower critic learning rate or candidate count; do not silently add a
 second EMA or target Q.

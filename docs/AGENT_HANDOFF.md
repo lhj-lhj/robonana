@@ -45,6 +45,13 @@ accumulation 1 (effective batch 16). Explicit environment overrides remain
 supported. Existing saved experiment configs and running processes are not
 rewritten; a historical continuation can still restore batch 4 / accumulation 2.
 
+Training precision now follows the loaded FLUX dtype for action/world rollout,
+online Q/V and target Value forward. New configs default to FP32 (`no`), matching
+the recent real world-model run; `ROBONANA_MIXED_PRECISION=bf16` explicitly
+switches the complete compute path. EMA storage/update and return/loss math
+remain FP32. The old EMA-specific forward dtype is no longer an authority.
+The active critic-only process was not restarted and retains its loaded code.
+
 The environment path samples 32 action candidates, computes the L/S/I prefix
 once, scores each candidate with Q, and executes `argmax Q`. One selected
 success trajectory is eligible for the next round's BC pool.

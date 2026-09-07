@@ -46,6 +46,7 @@ from robonana.training.optimizer import build_optimizer_param_groups
 from robonana.training.posttraining import (
     ValueExpertEMA,
     evaluating,
+    flux_compute_context,
 )
 from robonana.training.visualization import (
     decode_flux2_tokens,
@@ -147,7 +148,6 @@ class RoboNanaTrainer(Trainer):
         self.mac_enabled = self.posttrain_q_target_mode == "mac_mot_v2"
         self.mac_phase = str(self.posttrain_config.get("phase", "world_policy"))
         self.target_value_ema: ValueExpertEMA | None = None
-        self.ema_forward_autocast_dtype = torch.bfloat16
         self.current_collection_round = int(
             self.posttrain_config.get("current_collection_round", 0)
         )
@@ -185,8 +185,8 @@ class RoboNanaTrainer(Trainer):
         ema = dict(self.posttrain_config.get("ema", {}))
         if ema.get("storage_dtype") != "float32":
             raise ValueError("target Value EMA storage_dtype must be float32")
-        if ema.get("forward_autocast_dtype") != "bfloat16":
-            raise ValueError("target Value forward dtype must be bfloat16")
+        # Historical snapshots may contain forward_autocast_dtype. It is no
+        # longer a separate precision authority: all forwards follow FLUX.
         if ema.get("target") != "value_expert_only":
             raise ValueError("mac_mot_v2 EMA target must be value_expert_only")
 
@@ -933,11 +933,7 @@ class RoboNanaTrainer(Trainer):
         rollout_model = self.accelerator.unwrap_model(
             self.model, keep_torch_compile=False
         )
-        with evaluating(rollout_model), torch.autocast(
-            device_type=self.device.type,
-            dtype=self.ema_forward_autocast_dtype,
-            enabled=self.device.type == "cuda",
-        ):
+        with evaluating(rollout_model), flux_compute_context(rollout_model):
             imaginary = generate_mac_imaginary_rollout_h1(
                 online_model=rollout_model,
                 target_value_expert=self.target_value_ema.model,
@@ -964,19 +960,20 @@ class RoboNanaTrainer(Trainer):
                 grid_height=self.grid_height,
                 grid_width=self.grid_width,
             )
-        value_prediction, q_prediction = evaluate_mac_critics(
-            model=self.model,
-            context=values["context"],
-            current_latents=values["current"],
-            state=values["state"],
-            context_mask=values["context_mask"],
-            clean_action=imaginary.selected_action,
-            # Same-step only. The wrapped critic forward rejects a sampling
-            # cache when autocast precision differs (e.g. BF16 -> FP32).
-            condition_cache=imaginary.condition_cache,
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-        )
+        with flux_compute_context(rollout_model):
+            value_prediction, q_prediction = evaluate_mac_critics(
+                model=self.model,
+                context=values["context"],
+                current_latents=values["current"],
+                state=values["state"],
+                context_mask=values["context_mask"],
+                clean_action=imaginary.selected_action,
+                # Both phases of this step now use the same FLUX precision.
+                # Keep the cache guard for callers outside this trainer.
+                condition_cache=imaginary.condition_cache,
+                grid_height=self.grid_height,
+                grid_width=self.grid_width,
+            )
         scale = float(self.posttrain_config["return_scale"])
         losses = {
             "value_loss": deterministic_return_loss(

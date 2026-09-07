@@ -25,6 +25,7 @@ def test_mac_posttrain_defaults_to_fixed48_and_1000_step_checkpoint(monkeypatch,
     assert config["train"]["q_target_mode"] == "mac_mot_v2"
     assert config["train"]["posttrain"]["chunk_horizon"] == 48
     assert config["train"]["posttrain"]["ema"]["target"] == "value_expert_only"
+    assert "forward_autocast_dtype" not in config["train"]["posttrain"]["ema"]
 
 
 def test_mac_critic_phase_only_changes_expert_training_surface(monkeypatch, tmp_path):

@@ -212,7 +212,6 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
             update_every_optimizer_steps=1,
             start_step=0,
             storage_dtype="float32",
-            forward_autocast_dtype="bfloat16",
             target="value_expert_only",
         ),
         imagination=dict(

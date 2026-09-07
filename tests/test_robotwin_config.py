@@ -24,6 +24,7 @@ def test_mac_batch16_defaults_and_explicit_microbatch_override(monkeypatch, phas
     for key in ("ROBONANA_BATCH_SIZE", "ROBONANA_GRADIENT_ACCUMULATION_STEPS", "ROBONANA_GPU_IDS"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("ROBONANA_MAC_PHASE", phase)
+    monkeypatch.delenv("ROBONANA_MIXED_PRECISION", raising=False)
     if override:
         monkeypatch.setenv("ROBONANA_BATCH_SIZE", "4")
         monkeypatch.setenv("ROBONANA_GRADIENT_ACCUMULATION_STEPS", "2")
@@ -36,6 +37,7 @@ def test_mac_batch16_defaults_and_explicit_microbatch_override(monkeypatch, phas
         assert config["launch"]["gpu_ids"] == [6, 7]
         assert (batch, accumulation) == ((4, 2) if override else (8, 1))
         assert batch * len(config["launch"]["gpu_ids"]) * accumulation == 16
+        assert config["train"]["mixed_precision"] == "no"
     finally:
         sys.modules.pop(module_name, None)
 
