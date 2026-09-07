@@ -29,7 +29,7 @@ sim_gpu_id=${ROBONANA_SIM_GPU_ID:-7}
 prepare_gpu_id=${ROBONANA_PREPARE_GPU_ID:-7}
 static_camera_csv=${ROBONANA_ROBOTWIN_STATIC_CAMERAS:-head_camera}
 port=${PORT:-8094}
-test_num=${TEST_NUM:-1}
+test_num=${TEST_NUM:-${ROBONANA_MAC_COLLECTION_EPISODES:-100}}
 eval_run_dir=${ROBONANA_EVAL_RUN_DIR:-${dataset_root}/logs/isolated_collection}
 video_log=${EVAL_VIDEO_LOG:-0}
 

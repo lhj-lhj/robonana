@@ -32,6 +32,14 @@ deterministic Value/Q MoT experts. Value has one FP32 EMA target; Q has no EMA.
 The Value EMA is initialized from the current online Value expert at the start
 of every new critic phase and restored only when resuming that same phase.
 
+Standard new-round budgets (updated 2026-09-07): collect 100 new trajectories
+total (successes plus failures), train phase 1 for 20,000 optimizer steps, then
+phase 2 for 10,000 optimizer steps. Each new phase's LR decay matches its budget.
+The round launcher starts from already collected replay and collects 100 more
+episodes for the following round after training. A critic-only continuation is
+an optional diagnostic, not part of this default cycle. Do not reinterpret
+these defaults as permission to launch training or modify a saved ongoing run.
+
 The environment path samples 32 action candidates, computes the L/S/I prefix
 once, scores each candidate with Q, and executes `argmax Q`. One selected
 success trajectory is eligible for the next round's BC pool.

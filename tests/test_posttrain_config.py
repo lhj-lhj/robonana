@@ -1,4 +1,5 @@
 from robonana.configs.posttrain_config import apply_mac_posttrain_config
+import pytest
 
 
 def _base(tmp_path):
@@ -32,3 +33,29 @@ def test_mac_critic_phase_only_changes_expert_training_surface(monkeypatch, tmp_
     config = apply_mac_posttrain_config(_base(tmp_path))
     assert config["models"]["train_mode"] == "critic"
     assert config["train"]["posttrain"]["phase"] == "critic"
+
+
+@pytest.mark.parametrize("phase,expected", [("world_policy", 20000), ("critic", 10000)])
+def test_phase_budget_overrides_base_and_aligns_decay(monkeypatch, tmp_path, phase, expected):
+    for key in ("ROBONANA_MAX_STEPS", "ROBONANA_MAC_WORLD_POLICY_STEPS",
+                "ROBONANA_MAC_TRAIN_STEPS", "ROBONANA_MAC_CRITIC_STEPS"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("ROBONANA_MAC_PHASE", phase)
+    base = _base(tmp_path)
+    base["train"]["max_steps"] = 150000
+    base["schedulers"] = {"warmup_steps": 500, "decay_steps": 150000}
+    config = apply_mac_posttrain_config(base)
+    assert config["train"]["max_steps"] == expected
+    assert config["schedulers"] == {"warmup_steps": 500, "decay_steps": expected}
+    assert base["train"]["max_steps"] == 150000
+
+
+def test_phase_budget_explicit_override_updates_scheduler(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROBONANA_MAC_PHASE", "critic")
+    monkeypatch.setenv("ROBONANA_MAC_CRITIC_STEPS", "12000")
+    monkeypatch.delenv("ROBONANA_MAX_STEPS", raising=False)
+    config = apply_mac_posttrain_config(_base(tmp_path))
+    assert config["train"]["max_steps"] == config["schedulers"]["decay_steps"] == 12000
+    monkeypatch.setenv("ROBONANA_MAX_STEPS", "8000")
+    config = apply_mac_posttrain_config(_base(tmp_path))
+    assert config["train"]["max_steps"] == config["schedulers"]["decay_steps"] == 8000

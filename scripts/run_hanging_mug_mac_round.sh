@@ -7,10 +7,11 @@ set -Eeuo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 round_id=${ROBONANA_COLLECTION_ROUND:-0}
-world_policy_steps=${ROBONANA_MAC_WORLD_POLICY_STEPS:-${ROBONANA_MAC_TRAIN_STEPS:-1000}}
-critic_steps=${ROBONANA_MAC_CRITIC_STEPS:-1000}
+world_policy_steps=${ROBONANA_MAC_WORLD_POLICY_STEPS:-${ROBONANA_MAC_TRAIN_STEPS:-20000}}
+critic_steps=${ROBONANA_MAC_CRITIC_STEPS:-10000}
 train_batch_size=${ROBONANA_MAC_BATCH_SIZE:-4}
 test_num=${ROBONANA_HANGING_MUG_TEST_NUM:-50}
+collection_num=${ROBONANA_MAC_COLLECTION_EPISODES:-100}
 model_python=${ROBONANA_MODEL_PYTHON:-/data3/hongjia/conda/envs/robonana/bin/python}
 robotwin_path=${ROBOTWIN_PATH:-/workspace/hongjia/RoboTwin}
 robotwin_env=${ROBOTWIN_CONDA_ENV:-/data3/hongjia/conda/envs/robotwin2}
@@ -28,7 +29,8 @@ seed_group=${ROBONANA_EVAL_SEED_GROUP:-${round_id}}
 
 if ! [[ ${round_id} =~ ^[0-9]+$ && ${world_policy_steps} =~ ^[1-9][0-9]*$ \
   && ${critic_steps} =~ ^[1-9][0-9]*$ \
-  && ${train_batch_size} =~ ^[1-9][0-9]*$ && ${test_num} =~ ^[1-9][0-9]*$ ]]; then
+  && ${train_batch_size} =~ ^[1-9][0-9]*$ && ${test_num} =~ ^[1-9][0-9]*$ \
+  && ${collection_num} =~ ^[1-9][0-9]*$ ]]; then
   echo "round must be non-negative; steps, batch size, and test count must be positive" >&2
   exit 2
 fi
@@ -209,7 +211,7 @@ if [[ ! -f ${state_dir}/m32_collection.done ]]; then
     ROBONANA_REJECTION_CANDIDATE_COUNT="${ROBONANA_MAC_EVAL_CANDIDATES:-32}" \
     ROBONANA_Q_RETURN_SCALE="${ROBONANA_MAC_RETURN_SCALE:-1000}" \
     EVAL_VIDEO_LOG="${EVAL_VIDEO_LOG:-1}" \
-    TEST_NUM="${test_num}" \
+    TEST_NUM="${collection_num}" \
     PORT="${ROBONANA_COLLECTION_PORT:-18720}" \
     bash "${repo_root}/scripts/collect_prepare_robotwin_rollouts.sh" \
       hanging_mug demo_clean "${collection}" "${seed_group}"

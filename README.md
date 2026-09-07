@@ -116,6 +116,28 @@ It imports the common FACT/FLUX dimensions and applies the MAC overlay:
 | Value EMA decay | 0.995 |
 | flow sampling steps | 20 |
 | default dtype | BF16 FLUX, FP32 EMA storage |
+| new trajectories per collection round | 100 total, successes and failures |
+| stage 1 world/policy budget per round | 20,000 optimizer steps |
+| stage 2 Value/Q budget per round | 10,000 optimizer steps |
+
+The standard round is: collect 100 new trajectories with the current Q-selected
+policy, prepare/cache them and mix with existing replay, train stage 1 for 20k
+steps, then freeze FLUX and train stage 2 for 10k steps. These are additional
+per-phase budgets, not lifetime checkpoint step numbers. Each new phase uses
+a matching learning-rate decay length. Carry forward online model weights;
+initialize Value EMA from online Value at the start of the new critic phase.
+
+`run_hanging_mug_mac_round.sh` consumes the replay already collected for round r,
+trains these two phases, and collects the next 100 trajectories for round r+1.
+`ROBONANA_MAC_COLLECTION_EPISODES`, `ROBONANA_MAC_WORLD_POLICY_STEPS`, and
+`ROBONANA_MAC_CRITIC_STEPS` override these defaults. `ROBONANA_MAX_STEPS` overrides
+the phase budget when loading the canonical training config directly. Evaluation
+episode counts are independent of collection counts. The explicitly named
+historical pilot retains its small experimental budgets.
+
+A critic-only control is an optional diagnostic: keep FLUX and replay fixed and
+continue only Q/Value training, then compare evaluation results. It isolates the
+effect of extra critic updates; it is not an extra stage in the standard round.
 
 Useful overrides are `ROBONANA_MAC_SOURCE_RUN`,
 `ROBONANA_MAC_PRETRAIN_CHECKPOINT`, `ROBONANA_MAC_PRETRAIN_CONFIG`,

@@ -88,6 +88,20 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
     phase = os.environ.get("ROBONANA_MAC_PHASE", "world_policy").strip()
     if phase not in {"world_policy", "critic"}:
         raise ValueError("ROBONANA_MAC_PHASE must be world_policy or critic")
+    # Budgets are per new phase/round, not lifetime checkpoint step counts.
+    # Override the common base's long pretraining budget and its scheduler
+    # together; otherwise a 10k critic run could inherit a 150k decay schedule.
+    phase_steps = (
+        os.environ.get("ROBONANA_MAC_WORLD_POLICY_STEPS",
+                       os.environ.get("ROBONANA_MAC_TRAIN_STEPS", "20000"))
+        if phase == "world_policy"
+        else os.environ.get("ROBONANA_MAC_CRITIC_STEPS", "10000")
+    )
+    max_steps = int(os.environ.get("ROBONANA_MAX_STEPS", phase_steps))
+    if max_steps <= 0:
+        raise ValueError("MAC phase max_steps must be positive")
+    config["train"]["max_steps"] = max_steps
+    config.setdefault("schedulers", {})["decay_steps"] = max_steps
 
     original = copy.deepcopy(config["dataloaders"]["train"]["data_or_config"])
     if isinstance(original, list):
