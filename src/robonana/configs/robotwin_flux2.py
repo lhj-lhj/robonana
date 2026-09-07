@@ -26,9 +26,12 @@ BACKBONE_CHECKPOINT = Path(
     )
 )
 PROJECT_DIR = os.environ.get("ROBONANA_PROJECT_DIR", str(REPO_ROOT / "experiments" / "robotwin_flux2"))
-GPU_IDS = [int(value) for value in os.environ.get("ROBONANA_GPU_IDS", "0,2,5,7").split(",") if value.strip()]
+GPU_IDS = [int(value) for value in os.environ.get("ROBONANA_GPU_IDS", "6,7").split(",") if value.strip()]
 MAX_STEPS = int(os.environ.get("ROBONANA_MAX_STEPS", "150000"))
-BATCH_SIZE_PER_GPU = int(os.environ.get("ROBONANA_BATCH_SIZE", "1"))
+BATCH_SIZE_PER_GPU = int(os.environ.get("ROBONANA_BATCH_SIZE", "8"))
+GRADIENT_ACCUMULATION_STEPS = int(os.environ.get("ROBONANA_GRADIENT_ACCUMULATION_STEPS", "1"))
+if BATCH_SIZE_PER_GPU <= 0 or GRADIENT_ACCUMULATION_STEPS <= 0:
+    raise ValueError("batch size and gradient accumulation steps must be positive")
 NUM_WORKERS = int(os.environ.get("ROBONANA_NUM_WORKERS", "4"))
 TRAIN_MODE = os.environ.get("ROBONANA_TRAIN_MODE", "full")
 PIXEL_EVAL_INTERVAL = int(os.environ.get("ROBONANA_PIXEL_EVAL_INTERVAL", "100"))
@@ -164,7 +167,8 @@ config = dict(
     ),
     train=dict(
         max_steps=MAX_STEPS,
-        gradient_accumulation_steps=1,
+        # Default on 190: 8 samples/GPU * 2 GPUs * 1 microbatch = 16/update.
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         mixed_precision="bf16",
         activation_checkpointing=False,
         checkpoint_interval=1000,

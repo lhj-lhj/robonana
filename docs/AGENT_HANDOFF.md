@@ -40,6 +40,11 @@ episodes for the following round after training. A critic-only continuation is
 an optional diagnostic, not part of this default cycle. Do not reinterpret
 these defaults as permission to launch training or modify a saved ongoing run.
 
+New Stage-1/Stage-2 runs default to GPUs 6,7, batch 8 per GPU and gradient
+accumulation 1 (effective batch 16). Explicit environment overrides remain
+supported. Existing saved experiment configs and running processes are not
+rewritten; a historical continuation can still restore batch 4 / accumulation 2.
+
 The environment path samples 32 action candidates, computes the L/S/I prefix
 once, scores each candidate with Q, and executes `argmax Q`. One selected
 success trajectory is eligible for the next round's BC pool.

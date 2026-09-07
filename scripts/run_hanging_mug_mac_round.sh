@@ -9,7 +9,8 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 round_id=${ROBONANA_COLLECTION_ROUND:-0}
 world_policy_steps=${ROBONANA_MAC_WORLD_POLICY_STEPS:-${ROBONANA_MAC_TRAIN_STEPS:-20000}}
 critic_steps=${ROBONANA_MAC_CRITIC_STEPS:-10000}
-train_batch_size=${ROBONANA_MAC_BATCH_SIZE:-4}
+train_batch_size=${ROBONANA_MAC_BATCH_SIZE:-8}
+train_accumulation=${ROBONANA_GRADIENT_ACCUMULATION_STEPS:-1}
 test_num=${ROBONANA_HANGING_MUG_TEST_NUM:-50}
 collection_num=${ROBONANA_MAC_COLLECTION_EPISODES:-100}
 model_python=${ROBONANA_MODEL_PYTHON:-/data3/hongjia/conda/envs/robonana/bin/python}
@@ -30,7 +31,7 @@ seed_group=${ROBONANA_EVAL_SEED_GROUP:-${round_id}}
 if ! [[ ${round_id} =~ ^[0-9]+$ && ${world_policy_steps} =~ ^[1-9][0-9]*$ \
   && ${critic_steps} =~ ^[1-9][0-9]*$ \
   && ${train_batch_size} =~ ^[1-9][0-9]*$ && ${test_num} =~ ^[1-9][0-9]*$ \
-  && ${collection_num} =~ ^[1-9][0-9]*$ ]]; then
+  && ${collection_num} =~ ^[1-9][0-9]*$ && ${train_accumulation} =~ ^[1-9][0-9]*$ ]]; then
   echo "round must be non-negative; steps, batch size, and test count must be positive" >&2
   exit 2
 fi
@@ -78,6 +79,7 @@ if [[ ! -f ${state_dir}/world_policy.done ]]; then
       ROBONANA_PYTHON="${model_python}" \
       ROBONANA_GPU_IDS="${train_gpu_ids}" \
       ROBONANA_BATCH_SIZE="${train_batch_size}" \
+      ROBONANA_GRADIENT_ACCUMULATION_STEPS="${train_accumulation}" \
       ROBONANA_NUM_WORKERS="${ROBONANA_NUM_WORKERS:-4}" \
       ROBONANA_MAX_STEPS="${world_policy_steps}" \
       ROBONANA_REPLAY_ROOT="${replay_root}" \
@@ -119,6 +121,7 @@ if [[ ! -f ${state_dir}/critic.done ]]; then
       ROBONANA_PYTHON="${model_python}" \
       ROBONANA_GPU_IDS="${train_gpu_ids}" \
       ROBONANA_BATCH_SIZE="${train_batch_size}" \
+      ROBONANA_GRADIENT_ACCUMULATION_STEPS="${train_accumulation}" \
       ROBONANA_NUM_WORKERS="${ROBONANA_NUM_WORKERS:-4}" \
       ROBONANA_MAX_STEPS="${critic_steps}" \
       ROBONANA_REPLAY_ROOT="${replay_root}" \

@@ -51,6 +51,17 @@ equivalent to computing the prefix in FP32. Thus this change does **not** claim
 to eliminate that particular cross-precision computation. World generation
 does reuse the sampling C because its execution precision is the same.
 
+Specifically, the saved `hanging_mug_critic_only_5000_to_10000_20260907`
+experiment has `train.mixed_precision="no"`. The trainer nevertheless explicitly
+wraps **the whole no-grad imagination function** in BF16 autocast, using the
+historically named `ema_forward_autocast_dtype`; this includes action/Q
+selection, world generation, and both next-state Values, not just EMA Value.
+The later differentiable Q/V forward is outside that context. FP32 weight/EMA
+storage therefore does not mean every operation runs in FP32. This predates
+the cache change. The shared base config separately defaults to `"bf16"`, so
+always inspect a run's saved config rather than inferring its precision from
+the current base default. Batch-size changes do not change either policy.
+
 Existing BF16 reduced-precision reduction safety settings remain unchanged.
 No EMA FLUX, new weights, optimizer state or checkpoint migration is introduced.
 

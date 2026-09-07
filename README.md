@@ -119,6 +119,11 @@ It imports the common FACT/FLUX dimensions and applies the MAC overlay:
 | new trajectories per collection round | 100 total, successes and failures |
 | stage 1 world/policy budget per round | 20,000 optimizer steps |
 | stage 2 Value/Q budget per round | 10,000 optimizer steps |
+| training GPUs / batch per GPU / accumulation | 6,7 / 8 / 1 (effective batch 16) |
+
+These are defaults for new runs, not overrides of saved continuation configs.
+The current critic-only continuation retains FP32 gradient training with BF16
+no-grad imagination; see [the precision boundary](docs/WORLD_PREFIX_CACHE.md#sharing-with-critics-and-precision).
 
 The standard round is: collect 100 new trajectories with the current Q-selected
 policy, prepare/cache them and mix with existing replay, train stage 1 for 20k
