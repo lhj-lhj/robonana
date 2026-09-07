@@ -67,7 +67,18 @@ training overrides/checkpoint-load requests fail early. EMA storage/update and
 return/loss math remain FP32. Frozen external encoders (Qwen/VAE), their cache
 generation and existing cache storage must remain unchanged per user request.
 Their features are cast to FP32 at the RoboNana model input boundary.
-The active critic-only process was not restarted and retains its loaded code.
+Running processes retain their loaded code until explicitly restarted.
+
+Critic-only continuation uses the maintained
+`robonana.configs.critic_continuation.config` entry point, not `_tmp` adapters.
+Set `ROBONANA_RESUME_CHECKPOINT` to the complete source checkpoint directory,
+`ROBONANA_RESUME_CONFIG` to its run's config JSON, `ROBONANA_PROJECT_DIR` to a
+new output directory, and `ROBONANA_MAX_STEPS=10000` for a 5k-to-10k extension.
+This restores Q/V, Value EMA, Adam and progress via FACT, and rebases the restored
+zero LR onto the extended cosine schedule without advancing its step. Replay,
+warmup and optimizer hyperparameters are preserved; execution uses FP32 and
+batch 8 x 2 GPUs x accumulation 1. It is not bitwise equivalent to the historical
+BF16-rollout / batch-4-accumulation-2 execution. Keep the source run untouched.
 
 The environment path samples 32 action candidates, computes the L/S/I prefix
 once, scores each candidate with Q, and executes `argmax Q`. One selected

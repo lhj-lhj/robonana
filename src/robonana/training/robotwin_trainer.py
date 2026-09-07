@@ -34,6 +34,7 @@ from robonana.sampling import (
     sample_world_flow,
 )
 from robonana.training.checkpointing import full_deepspeed_checkpoint
+from robonana.training.continuation import rebase_loaded_scheduler
 from robonana.training.losses import (
     deterministic_return_loss,
     joint_flow_loss,
@@ -448,6 +449,30 @@ class RoboNanaTrainer(Trainer):
                     self.target_value_ema.update_count,
                 )
             return
+
+    def resume(self, checkpoint=None) -> None:
+        # Prefer this run's latest checkpoint on subsequent restarts. Only the
+        # first launch falls back to the explicitly selected source checkpoint.
+        checkpoint = checkpoint or self.get_checkpoint() or self.kwargs.get("resume_from")
+        super().resume(checkpoint)
+        if not self.kwargs.get("rebase_scheduler_on_resume", False):
+            return
+        if checkpoint is None or not 0 < self.cur_step < self.max_steps:
+            raise ValueError("critic continuation requires a restored step below max_steps")
+        if self.target_value_ema is None or self.target_value_ema.update_count != self.cur_step:
+            raise ValueError("critic continuation requires matching restored Value EMA progress")
+        trainable = [name.removeprefix("module.") for name, param in self.models[0].named_parameters()
+                     if param.requires_grad]
+        if not trainable or not all(name.startswith(("q_expert.", "value_expert.")) for name in trainable):
+            raise ValueError("critic continuation must keep FLUX frozen")
+        rates = [rebase_loaded_scheduler(scheduler, self.cur_step) for scheduler in self.schedulers]
+        if self.is_main_process:
+            self.logger.info(
+                "CRITIC CONTINUATION VERIFIED: source=%s step=%d max_steps=%d "
+                "Value_EMA_updates=%d LR=%s trainable_tensors=%d precision=FP32",
+                checkpoint, self.cur_step, self.max_steps,
+                self.target_value_ema.update_count, rates, len(trainable),
+            )
 
     def _sample_timestep(self, batch_size: int) -> Tensor:
         sigma = torch.rand(batch_size, device=self.device, dtype=torch.float32)
