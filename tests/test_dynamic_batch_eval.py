@@ -100,7 +100,8 @@ def test_fact_tcp_server_batches_two_persistent_clients():
     assert policy.batch_sizes == [2]
 
 
-def test_batched_policy_returns_one_action_chunk_per_observation():
+@pytest.mark.parametrize("diagnostics", [False, True])
+def test_batched_policy_returns_one_action_chunk_per_observation(monkeypatch, diagnostics):
     policy = object.__new__(BatchedRoboNanaRobotWinPolicy)
     policy.inference_mode = InferenceMode.ACTION_Q_REJECTION
     policy.model_device = torch.device("cpu")
@@ -109,6 +110,8 @@ def test_batched_policy_returns_one_action_chunk_per_observation():
     policy.state_dim = 2
     policy.action_dim = 2
     policy.action_chunk = 3
+    policy.q_return_scale = 1000.
+    policy.rejection_candidate_count = 2
     policy.delta_mask = torch.tensor([False, False])
     zeros = torch.zeros(2)
     ones = torch.ones(2)
@@ -132,15 +135,36 @@ def test_batched_policy_returns_one_action_chunk_per_observation():
         torch.zeros(len(observations), 2, 4),
         torch.ones(len(observations), 2, dtype=torch.bool),
     )
-    policy._sample_action_batch = lambda **kwargs: torch.zeros(2, 3, 2)
+    actions = torch.stack([torch.zeros(3, 2), torch.full((3, 2), .5)])
+    def sample(**kwargs):
+        from robonana.sampling import QRejectionSample
+        policy._last_batch_rejection = QRejectionSample(
+            action=actions, candidates=actions[:, None].expand(-1, 2, -1, -1),
+            candidate_q=torch.tensor([[-.3, -.2], [-.1, -.4]]),
+            best_index=torch.tensor([1, 0]),
+        )
+        return actions
+    policy._sample_action_batch = sample
+    world_inputs = []
+    def world(_policy, **kwargs):
+        world_inputs.append(kwargs)
+        return {"success_probability": .75}
+    monkeypatch.setattr("robonana.inference.selected_world.predict_selected_world", world)
 
     responses = policy.inference_batch(
         [
             {"observation.state": torch.zeros(2), "instruction": "task a"},
-            {"observation.state": torch.ones(2), "instruction": "task b"},
+            {"observation.state": torch.ones(2), "instruction": "task b",
+             "diagnose_selected_world": diagnostics},
         ]
     )
 
     assert len(responses) == 2
     assert all(response["action"].shape == (3, 2) for response in responses)
     assert responses[0]["_policy_timing_ms"]["batch_size"] == 2
+    assert "selected_world" not in responses[0]
+    assert len(world_inputs) == int(diagnostics)
+    if diagnostics:
+        assert torch.equal(world_inputs[0]["clean_action"], actions[1:2])
+        assert torch.equal(world_inputs[0]["state"], torch.ones(1, 1, 2))
+        assert responses[1]["selected_world"]["success_probability"] == .75

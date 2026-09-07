@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import random
 from pathlib import Path
@@ -119,7 +120,20 @@ def _install_chunk_return_hook(model) -> None:
     original_inference = model.client.inference
 
     def inference_with_chunk_return(request):
+        world_root = os.environ.get("ROBONANA_SELECTED_WORLD_ROOT", "").strip()
+        if world_root:
+            request["diagnose_selected_world"] = True
         response = original_inference(request)
+        if world_root:
+            if not isinstance(response, dict) or "selected_world" not in response:
+                raise RuntimeError("selected-world diagnostics requested but server returned no world")
+            from robonana.inference.world_artifacts import save_selected_world
+
+            save_selected_world(
+                world_root, task=model._robonana_eval_task,
+                seed=model._robonana_eval_seed, step=model._robonana_eval_step,
+                request=request, response=response,
+            )
         if isinstance(response, dict) and response.get("candidate_q") is not None:
             candidate_q = response["candidate_q"]
             if hasattr(candidate_q, "detach"):
@@ -136,6 +150,9 @@ def _install_chunk_return_hook(model) -> None:
                 "q_margin": float(response["q_margin"]),
                 "candidate_count": int(response["candidate_count"]),
             }
+            model._robonana_policy_selection_history.append(
+                dict(model._robonana_policy_selection)
+            )
         if isinstance(response, dict) and response.get("chunk_q") is not None:
             model._robonana_chunk_reward = _response_scalar(response["chunk_reward"])
             model._robonana_chunk_q = _response_scalar(response["chunk_q"])
@@ -155,7 +172,53 @@ def _install_chunk_return_hook(model) -> None:
     model._robonana_chunk_index = -1
     model._robonana_pending_stage2_image = None
     model._robonana_policy_selection = None
+    model._robonana_policy_selection_history = []
+    model._robonana_q_diagnostics_written = False
     model._robonana_chunk_return_hook = True
+
+
+def _write_q_diagnostics(task_env, model) -> None:
+    """Persist selected-candidate Q values for success/failure analysis."""
+    output = os.environ.get("ROBONANA_Q_DIAGNOSTICS_PATH", "").strip()
+    world_root = os.environ.get("ROBONANA_SELECTED_WORLD_ROOT", "").strip()
+    if not output and world_root:
+        output = str(Path(world_root) / "q_diagnostics.jsonl")
+    if not output or getattr(model, "_robonana_q_diagnostics_written", False):
+        return
+    history = list(getattr(model, "_robonana_policy_selection_history", ()))
+    if not history:
+        return
+    selected = np.asarray([row["selected_q"] for row in history], dtype=np.float32)
+    margins = np.asarray([row["q_margin"] for row in history], dtype=np.float32)
+    payload = {
+        "task": str(getattr(task_env, "task_name", "unknown_task")),
+        "seed": _episode_seed(task_env),
+        "success": int(bool(getattr(task_env, "eval_success", False))),
+        "chunks": int(len(history)),
+        "selected_q": selected.tolist(),
+        "selected_q_first": float(selected[0]),
+        "selected_q_last": float(selected[-1]),
+        "selected_q_mean": float(selected.mean()),
+        "q_margin_mean": float(margins.mean()),
+    }
+    path = Path(output).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    if world_root:
+        directory = Path(world_root) / payload["task"] / f"seed_{payload['seed']}"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "outcome.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        final_observation = getattr(task_env, "now_obs", None)
+        if final_observation is not None:
+            if final_observation.get("_fact_light_obs", False):
+                final_observation = task_env._fact_force_full_obs()
+            from PIL import Image
+
+            for camera in CAMERAS:
+                frame = np.asarray(final_observation["observation"][camera]["rgb"])
+                Image.fromarray(frame.astype(np.uint8)).save(directory / f"actual_final_{camera}.png")
+    model._robonana_q_diagnostics_written = True
 
 
 def _save_pending_stage2_image(task_env, model) -> Path | None:
@@ -341,6 +404,8 @@ def reset_model(model) -> None:
     model._robonana_chunk_index = -1
     model._robonana_pending_stage2_image = None
     model._robonana_policy_selection = None
+    model._robonana_policy_selection_history = []
+    model._robonana_q_diagnostics_written = False
 
 
 def _episode_seed(task_env) -> int | None:
@@ -355,6 +420,9 @@ def eval(TASK_ENV, model, observation):  # noqa: A001,N803
     _install_video_return_overlay(TASK_ENV, model)
     step = int(getattr(TASK_ENV, "take_action_cnt", 0))
     episode_seed = _episode_seed(TASK_ENV)
+    model._robonana_eval_task = str(getattr(TASK_ENV, "task_name", "unknown_task"))
+    model._robonana_eval_seed = episode_seed
+    model._robonana_eval_step = step
     if episode_seed is not None and model.needs_new_plan(step):
         model._robonana_sampling_seed = sampling_seed_for_step(
             episode_seed,
@@ -365,6 +433,12 @@ def eval(TASK_ENV, model, observation):  # noqa: A001,N803
     if writer is None:
         result = _fact_eval(TASK_ENV, model, observation)
         _save_pending_stage2_image(TASK_ENV, model)
+        if (
+            bool(getattr(TASK_ENV, "eval_success", False))
+            or int(getattr(TASK_ENV, "take_action_cnt", 0))
+            >= int(getattr(TASK_ENV, "step_lim", 1 << 60))
+        ):
+            _write_q_diagnostics(TASK_ENV, model)
         return result
     if observation.get("_fact_light_obs", False):
         observation = TASK_ENV._fact_force_full_obs()
@@ -405,6 +479,8 @@ def eval(TASK_ENV, model, observation):  # noqa: A001,N803
             for camera in CAMERAS
         }
         writer.append_final_observation(images=final_images, state=final_state)
+    if terminal:
+        _write_q_diagnostics(TASK_ENV, model)
     return result
 
 __all__ = ["eval", "get_model", "reset_model"]

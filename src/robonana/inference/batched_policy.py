@@ -278,4 +278,22 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
                     ),
                     candidate_count=self.rejection_candidate_count,
                 )
+        for index, (observation, response) in enumerate(zip(observations, responses, strict=True)):
+            if not observation.get("diagnose_selected_world", False):
+                continue
+            if rejection is None:
+                raise ValueError("selected-world diagnostics require Q argmax selection")
+            from robonana.inference.selected_world import predict_selected_world
+
+            start = time.perf_counter()
+            response["selected_world"] = predict_selected_world(
+                self, context=context[index:index + 1],
+                context_mask=context_mask[index:index + 1],
+                current=current[index:index + 1], state=normalized_state[index:index + 1],
+                clean_action=sampled_action[index:index + 1],
+                sampling_seed=sampling_seeds[index],
+            )
+            self._sync(self.model_device)
+            response["_policy_timing_ms"]["selected_world_ms"] = (time.perf_counter() - start) * 1000
+            response["_policy_timing_ms"]["total_policy_ms"] = (time.perf_counter() - total_start) * 1000
         return responses
