@@ -17,6 +17,22 @@ Never delete or overwrite server datasets, replay pools, experiment outputs,
 logs, or checkpoints. The archived 120k checkpoint remains available as a
 user artifact but is not loaded by runtime code.
 
+### Source synchronization (2026-09-07)
+
+GitHub `main` is the single source of truth for maintained code. Validate and
+commit locally, push to `origin/main`, then update 190 with `git pull --ff-only`.
+Verify `git rev-parse HEAD` matches on both machines and GitHub before launching
+a new experiment. Do not deploy source with patch files, SCP overlays, or a
+parallel validation checkout. The tracked SAPIEN dependency patch is an upstream
+dependency fix, not a source-deployment mechanism.
+
+If 190 has uncommitted source changes, inspect and preserve them first; do not
+force-reset or overwrite them. Integrate any needed changes into GitHub before
+updating. Runtime directories (`_tmp/`, `experiments/`, `eval/`, checkpoints,
+datasets, outputs and credentials) are not synchronized through Git. Existing
+processes retain loaded code; a checkout update is not a process restart or a
+guarantee that an already running experiment uses the new commit.
+
 ## Model and optimization contract
 
 The single FLUX sequence is

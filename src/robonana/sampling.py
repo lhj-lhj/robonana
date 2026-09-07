@@ -677,7 +677,12 @@ def sample_q_rejection(
     candidate_batch_size: int | None = None,
     return_condition_cache: bool = False,
 ) -> QRejectionSample:
-    """Sample independent BC chunks and return deterministic-Q argmax."""
+    """Sample independent BC chunks and select the highest-Q candidate.
+
+    This is the deterministic rejection rule used by MAC.  Candidate actions
+    are generated with the shared FLUX prefix and Q is evaluated only after
+    the full candidate set has been denoised.
+    """
 
     candidate_count = int(candidate_count)
     if candidate_count <= 0:
@@ -693,8 +698,11 @@ def sample_q_rejection(
     if tuple(action_noise.shape) != expected:
         raise ValueError(f"action_noise must have shape {expected}")
 
-    group_size = int(candidate_batch_size if candidate_batch_size is not None else
-                     os.environ.get("ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE", "8"))
+    group_size = int(
+        candidate_batch_size
+        if candidate_batch_size is not None
+        else os.environ.get("ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE", "8")
+    )
     if group_size <= 0:
         raise ValueError("candidate_batch_size must be positive")
     cache = prefill_mac_condition(
@@ -728,6 +736,7 @@ def sample_q_rejection(
         candidates=candidates,
         candidate_q=candidate_q,
         best_index=best_index,
+        condition_cache=cache if return_condition_cache else None,
     )
 
 
@@ -736,7 +745,6 @@ def generate_mac_imaginary_rollout_h1(
     *,
     online_model,
     target_value_expert,
-        condition_cache=cache if return_condition_cache else None,
     context: Tensor,
     current_latents: Tensor,
     state: Tensor,
@@ -766,6 +774,7 @@ def generate_mac_imaginary_rollout_h1(
         state=state,
         context_mask=context_mask,
         candidate_count=candidate_count,
+        return_condition_cache=True,
         action_noise=action_noise,
         schedule=schedule,
         grid_height=grid_height,
@@ -774,11 +783,11 @@ def generate_mac_imaginary_rollout_h1(
     world = sample_mac_world(
         model=online_model,
         context=context,
-        return_condition_cache=True,
         current_latents=current_latents,
         state=state,
         context_mask=context_mask,
         clean_action=rejection.action,
+        condition_cache=rejection.condition_cache,
         future_noise=future_noise,
         future_state_noise=future_state_noise,
         schedule=schedule,
@@ -787,7 +796,6 @@ def generate_mac_imaginary_rollout_h1(
     )
     model_spec = getattr(online_model, "module", online_model)
     next_cache = prefill_mac_condition(
-        condition_cache=rejection.condition_cache,
         model=model_spec, context=context, current_latents=world.future,
         state=world.future_state, context_mask=context_mask,
         grid_height=grid_height, grid_width=grid_width,
@@ -858,5 +866,5 @@ def generate_mac_imaginary_rollout_h1(
         online_next_value=online_next_value.detach(),
         value_target_return=value_target.detach(),
         q_target_return=q_target.detach(),
-    )
         condition_cache=rejection.condition_cache,
+    )

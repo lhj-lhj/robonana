@@ -45,7 +45,7 @@ def main() -> int:
     parser.add_argument("--num-inference-steps", type=int, default=20)
     parser.add_argument(
         "--inference-mode",
-        choices=(InferenceMode.ACTION_Q_REJECTION.value,),
+        choices=tuple(mode.value for mode in InferenceMode),
         default=InferenceMode.ACTION_Q_REJECTION.value,
     )
     parser.add_argument("--rejection-candidate-count", type=int, default=32)

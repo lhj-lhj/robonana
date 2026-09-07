@@ -7,10 +7,41 @@ import json
 import os
 import runpy
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
 from robonana.sim import configure_sapien_runtime
+
+
+def _install_exception_trace() -> None:
+    """Expose exceptions swallowed by RoboTwin's legacy ``eval_policy``.
+
+    RoboTwin intentionally retries unstable seeds, but its broad exception
+    handler only prints ``error occurs !``.  During a debug run this trace hook
+    records the original exception without patching the vendored RoboTwin
+    checkout.  It is opt-in because Python tracing has a measurable overhead.
+    """
+    if os.environ.get("ROBONANA_EVAL_DEBUG", "0") != "1":
+        return
+
+    def trace(frame: Any, event: str, arg: Any):
+        if event == "exception":
+            filename = str(frame.f_code.co_filename)
+            if (
+                (filename.endswith("/eval_policy.py") or filename.endswith("\\eval_policy.py"))
+                and frame.f_code.co_name != "parse_override_pairs"
+            ):
+                exc_type, exc, tb = arg
+                print(
+                    "[RoboNana eval exception]\n"
+                    + "".join(traceback.format_exception(exc_type, exc, tb)),
+                    file=sys.stderr,
+                    flush=True,
+                )
+        return trace
+
+    sys.settrace(trace)
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -127,6 +158,7 @@ def main() -> int:
     if len(sys.argv) < 2:
         raise SystemExit("usage: robotwin_eval_bootstrap.py ENTRYPOINT [ARGS...]")
     configure_sapien_runtime()
+    _install_exception_trace()
     entrypoint = Path(sys.argv[1]).resolve()
     if not entrypoint.is_file():
         raise FileNotFoundError(f"RoboTwin entrypoint does not exist: {entrypoint}")

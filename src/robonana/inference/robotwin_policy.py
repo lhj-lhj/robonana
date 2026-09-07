@@ -21,6 +21,7 @@ from robonana.sampling import (
     QRejectionSample,
     WorldFlowSample,
     flow_euler_schedule,
+    sample_flux2_action,
     sample_flux2_world,
     sample_q_rejection,
 )
@@ -41,8 +42,9 @@ from world_action_model.pipeline.utils import (
 
 
 class InferenceMode(str, Enum):
-    """The single maintained live graph: action flow plus Q rejection."""
+    """Live action paths used for the Q-vs-policy evaluation ablation."""
 
+    ACTION_ONLY = "action_only"
     ACTION_Q_REJECTION = "action_q_rejection"
 
 
@@ -259,13 +261,8 @@ class RoboNanaRobotWinPolicy:
         if self.action_chunk != 48 or self.horizon != 48 or self.max_horizon != 48:
             raise ValueError("mac_mot_v2 live inference requires action_chunk=horizon=max_horizon=48")
         self.model.eval().requires_grad_(False)
-        if (
-            self.inference_mode is InferenceMode.ACTION_Q_REJECTION
-            and getattr(self.model, "architecture_version", None) != "mac_mot_v2"
-        ):
-            raise ValueError("action_q_rejection requires a mac_mot_v2 checkpoint")
-        if self.inference_mode is not InferenceMode.ACTION_Q_REJECTION:
-            raise ValueError("the maintained live graph is action_q_rejection")
+        if getattr(self.model, "architecture_version", None) != "mac_mot_v2":
+            raise ValueError("live inference requires a mac_mot_v2 checkpoint")
         self.vae = AutoencoderKLFlux2.from_pretrained(
             self.flux_checkpoint_dir,
             subfolder="vae",
@@ -383,7 +380,22 @@ class RoboNanaRobotWinPolicy:
                 grid_width=self.grid_width,
             )
             return self._last_rejection.action
-        raise RuntimeError("unreachable: the maintained graph always uses Q rejection")
+        if self.inference_mode is InferenceMode.ACTION_ONLY:
+            noise = seeded_randn_like(action_template, sampling_seed)
+            self._last_rejection = None
+            return sample_flux2_action(
+                model=self.model,
+                context=context,
+                current_latents=current,
+                state=state,
+                context_mask=context_mask,
+                action_noise=noise,
+                chunk_horizon=self.action_chunk,
+                schedule=self.schedule,
+                grid_height=self.grid_height,
+                grid_width=self.grid_width,
+            )
+        raise RuntimeError(f"unsupported inference mode: {self.inference_mode}")
 
     @torch.inference_mode()
     def _sample_stage2_chunk(
@@ -825,6 +837,7 @@ class RoboNanaRobotWinPolicy:
         response = {
             "action": action.cpu(),
             "_inference_mode": self.inference_mode.value,
+            "_q_selection": "argmax" if self.inference_mode is InferenceMode.ACTION_Q_REJECTION else None,
             "_policy_timing_ms": timing,
             "_sampling_seed": observation.get("sampling_seed"),
         }

@@ -10,7 +10,7 @@ checkpoint=${ROBONANA_TRAINED_CHECKPOINT:?set ROBONANA_TRAINED_CHECKPOINT to dif
 flux_checkpoint=${ROBONANA_FLUX_CHECKPOINT_DIR:-${repo_root}/checkpoints/FLUX.2-klein-base-4B}
 stats_path=${ROBONANA_STATS_PATH:-${dataset_root}/robonana_norm_stats.json}
 model_python=${ROBONANA_MODEL_PYTHON:-/data3/hongjia/conda/envs/robonana/bin/python}
-robotwin_env=${ROBOTWIN_CONDA_ENV:-/data3/hongjia/conda/envs/robotwin2}
+robotwin_env=${ROBOTWIN_CONDA_ENV:-/data3/hongjia/venvs/robotwin-sapien303}
 robotwin_python=${ROBONANA_ROBOTWIN_PYTHON:-${robotwin_env}/bin/python}
 fact_conda_env=${FACT_CONDA_ENV:-$(dirname "$(dirname "${model_python}")")}
 server_gpu_csv=${ROBONANA_EVAL_SERVER_GPUS:-0,1,2,3}
@@ -24,10 +24,11 @@ episode_timeout_seconds=${ROBONANA_EPISODE_TIMEOUT_SECONDS:-3600}
 episode_gpu_attempts=${ROBONANA_EPISODE_GPU_ATTEMPTS:-2}
 episode_cpu_fallback=${ROBONANA_EPISODE_CPU_FALLBACK:-0}
 jobs_per_gpu=${ROBONANA_EVAL_JOBS_PER_GPU:-1}
-batch_wait_ms=${ROBONANA_EVAL_BATCH_WAIT_MS:-100}
+batch_wait_ms=${ROBONANA_EVAL_BATCH_WAIT_MS:-6}
 static_camera_csv=${ROBONANA_ROBOTWIN_STATIC_CAMERAS:-head_camera}
-video_log=${EVAL_VIDEO_LOG:-1}
+video_log=${EVAL_VIDEO_LOG:-0}
 seed_group=${ROBONANA_EVAL_SEED_GROUP:-0}
+candidate_batch_size=${ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE:-16}
 client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
 isolated_task_runner=${repo_root}/scripts/eval_robotwin_task_isolated.py
 
@@ -98,12 +99,18 @@ fi
 if ! [[ ${task_timeout_seconds} =~ ^[1-9][0-9]*$ && ${task_max_attempts} =~ ^[1-9][0-9]*$ \
   && ${episode_timeout_seconds} =~ ^[1-9][0-9]*$ \
   && ${episode_gpu_attempts} =~ ^[1-9][0-9]*$ \
-  && ${jobs_per_gpu} =~ ^[1-9][0-9]*$ ]]; then
+  && ${jobs_per_gpu} =~ ^[1-9][0-9]*$ \
+  && ${candidate_batch_size} =~ ^[1-9][0-9]*$ ]]; then
   echo "Task/episode timeouts, retry counts, and jobs per GPU must be positive integers" >&2
   exit 2
 fi
 if [[ ${episode_cpu_fallback} != 0 && ${episode_cpu_fallback} != 1 ]]; then
   echo "ROBONANA_EPISODE_CPU_FALLBACK must be 0 or 1" >&2
+  exit 2
+fi
+inference_mode=${ROBONANA_INFERENCE_MODE:-action_q_rejection}
+if [[ ${inference_mode} != action_q_rejection && ${inference_mode} != action_only ]]; then
+  echo "ROBONANA_INFERENCE_MODE must be action_q_rejection or action_only" >&2
   exit 2
 fi
 if [[ ${video_log} != 0 && ${video_log} != 1 ]]; then
@@ -251,9 +258,9 @@ run_worker() {
     --vae-device cuda:0
     --text-encoder-device cuda:0
     --action-chunk 48
-    --horizon 24
+    --horizon 48
     --num-inference-steps 20
-    --inference-mode "${ROBONANA_INFERENCE_MODE:-action}"
+    --inference-mode "${inference_mode}"
     --rejection-candidate-count "${ROBONANA_REJECTION_CANDIDATE_COUNT:-32}"
     --q-return-scale "${ROBONANA_Q_RETURN_SCALE:-1000}"
     --port "${port}"
@@ -283,6 +290,7 @@ run_worker() {
 
   env \
     CUDA_VISIBLE_DEVICES="${server_gpu}" \
+    ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE="${candidate_batch_size}" \
     PYTHONPATH="${repo_root}/src:${repo_root}/third_party/FACT:${repo_root}/third_party/flux2_official/src:${repo_root}/third_party/flux2/src" \
     "${server_args[@]}" \
     > "${worker_dir}/server.log" 2>&1 &
@@ -306,9 +314,17 @@ run_worker() {
     "SERVER_TIMEOUT_MS=600000"
     "SERVER_WAIT_SECONDS=600"
     "EVAL_VIDEO_LOG=${video_log}"
+    # Success-rate evaluation does not need video/value overlays.  Keep the
+    # expensive RoboTwin rendering knobs opt-in so a normal eval only performs
+    # the camera read required by the policy.
+    "BEST_OF_N=${ROBONANA_BEST_OF_N:-1}"
+    "ENABLE_SAMPLE=${ROBONANA_ENABLE_SAMPLE:-0}"
+    "ENABLE_VALUE_VIS=${ROBONANA_ENABLE_VALUE_VIS:-0}"
+    "TRACE_VALUE_ONLY=${ROBONANA_TRACE_VALUE_ONLY:-1}"
+    "ROBONANA_Q_DIAGNOSTICS_PATH=${ROBONANA_Q_DIAGNOSTICS_PATH:-${run_dir}/q_diagnostics.jsonl}"
     "PYTHONUNBUFFERED=1"
-    "LOW_FREQUENCY_RGB=0"
-    "SKIP_ACTION_RENDER_SYNC=0"
+    "LOW_FREQUENCY_RGB=${ROBONANA_LOW_FREQUENCY_RGB:-1}"
+    "SKIP_ACTION_RENDER_SYNC=${ROBONANA_SKIP_ACTION_RENDER_SYNC:-1}"
     "ROBONANA_ROBOTWIN_STATIC_CAMERAS=${static_camera_csv}"
     # cuda:0 is this rank's sole logical device after CUDA_VISIBLE_DEVICES isolation.
     "ROBONANA_SAPIEN_RENDER_DEVICE=cuda:0"
@@ -471,7 +487,9 @@ mp4_count=$(wc -l < "${run_dir}/mp4_manifest.txt")
 expected_episodes=$((expected_task_count * test_num))
 expected_mp4=$((video_log * expected_episodes))
 {
-  echo "mode=action_only renderer=sapien_oidn episode_isolation=1"
+  echo "inference_mode=${inference_mode}"
+  echo "rejection_candidates=${ROBONANA_REJECTION_CANDIDATE_COUNT:-32} candidate_batch_size=${candidate_batch_size}"
+  echo "renderer=sapien_oidn episode_isolation=1"
   echo "episode_timeout_seconds=${episode_timeout_seconds} gpu_attempts=${episode_gpu_attempts} cpu_fallback=${episode_cpu_fallback}"
   echo "jobs_per_gpu=${jobs_per_gpu} dynamic_batch=$((jobs_per_gpu > 1)) batch_wait_ms=${batch_wait_ms}"
   echo "result_tasks=${result_tasks}/${expected_task_count}"

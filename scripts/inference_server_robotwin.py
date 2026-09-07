@@ -56,7 +56,7 @@ def main() -> int:
     parser.add_argument("--q-return-scale", type=float, default=1000.0)
     parser.add_argument(
         "--inference-mode",
-        choices=(InferenceMode.ACTION_Q_REJECTION.value,),
+        choices=tuple(mode.value for mode in InferenceMode),
         default=InferenceMode.ACTION_Q_REJECTION.value,
         help="Sample 48-step action candidates and select argmax Q.",
     )

@@ -16,7 +16,7 @@ from robonana.inference.robotwin_policy import (
     postprocess_action,
     seeded_randn_like,
 )
-from robonana.sampling import QRejectionSample, sample_q_rejection
+from robonana.sampling import QRejectionSample, sample_flux2_action, sample_q_rejection
 from world_action_model.image_layouts import (
     ROBOTWIN_VIEW_KEYS,
     build_robotwin_ref_tensor,
@@ -35,8 +35,11 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
     supports_true_batch = True
 
     def _validate_action_only_batch(self) -> None:
-        if self.inference_mode is not InferenceMode.ACTION_Q_REJECTION:
-            raise ValueError("batched RoboTwin eval requires action_q_rejection")
+        if self.inference_mode not in {
+            InferenceMode.ACTION_ONLY,
+            InferenceMode.ACTION_Q_REJECTION,
+        }:
+            raise ValueError(f"unsupported batched inference mode: {self.inference_mode}")
 
     def _batched_context(
         self, observations: Sequence[dict[str, Any]]
@@ -170,7 +173,30 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
                 grid_width=self.grid_width,
             )
             return self._last_batch_rejection.action
-        raise RuntimeError("unreachable: the maintained graph always uses Q rejection")
+        if self.inference_mode is InferenceMode.ACTION_ONLY:
+            self._last_batch_rejection = None
+            noise = torch.stack(
+                [
+                    seeded_randn_like(
+                        clean_gt_action[index : index + 1], seed
+                    )[0]
+                    for index, seed in enumerate(sampling_seeds)
+                ],
+                dim=0,
+            )
+            return sample_flux2_action(
+                model=self.model,
+                context=context,
+                current_latents=current,
+                state=state,
+                context_mask=context_mask,
+                action_noise=noise,
+                chunk_horizon=self.action_chunk,
+                schedule=self.schedule,
+                grid_height=self.grid_height,
+                grid_width=self.grid_width,
+            )
+        raise RuntimeError(f"unsupported inference mode: {self.inference_mode}")
 
     @torch.inference_mode()
     def inference_batch(
@@ -252,6 +278,7 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
             {
                 "action": action,
                 "_inference_mode": self.inference_mode.value,
+                "_q_selection": "argmax" if self.inference_mode is InferenceMode.ACTION_Q_REJECTION else None,
                 "_policy_timing_ms": dict(shared_timing),
                 "_sampling_seed": sampling_seeds[index],
             }

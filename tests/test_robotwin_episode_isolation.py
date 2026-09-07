@@ -134,3 +134,11 @@ def test_ledger_requires_contiguous_episode_and_seed_chain(tmp_path: Path) -> No
     ledger.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     with pytest.raises(ValueError, match="start seed"):
         isolated.read_ledger(ledger, 2, 100_000)
+
+
+def test_swallowed_error_watchdog_reads_only_bounded_tail(tmp_path: Path) -> None:
+    isolated = load_script("robotwin_task_isolated_watchdog", "scripts/eval_robotwin_task_isolated.py")
+    log = tmp_path / "episode.log"
+    assert isolated.swallowed_error_count(log) == 0
+    log.write_bytes(b"error occurs !\n" + b"x" * (2 * 1024 * 1024) + b"\nerror occurs !\n" * 3)
+    assert isolated.swallowed_error_count(log) == 3

@@ -4,6 +4,19 @@ This repository maintains one RoboTwin training and inference path: a fixed acti
 
 The old `idx_h`/variable-horizon, 800M, full-FLUX-EMA, TD/MC, and 120k runtime-loading paths are removed. The original 120k checkpoint is an external archived artifact and is not deleted; it is no longer a valid runtime input. Every new run starts from the current 1,000-step MAC checkpoint unless `ROBONANA_MAC_PRETRAIN_CHECKPOINT` explicitly points to another complete `mac_mot_v2` checkpoint.
 
+## Source version and deployment
+
+Maintain one code version through [GitHub main](https://github.com/lhj-lhj/robonana).
+Commit and push validated source changes locally; on 190, use `git pull --ff-only`
+in `/data3/hongjia/robonana` and verify the same commit with `git rev-parse HEAD`.
+Do not deploy code using temporary patches or file-copy overlays. Inspect and
+preserve any uncommitted server changes before updating; never force-reset them.
+
+`_tmp/`, experiments, evaluation outputs, datasets, checkpoints and credentials
+remain local/server artifacts and are not uploaded. Updating the checkout does
+not restart running jobs or change code they have already loaded. See
+[maintainer handoff](docs/AGENT_HANDOFF.md) for operational boundaries.
+
 ## Current architecture
 
 The trainable model is `MacFlux2FACTModel`:
@@ -11,7 +24,7 @@ The trainable model is `MacFlux2FACTModel`:
 * Phase 1 (`world_policy`): FLUX actor/world parameters train. Successful windows train action BC; successful and failed windows train the world targets.
 * Phase 2 (`critic`): the complete FLUX backbone is frozen and only `value_expert` and `q_expert` train. Value has a float32 EMA target; Q has no EMA.
 * Both experts read the frozen FLUX per-layer K/V through the ImageWAM-style MoT adapter. Scalar queries and scalar heads are newly initialized; FLUX blocks/modulation are copied or scaled.
-* Live inference always samples an action chunk and performs Q rejection sampling (`M=32` by default). The L/S/I prefix is computed once and reused for every candidate.
+* Live inference defaults to Q rejection sampling (`M=32`). The L/S/I prefix is computed once and reused for every candidate. `action_only` disables Q selection for the policy-vs-Q evaluation ablation, using the same checkpoint.
 
 The maintained sequence is:
 
@@ -236,6 +249,30 @@ attend to C and itself; candidates cannot read one another. Candidate groups
 bound peak memory while preserving the full M-way result. The benchmark
 script compares cached and uncached M=1/8/32 execution.
 
+For RoboTwin success-rate evaluation, `scripts/eval_robotwin_all_tasks_parallel.sh`
+uses the fixed-48 action path. The RL ablation compares direct policy sampling
+with deterministic MAC Q rejection without changing the checkpoint:
+
+```bash
+# policy action only (no Q scoring)
+ROBONANA_INFERENCE_MODE=action_only .../eval_robotwin_all_tasks_parallel.sh demo_clean 10
+
+# deterministic Q rejection / argmax
+ROBONANA_INFERENCE_MODE=action_q_rejection \
+  .../eval_robotwin_all_tasks_parallel.sh demo_clean 10
+```
+
+The evaluator defaults to `EVAL_VIDEO_LOG=0`, `LOW_FREQUENCY_RGB=1`,
+`SKIP_ACTION_RENDER_SYNC=1`, `BEST_OF_N=1`, and `ENABLE_VALUE_VIS=0`; these
+remove rendering and duplicate policy work that is not part of a success-rate
+measurement. For visual debugging, enable `EVAL_VIDEO_LOG=1` and
+`ROBONANA_ENABLE_VALUE_VIS=1` as needed, and disable the rendering shortcuts with
+`ROBONANA_LOW_FREQUENCY_RGB=0` / `ROBONANA_SKIP_ACTION_RENDER_SYNC=0`.
+Each episode runs in an isolated RoboTwin process and
+the watchdog aborts a swallowed `error occurs !` retry loop after 32 repeats.
+Set `ROBONANA_Q_DIAGNOSTICS_PATH` to a JSONL path to record selected-Q values
+and success labels for each Q-mode episode.
+
 ## Replay collection and selected-policy BC
 
 `scripts/collect_prepare_robotwin_rollouts.sh` runs isolated RoboTwin
@@ -269,6 +306,14 @@ source manifest, probes fixed windows before and after training, and stops at
 `world_complete_review_required`; inspect metrics before starting critic. The
 completed hanging-mug 5,000-step pilot remains in its existing experiment
 directory and must not be overwritten.
+
+### W&B credentials on 190
+
+Online W&B authentication is kept outside the repository on the validation
+server. The credential is stored in `/home/hongjia/.netrc` with mode `600` and
+is read automatically by the server's W&B installation. Never put the API key
+in this repository, a config snapshot, a command line, or Git history. Verify
+the login on 190 with `wandb login --verify --cloud` without printing the key.
 
 Recommended round order:
 

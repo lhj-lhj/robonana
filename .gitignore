@@ -14,3 +14,9 @@ cache/
 outputs/
 wandb/
 logs/
+
+# Local/190 runtime artifacts are not source versions or deployment inputs.
+/_tmp/
+/experiments/
+/eval/
+/checkpoint_snapshots/

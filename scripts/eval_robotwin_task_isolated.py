@@ -117,6 +117,18 @@ def terminate_process_group(process: subprocess.Popen[Any], grace_seconds: float
     process.wait(timeout=10)
 
 
+def swallowed_error_count(path: Path) -> int:
+    """Count RoboTwin's opaque retry marker in the bounded log tail."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - 2 * 1024 * 1024))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return 0
+    return tail.count("error occurs !")
+
+
 def newest_result_dir(root: Path, started_at: float) -> Path | None:
     if not root.is_dir():
         return None
@@ -223,6 +235,7 @@ def run(args: argparse.Namespace) -> int:
             started_monotonic = time.monotonic()
             return_code: int | None = None
             timed_out = False
+            swallowed_errors = 0
             with log_path.open("w", encoding="utf-8", buffering=1) as log:
                 log.write(
                     f"mode={mode.name} start_seed={start_seed} "
@@ -236,10 +249,18 @@ def run(args: argparse.Namespace) -> int:
                     start_new_session=True,
                 )
                 try:
-                    return_code = process.wait(timeout=args.episode_timeout_seconds)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-                    terminate_process_group(process)
+                    deadline = time.monotonic() + args.episode_timeout_seconds
+                    while process.poll() is None:
+                        if time.monotonic() >= deadline:
+                            timed_out = True
+                            terminate_process_group(process)
+                            break
+                        if args.max_swallowed_errors > 0:
+                            swallowed_errors = swallowed_error_count(log_path)
+                            if swallowed_errors >= args.max_swallowed_errors:
+                                terminate_process_group(process, grace_seconds=5.0)
+                                break
+                        time.sleep(1.0)
                     return_code = process.returncode
                 except StopRequested:
                     terminate_process_group(process)
@@ -250,6 +271,11 @@ def run(args: argparse.Namespace) -> int:
             metadata: dict[str, int] | None = None
             if timed_out:
                 error = f"episode exceeded {args.episode_timeout_seconds}s"
+            elif swallowed_errors >= args.max_swallowed_errors > 0:
+                error = (
+                    "RoboTwin swallowed repeated exceptions ("
+                    f"{swallowed_errors} x 'error occurs !')"
+                )
             elif return_code != 0:
                 error = f"client exited with rc={return_code}"
             elif not metadata_path.is_file():
@@ -268,6 +294,7 @@ def run(args: argparse.Namespace) -> int:
                 "mode": mode.name,
                 "return_code": return_code,
                 "start_seed": start_seed,
+                "swallowed_errors": swallowed_errors,
                 "timed_out": timed_out,
             }
             append_jsonl(output_dir / "attempts.jsonl", attempt_record)
@@ -341,11 +368,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ckpt-setting", default="fact")
     parser.add_argument("--seed-group", type=int, default=0)
     parser.add_argument("--episode-timeout-seconds", type=int, default=3600)
+    parser.add_argument(
+        "--max-swallowed-errors",
+        type=int,
+        default=int(os.environ.get("ROBONANA_MAX_SWALLOWED_ERRORS", "32")),
+        help="Abort a hung RoboTwin retry loop after this many opaque errors; 0 disables.",
+    )
     parser.add_argument("--gpu-attempts", type=int, default=2)
     parser.add_argument("--cpu-fallback", action=argparse.BooleanOptionalAction, default=False)
     args = parser.parse_args()
-    if args.test_num < 1 or args.episode_timeout_seconds < 1 or args.gpu_attempts < 1:
-        parser.error("test-num, episode-timeout-seconds, and gpu-attempts must be positive")
+    if (
+        args.test_num < 1
+        or args.episode_timeout_seconds < 1
+        or args.gpu_attempts < 1
+        or args.max_swallowed_errors < 0
+    ):
+        parser.error("test-num, episode-timeout-seconds, and gpu-attempts must be valid")
     if not args.launch_client.is_file():
         parser.error(f"launch client does not exist: {args.launch_client}")
     return args
