@@ -46,7 +46,6 @@ def main() -> int:
     parser.add_argument("--model-device", default="cuda:0")
     parser.add_argument("--vae-device", default="cuda:1")
     parser.add_argument("--text-encoder-device", default="cpu")
-    parser.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
     parser.add_argument("--action-chunk", type=int, default=48)
     parser.add_argument("--horizon", type=int, default=48)
     parser.add_argument("--num-inference-steps", type=int, default=20)
@@ -74,11 +73,6 @@ def main() -> int:
         help="Number of generated horizon latents decoded by the VAE at once.",
     )
     args = parser.parse_args()
-    dtype = {
-        "bf16": torch.bfloat16,
-        "fp16": torch.float16,
-        "fp32": torch.float32,
-    }[args.dtype]
     policy = RoboNanaRobotWinPolicy(
         checkpoint=args.checkpoint,
         model_config=args.model_config,
@@ -87,7 +81,7 @@ def main() -> int:
         model_device=args.model_device,
         vae_device=args.vae_device,
         text_encoder_device=args.text_encoder_device,
-        dtype=dtype,
+        dtype=torch.float32,
         action_chunk=args.action_chunk,
         horizon=args.horizon,
         num_inference_steps=args.num_inference_steps,

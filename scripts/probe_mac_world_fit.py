@@ -69,7 +69,7 @@ def main():
                       action_dim=config["models"]["action_dim"],
                       state_dim=config["models"]["state_dim"],
                       expert_hidden_dim=config["models"]["expert_hidden_dim"],
-                      device=args.device, dtype=torch.bfloat16)
+                      device=args.device, dtype=torch.float32)
     model.eval().requires_grad_(False)
     rows = []
     for pool in config["dataloaders"]["train"]["data_or_config"]:
@@ -80,17 +80,16 @@ def main():
             # Reset noise by pool/index, independent of checkpoint load RNG use.
             torch.manual_seed(args.seed + int(item["pool_id"]) * 100000 + index)
             def batch(key):
-                return item[key].unsqueeze(0).to(args.device, dtype=torch.bfloat16)
+                return item[key].unsqueeze(0).to(args.device, dtype=torch.float32)
             current, state = batch("current_latents"), batch("state").unsqueeze(1)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                sampled = sample_mac_world(
-                    model=model, context=batch("context"), current_latents=current,
-                    state=state, context_mask=item["context_mask"].unsqueeze(0).to(args.device),
-                    clean_action=batch("behavior_action"), future_noise=torch.randn_like(current),
-                    future_state_noise=torch.randn_like(state),
-                    schedule=torch.linspace(1, 0, 21, device=args.device),
-                    grid_height=12, grid_width=24,
-                )
+            sampled = sample_mac_world(
+                model=model, context=batch("context"), current_latents=current,
+                state=state, context_mask=item["context_mask"].unsqueeze(0).to(args.device),
+                clean_action=batch("behavior_action"), future_noise=torch.randn_like(current),
+                future_state_noise=torch.randn_like(state),
+                schedule=torch.linspace(1, 0, 21, device=args.device),
+                grid_height=12, grid_width=24,
+            )
             metrics = world_metrics(sampled, item)
             if not all(np.isfinite(value) for value in metrics.values()):
                 raise FloatingPointError(f"nonfinite world probe: {pool['pool_name']} {index}")

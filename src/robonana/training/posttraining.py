@@ -10,20 +10,12 @@ import torch
 from torch import Tensor, nn
 
 
-def flux_compute_context(model: nn.Module):
-    """Use the loaded FLUX dtype for rollout, online critics and target Value.
-
-    FACT loads FLUX/online experts in Trainer.dtype. Target Value keeps FP32
-    storage for Polyak updates, but its forward uses this same compute policy.
-    Explicitly disabling autocast for FP32 also prevents an outer BF16 context
-    from silently changing the rollout precision and invalidating C reuse.
-    """
+def fp32_compute_context(model: nn.Module):
+    """Enforce FP32 weights and disable ambient mixed precision for MAC."""
     weight = model.img_in.weight
-    if weight.dtype not in (torch.float32, torch.bfloat16, torch.float16):
-        raise ValueError(f"unsupported FLUX compute dtype: {weight.dtype}")
-    return torch.autocast(device_type=weight.device.type,
-                          dtype=weight.dtype if weight.dtype != torch.float32 else torch.bfloat16,
-                          enabled=weight.dtype != torch.float32)
+    if weight.dtype != torch.float32:
+        raise ValueError("RoboNana requires FP32 model weights")
+    return torch.autocast(device_type=weight.device.type, enabled=False)
 
 
 @contextmanager

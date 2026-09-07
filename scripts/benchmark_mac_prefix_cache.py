@@ -92,14 +92,14 @@ def main():
     torch.manual_seed(42)
     model, _ = load_flux2_fact_trained_checkpoint(
         args.checkpoint, config_path=args.model_config, action_dim=14, state_dim=14,
-        expert_hidden_dim=1024, device="cuda:0", dtype=torch.bfloat16,
+        expert_hidden_dim=1024, device="cuda:0", dtype=torch.float32,
     )
     model.set_training_phase("critic")
     model.eval()
     inputs = dict(
-        context=torch.randn(1, 512, model.txt_in.in_features, device="cuda", dtype=torch.bfloat16),
-        current_latents=torch.randn(1, 288, model.in_channels, device="cuda", dtype=torch.bfloat16),
-        state=torch.randn(1, 1, 14, device="cuda", dtype=torch.bfloat16),
+        context=torch.randn(1, 512, model.txt_in.in_features, device="cuda", dtype=torch.float32),
+        current_latents=torch.randn(1, 288, model.in_channels, device="cuda", dtype=torch.float32),
+        state=torch.randn(1, 1, 14, device="cuda", dtype=torch.float32),
         context_mask=torch.ones(1, 512, device="cuda", dtype=torch.bool),
     )
     schedule = flow_euler_schedule(args.sampling_steps, flow_shift=1.0, device="cuda")
@@ -107,7 +107,7 @@ def main():
                           repeats=args.repeats, batch=1, language_tokens=512, image_tokens=288)), flush=True)
     with torch.inference_mode():
         for count in args.counts:
-            noise = torch.randn(1, count, 48, 14, device="cuda", dtype=torch.bfloat16)
+            noise = torch.randn(1, count, 48, 14, device="cuda", dtype=torch.float32)
             full, baseline = measure(lambda: full_rejection(model, inputs, noise, schedule), args.repeats)
             full_actions, full_q = full.candidates.cpu(), full.candidate_q.cpu()
             full_best = full.best_index.item()

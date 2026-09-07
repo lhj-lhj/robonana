@@ -178,7 +178,7 @@ class RoboNanaRobotWinPolicy:
         model_device: str | torch.device = "cuda:0",
         vae_device: str | torch.device = "cuda:1",
         text_encoder_device: str | torch.device = "cpu",
-        dtype: torch.dtype = torch.bfloat16,
+        dtype: torch.dtype = torch.float32,
         action_chunk: int = 48,
         action_dim: int | None = None,
         state_dim: int | None = None,
@@ -205,7 +205,9 @@ class RoboNanaRobotWinPolicy:
         self.model_device = torch.device(model_device)
         self.vae_device = torch.device(vae_device)
         self.text_encoder_device = torch.device(text_encoder_device)
-        self.dtype = dtype
+        if dtype != torch.float32:
+            raise ValueError("RoboNana inference supports FP32 only")
+        self.dtype = torch.float32
         self.action_chunk = int(action_chunk)
         self.horizon = int(horizon)
         self.num_inference_steps = int(num_inference_steps)

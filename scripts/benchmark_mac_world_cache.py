@@ -3,7 +3,7 @@
 
 Reads a checkpoint and saved stage-1 data config, never trains or writes model
 state. Report latency as contended when other jobs share the selected GPU.
-FP32 weights + BF16 autocast matches stage 2; FP32 mode is the stricter oracle.
+The only supported execution path uses FP32 weights and computation.
 """
 
 import argparse
@@ -18,6 +18,7 @@ from robonana.data.robotwin_hdf5 import RoboTwinHDF5Dataset
 from robonana.data.robotwin_lerobot import RoboTwinLeRobotDataset
 from robonana.models.pretrained import load_flux2_fact_trained_checkpoint
 from robonana.sampling import prefill_mac_condition, sample_mac_world
+from robonana.training.posttraining import fp32_compute_context
 
 
 def restore(value):
@@ -34,7 +35,6 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--model-config", required=True)
     parser.add_argument("--data-config", required=True)
-    parser.add_argument("--precision", choices=["fp32", "bf16"], default="bf16")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--windows-per-pool", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=1,
@@ -49,7 +49,7 @@ def main():
         args.checkpoint, config_path=args.model_config, action_dim=14, state_dim=14,
         expert_hidden_dim=1024, device="cuda:0", dtype=torch.float32)
     model.eval().requires_grad_(False)
-    print(json.dumps(dict(device=torch.cuda.get_device_name(), precision=args.precision,
+    print(json.dumps(dict(device=torch.cuda.get_device_name(), precision="fp32",
                           weights="fp32", steps=20, batch=args.batch_size, repeats=args.repeats)), flush=True)
     classes = {cls.__name__: cls for cls in (RoboTwinHDF5Dataset, RoboTwinLeRobotDataset)}
     weights = config["dataloaders"]["train"]["sampler"]["pool_weights"]
@@ -71,7 +71,7 @@ def main():
                               future_state_noise=torch.randn_like(inputs["state"]),
                               schedule=torch.linspace(1, 0, 21, device="cuda"), grid_height=gh, grid_width=gw)
                 results, timings, peaks = {}, {False: [], True: []}, {False: [], True: []}
-                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.precision == "bf16"):
+                with fp32_compute_context(model):
                     # C exists already after stage-2 action selection. Include
                     # G/R/U prefill in cached timing, not this shared C prefill.
                     cache = prefill_mac_condition(model=model, **inputs, grid_height=gh, grid_width=gw)

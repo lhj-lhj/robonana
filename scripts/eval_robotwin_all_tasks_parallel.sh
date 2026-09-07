@@ -250,7 +250,6 @@ run_worker() {
     --model-device cuda:0
     --vae-device cuda:0
     --text-encoder-device cuda:0
-    --dtype bf16
     --action-chunk 48
     --horizon 24
     --num-inference-steps 20

@@ -39,7 +39,7 @@ def sampling_inputs(inputs):
     return {key: value for key, value in inputs.items() if key not in ("context_ids", "current_ids")}
 
 
-def test_model_disables_bf16_reduced_precision_reduction():
+def test_model_preserves_reduction_safety_for_external_frozen_encoders():
     # Model construction is shared by training, checkpoint loading, and
     # inference, including processes launched independently by accelerate.
     previous = torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction

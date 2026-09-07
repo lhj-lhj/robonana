@@ -122,8 +122,9 @@ It imports the common FACT/FLUX dimensions and applies the MAC overlay:
 | training GPUs / batch per GPU / accumulation | 6,7 / 8 / 1 (effective batch 16) |
 
 These are defaults for new runs, not overrides of saved continuation configs.
-New processes align imagination and Q/V computation to FLUX using the single
-`ROBONANA_MIXED_PRECISION=no` default (`bf16` is an explicit whole-path override).
+RoboNana FLUX, imagination, Q/V and environment policy inference are FP32-only.
+There is no alternate precision switch; stale mixed-precision overrides fail
+early. Frozen external encoders (Qwen/VAE) and their cache formats are unchanged.
 The already-running critic-only continuation retains its old mixed-precision
 behavior until explicitly restarted; see [the precision boundary](docs/WORLD_PREFIX_CACHE.md#sharing-with-critics-and-precision).
 
@@ -296,11 +297,13 @@ target from another run.
 
 ## Numerical policy
 
-Training defaults to FP32 throughout FLUX, imagination and online/target critic
-forwards. Explicit BF16 training uses the same compute policy for all of them.
-Value EMA storage/updates and return/loss reductions remain FP32. The separate
-environment inference dtype is not changed by a training config. Inference
-sanitizes decoded actions with a
+FP32 is the only supported precision for RoboNana FLUX, imagination, online/
+target critics and policy inference. Value EMA storage/updates and return/loss
+reductions remain FP32. Inference entrypoints have no dtype selector.
+Frozen pretrained encoders are a separate boundary: Qwen, VAE and existing
+feature cache generation/storage retain their original settings. The trainer
+casts their features to FP32 for the RoboNana model; no dataset is rewritten.
+Inference sanitizes decoded actions with a
 finite fallback and clips to normalization bounds. When diagnosing instability,
 first lower critic learning rate or candidate count; do not silently add a
 second EMA or target Q.

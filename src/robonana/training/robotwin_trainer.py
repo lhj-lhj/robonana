@@ -46,7 +46,7 @@ from robonana.training.optimizer import build_optimizer_param_groups
 from robonana.training.posttraining import (
     ValueExpertEMA,
     evaluating,
-    flux_compute_context,
+    fp32_compute_context,
 )
 from robonana.training.visualization import (
     decode_flux2_tokens,
@@ -101,6 +101,8 @@ class RoboNanaTrainer(Trainer):
     """Reuse FACT's DataLoader, Accelerate, optimizer, checkpoint, and logging loop."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if kwargs.get("mixed_precision") not in (None, "no"):
+            raise ValueError("RoboNana training is FP32-only; mixed_precision must be no")
         super().__init__(*args, **kwargs)
         initial_global_step = int(self.kwargs.get("initial_global_step", 0))
         if initial_global_step:
@@ -185,8 +187,6 @@ class RoboNanaTrainer(Trainer):
         ema = dict(self.posttrain_config.get("ema", {}))
         if ema.get("storage_dtype") != "float32":
             raise ValueError("target Value EMA storage_dtype must be float32")
-        # Historical snapshots may contain forward_autocast_dtype. It is no
-        # longer a separate precision authority: all forwards follow FLUX.
         if ema.get("target") != "value_expert_only":
             raise ValueError("mac_mot_v2 EMA target must be value_expert_only")
 
@@ -933,7 +933,7 @@ class RoboNanaTrainer(Trainer):
         rollout_model = self.accelerator.unwrap_model(
             self.model, keep_torch_compile=False
         )
-        with evaluating(rollout_model), flux_compute_context(rollout_model):
+        with evaluating(rollout_model), fp32_compute_context(rollout_model):
             imaginary = generate_mac_imaginary_rollout_h1(
                 online_model=rollout_model,
                 target_value_expert=self.target_value_ema.model,
@@ -960,7 +960,7 @@ class RoboNanaTrainer(Trainer):
                 grid_height=self.grid_height,
                 grid_width=self.grid_width,
             )
-        with flux_compute_context(rollout_model):
+        with fp32_compute_context(rollout_model):
             value_prediction, q_prediction = evaluate_mac_critics(
                 model=self.model,
                 context=values["context"],

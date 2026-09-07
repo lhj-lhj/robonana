@@ -1,5 +1,9 @@
 # MAC shared-prefix validation
 
+> Historical measurements, not the current precision configuration. RoboNana
+> FLUX/Q/V are now FP32-only; frozen external encoders remain unchanged.
+> See [current policy](../README.md#numerical-policy).
+
 Validated on 190 on 2026-09-06. Implementation scope: asymmetric critic mask,
 request-local C prefill, action sampling across cached Euler steps, Q-only
 candidate scoring, joint online V/Q cache reuse, and next-state online/target

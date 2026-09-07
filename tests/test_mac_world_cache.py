@@ -1,6 +1,7 @@
 """Full FLUX (not another cached path) is the world-cache numerical oracle."""
 
 from unittest.mock import patch
+from dataclasses import replace
 
 import pytest
 import torch
@@ -10,13 +11,12 @@ from robonana.models.position_ids import image_position_ids
 from robonana.sampling import evaluate_mac_critics, sample_mac_world
 
 
-@pytest.mark.parametrize("autocast", [False, True])
-def test_twenty_step_world_cache_matches_full_flow_and_logits(autocast):
+def test_twenty_step_world_cache_matches_full_flow_and_logits():
     model, inputs = model_and_inputs()
     kwargs = dict(model=model, **sampling_inputs(inputs), clean_action=torch.randn(2, 48, 6),
                   future_noise=torch.randn(2, 2, 8), future_state_noise=torch.randn(2, 1, 6),
                   schedule=torch.linspace(1, 0, 21), grid_height=1, grid_width=2)
-    with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
+    with torch.no_grad():
         reference = sample_mac_world(**kwargs, use_cache=False)
         cache = model.prefill_condition_cache(**inputs)
         with patch.object(model, "prefill_condition_cache", side_effect=AssertionError("C recomputed")), \
@@ -25,10 +25,8 @@ def test_twenty_step_world_cache_matches_full_flow_and_logits(autocast):
             actual = sample_mac_world(**kwargs, condition_cache=cache)
             assert predict.call_count == 20
     for field in ("future", "future_state", "reward_logits", "success_logit"):
-        # BF16 changes GEMM/SDPA shapes and therefore rounding, not equations.
         torch.testing.assert_close(getattr(actual, field), getattr(reference, field),
-                                   atol=0.025 if autocast else 3e-6,
-                                   rtol=0.025 if autocast else 3e-5)
+                                   atol=3e-6, rtol=3e-5)
 
 
 def test_world_cache_preserves_cascade_and_is_detached():
@@ -50,17 +48,15 @@ def test_world_cache_preserves_cascade_and_is_detached():
         assert torch.equal(output.success, baseline.success)
     assert all(not tensor.requires_grad for layer in (*cache.kv.double, *cache.kv.single)
                for tensor in layer.values())
-    with torch.autocast("cpu", dtype=torch.bfloat16):
-        with pytest.raises(ValueError, match="precision"):
-            model.predict_world_cached(cache, **args)
+    invalid = replace(cache, kv=replace(cache.kv, compute_dtype=torch.float64))
+    with pytest.raises(ValueError, match="precision"):
+        model.predict_world_cached(invalid, **args)
 
 
-@pytest.mark.parametrize("sampling_bf16", [False, True])
-def test_critic_reuses_only_same_precision_cache_with_identical_gradients(sampling_bf16):
+def test_critic_reuses_fp32_cache_with_identical_gradients():
     model, inputs = model_and_inputs()
     model.set_training_phase("critic")
-    with torch.autocast("cpu", dtype=torch.bfloat16, enabled=sampling_bf16):
-        cache = model.prefill_condition_cache(**inputs)
+    cache = model.prefill_condition_cache(**inputs)
     kwargs = dict(model=model, **sampling_inputs(inputs), clean_action=torch.randn(2, 48, 6),
                   grid_height=1, grid_width=2)
     reference = evaluate_mac_critics(**kwargs)
@@ -69,7 +65,7 @@ def test_critic_reuses_only_same_precision_cache_with_identical_gradients(sampli
     model.zero_grad(set_to_none=True)
     with patch.object(model, "prefill_condition_cache", wraps=model.prefill_condition_cache) as prefill:
         actual = evaluate_mac_critics(**kwargs, condition_cache=cache)
-        assert prefill.call_count == int(sampling_bf16)
+        assert prefill.call_count == 0
     for got, expected in zip(actual, reference):
         torch.testing.assert_close(got, expected, rtol=0, atol=0)
     sum(value.square().mean() for value in actual).backward()

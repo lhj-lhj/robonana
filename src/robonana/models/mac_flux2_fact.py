@@ -176,10 +176,10 @@ class MacFlux2FACTModel(Flux2FACTModel):
         critic_kind: str | None = None,
         condition_cache: FrozenFluxKVCache | None = None,
     ) -> Flux2FACTOutput | Tensor:
+        self.cache_compute_dtype()  # Reject unsupported weights/autocast early.
         if critic_kind is not None:
             if critic_kind == "both":
-                # BF16 sampling and FP32 regression are distinct computations.
-                # Casting a BF16 cache to FP32 cannot recover lost precision.
+                # Only request-local FP32 caches may enter critic regression.
                 cache = condition_cache if self.condition_cache_compatible(condition_cache) else None
                 cache = cache if cache is not None else self.prefill_condition_cache(
                     context=context, context_ids=context_ids,
@@ -393,8 +393,9 @@ class MacFlux2FACTModel(Flux2FACTModel):
 
     def cache_compute_dtype(self):
         device_type = self.img_in.weight.device.type
-        return (torch.get_autocast_dtype(device_type) if torch.is_autocast_enabled(device_type)
-                else self.img_in.weight.dtype)
+        if self.img_in.weight.dtype != torch.float32 or torch.is_autocast_enabled(device_type):
+            raise ValueError("MAC requires FP32 weights with autocast disabled")
+        return torch.float32
 
     def condition_cache_compatible(self, cache):
         return (cache is not None and cache.parent is None
@@ -527,6 +528,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
         V before residual update, matching both the full pass and Q expert.
         Predicted A and clean G have different segment IDs; Q must re-encode G.
         """
+        self.cache_compute_dtype()
         batch = action.shape[0]
         if action.shape != (batch, self.chunk_horizon, self.action_dim):
             raise ValueError("cached action must have shape [batch,48,action_dim]")
@@ -640,6 +642,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
     ) -> FrozenFluxKVCache:
         """Cache ``C`` for Value or ``[C,G]`` for Q from frozen FLUX."""
 
+        self.cache_compute_dtype()
         batch = context.shape[0]
         dtype = self.img_in.weight.dtype
         device = context.device

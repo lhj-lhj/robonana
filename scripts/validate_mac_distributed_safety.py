@@ -58,11 +58,11 @@ def main():
     plugin = None
     if args.backend == "deepspeed":
         plugin = DeepSpeedPlugin(hf_ds_config={
-            "zero_optimization": {"stage": 2}, "bf16": {"enabled": True},
+            "zero_optimization": {"stage": 2},
             "train_micro_batch_size_per_gpu": 2, "gradient_accumulation_steps": 2,
         })
     accelerator = Accelerator(cpu=args.backend == "gloo", gradient_accumulation_steps=2,
-                              mixed_precision="bf16" if plugin else "no", deepspeed_plugin=plugin)
+                              mixed_precision="no", deepspeed_plugin=plugin)
     assert accelerator.num_processes == 2
     torch.manual_seed(42)
     model = TinyCritics()
@@ -127,7 +127,7 @@ def main():
         expected_cuda_rng = torch.cuda.get_rng_state().clone() if plugin else None
         # Compare an uninterrupted next update against the resumed next update.
         # Matching weights/EMA here also exercises restored Adam/ZeRO moments
-        # and FP32 master weights, not just the exported BF16 module payload.
+        # and optimizer state, not just the exported module payload.
         trainer._cur_step = 2
         step()
         uninterrupted_model = copy.deepcopy(online.state_dict())

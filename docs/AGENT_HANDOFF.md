@@ -45,11 +45,12 @@ accumulation 1 (effective batch 16). Explicit environment overrides remain
 supported. Existing saved experiment configs and running processes are not
 rewritten; a historical continuation can still restore batch 4 / accumulation 2.
 
-Training precision now follows the loaded FLUX dtype for action/world rollout,
-online Q/V and target Value forward. New configs default to FP32 (`no`), matching
-the recent real world-model run; `ROBONANA_MIXED_PRECISION=bf16` explicitly
-switches the complete compute path. EMA storage/update and return/loss math
-remain FP32. The old EMA-specific forward dtype is no longer an authority.
+RoboNana is FP32-only: FLUX training, action/world rollout, online/target Q/V
+and environment policy inference. No precision selector is maintained; non-FP32
+training overrides/checkpoint-load requests fail early. EMA storage/update and
+return/loss math remain FP32. Frozen external encoders (Qwen/VAE), their cache
+generation and existing cache storage must remain unchanged per user request.
+Their features are cast to FP32 at the RoboNana model input boundary.
 The active critic-only process was not restarted and retains its loaded code.
 
 The environment path samples 32 action candidates, computes the L/S/I prefix
