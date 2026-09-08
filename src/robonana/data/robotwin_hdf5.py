@@ -428,10 +428,15 @@ class RoboTwinHDF5Dataset(BaseDataset):
 
     def _latents(self, record: EpisodeRecord) -> torch.Tensor:
         path = episode_cache_path(record.task_dir, record.episode_index)
+        def load_certified(p):
+            from robonana.image_pipeline import valid_image_cache
+            if not valid_image_cache(p, record.length):
+                raise RuntimeError(f"Uncertified/missing unified image cache: {p}; rebuild preprocessing first")
+            return torch.load(p, map_location="cpu", weights_only=True)
         return self._lru_get(
             self._latent_cache,
             path,
-            lambda p: torch.load(p, map_location="cpu", weights_only=True),
+            load_certified,
             self.latent_cache_size,
         )
 

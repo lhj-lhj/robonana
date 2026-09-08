@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import gc
-import importlib.util
 import json
 import os
 import sys
@@ -37,6 +36,9 @@ from robonana.data.robotwin_lerobot import (
     discover_lerobot_episode_records,
 )
 from robonana.encoding import LocalQwen3Embedder, encode_flux2_image_tokens
+from robonana.image_pipeline import (
+    build_robotwin_vae_input, fact_preprocess, write_image_contract, save_image_cache, valid_image_cache,
+)
 from world_action_model.image_layouts import ROBOTWIN_VIEW_KEYS
 
 
@@ -44,17 +46,8 @@ MAIN_VIEW_SIZE = (256, 192)
 EXPECTED_IMAGE_SHAPE = (288, 128)
 
 
-_fact_preprocess_path = REPO_ROOT / "third_party" / "FACT" / "scripts" / "compute_vae_latents.py"
-_fact_preprocess_spec = importlib.util.spec_from_file_location(
-    "fact_compute_vae_latents",
-    _fact_preprocess_path,
-)
-if _fact_preprocess_spec is None or _fact_preprocess_spec.loader is None:
-    raise ImportError(f"Cannot load FACT preprocessing helpers from {_fact_preprocess_path}")
-_fact_preprocess = importlib.util.module_from_spec(_fact_preprocess_spec)
-_fact_preprocess_spec.loader.exec_module(_fact_preprocess)
+_fact_preprocess = fact_preprocess()
 _assert_frame_index_contiguous = _fact_preprocess._assert_frame_index_contiguous
-_build_composite = _fact_preprocess._build_composite
 _decode_view_frames = _fact_preprocess._decode_view_frames
 
 
@@ -114,6 +107,7 @@ def write_manifests(tasks: list[Path], checkpoint: Path) -> None:
         "checkpoint": str(checkpoint),
     }
     for task in tasks:
+        write_image_contract(task, checkpoint)
         atomic_json_save(manifest, task / "flux_cache" / "_manifest.json")
 
 
@@ -158,16 +152,6 @@ def cache_language(
     torch.cuda.empty_cache()
 
 
-def valid_image_cache(path: Path, length: int) -> bool:
-    if not path.is_file():
-        return False
-    try:
-        value = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-    except Exception:
-        return False
-    return tuple(value.shape) == (length, *EXPECTED_IMAGE_SHAPE) and value.dtype == torch.bfloat16
-
-
 def decode_views(task_dir: Path, episode_index: int, length: int, pyav_threads: int):
     _assert_frame_index_contiguous(task_dir, episode_index, length)
     with ThreadPoolExecutor(max_workers=len(ROBOTWIN_VIEW_KEYS)) as pool:
@@ -192,7 +176,7 @@ def decode_views(task_dir: Path, episode_index: int, length: int, pyav_threads: 
 
 def decode_composite(task_dir: Path, episode_index: int, length: int, pyav_threads: int) -> torch.Tensor:
     views = decode_views(task_dir, episode_index, length, pyav_threads)
-    return _build_composite(views, MAIN_VIEW_SIZE, list(ROBOTWIN_VIEW_KEYS))
+    return build_robotwin_vae_input(views)
 
 
 @torch.inference_mode()
@@ -207,6 +191,8 @@ def cache_images(
     world_size: int,
 ) -> None:
     assigned = records[rank::world_size]
+    for task_dir in {record.task_dir for record in assigned}:
+        write_image_contract(task_dir, checkpoint)
     pending = [
         record
         for record in assigned
@@ -241,7 +227,7 @@ def cache_images(
         expected = (record.length, *EXPECTED_IMAGE_SHAPE)
         if tuple(latents.shape) != expected:
             raise RuntimeError(f"Unexpected cache shape {tuple(latents.shape)} != {expected}: {record.source}")
-        atomic_torch_save(latents, episode_cache_path(record.task_dir, record.episode_index))
+        save_image_cache(latents, episode_cache_path(record.task_dir, record.episode_index))
         if position % 10 == 0 or position == len(pending):
             elapsed = time.monotonic() - started
             rate = position / max(elapsed, 1e-6)

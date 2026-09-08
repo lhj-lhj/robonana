@@ -345,13 +345,51 @@ target from another run.
 FP32 is the only supported precision for RoboNana FLUX, imagination, online/
 target critics and policy inference. Value EMA storage/updates and return/loss
 reductions remain FP32. Inference entrypoints have no dtype selector.
-Frozen pretrained encoders are a separate boundary: Qwen, VAE and existing
-feature cache generation/storage retain their original settings. The trainer
-casts their features to FP32 for the RoboNana model; no dataset is rewritten.
+Frozen Qwen and its language cache are unchanged. Image encoding now uses the
+single FACT/FLUX contract below; historical image caches are not silently reused.
 Inference sanitizes decoded actions with a
 finite fallback and clips to normalization bounds. When diagnosing instability,
 first lower critic learning rate or candidate count; do not silently add a
 second EMA or target Q.
+
+## Unified image pipeline (2026-09-08)
+
+Original LeRobot video, collected HDF5 RGB and live observations all call
+`robonana.image_pipeline.build_robotwin_vae_input` and
+`robonana.encoding.encode_flux2_image_tokens`:
+
+1. Decode RGB uint8 (live uint8/255 is rounded back to integer pixels).
+2. Reuse FACT `scripts/compute_vae_latents.py::_build_composite`: per-view
+   bilinear resize, `align_corners=False`, no antialias, then per-view [-1,1]
+   normalization and the original 384x192 camera layout.
+3. Frozen eval FP32 VAE, posterior **mode**, native batch **one image** even
+   when cache I/O or environment requests are batched; scoped TF32 off,
+   deterministic cuDNN, benchmark off and autocast off.
+4. FLUX packing/BN normalization, BF16 storage rounding, then FP32 model input.
+   Online encoding performs the same BF16 roundtrip; FLUX/Q/V remain FP32.
+
+Image caches now live only in `flux_cache/latents_v2`. The task contract records
+VAE weights/config hashes, FACT helper hash and runtime versions; episode
+completion metadata proves the shape/dtype/contract. Training checks every
+configured dataset pool against its VAE before use. Missing/old/mismatched
+caches fail rather than silently mixing versions. Use the existing LeRobot
+and HDF5 preprocessing commands with `--stage images` to rebuild explicitly.
+Old `latents` files and checkpoints are retained, not overwritten or relabeled.
+Batch-size flags now group I/O; VAE execution remains N=1.
+
+**Historical caveat:** original LeRobot preprocessing and replay preprocessing
+previously differed in resize antialiasing. Live encoding also lacked the
+cache BF16 roundtrip and had batch-dependent VAE execution. Old checkpoints
+were trained on those historical inputs; changing code cannot retroactively
+make their training consistent. Validate/retrain with rebuilt caches before
+claiming train/live parity. Historical JPEG/MP4 compression is irreversible.
+New collected HDF5 RGB uses lossless PNG (schema 4) so replay retains exactly
+the pixels supplied to live inference. Old JPEG data remains readable.
+
+`scripts/verify_image_pipeline.py` tests identical decoded frames through cache
+and online batch=1/2 with the real VAE; it writes no dataset caches. Equality
+on this test does not promise bit-identical results across GPU/runtime changes
+or certify action sampling numerics, which are a separate boundary.
 
 ## Archived history
 

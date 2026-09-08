@@ -9,7 +9,8 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from robonana.encoding import LocalQwen3Embedder, encode_flux2_image_tokens
+from robonana.encoding import LocalQwen3Embedder
+from robonana.image_pipeline import encode_robotwin_observations, MAIN_VIEW_SIZE
 from robonana.inference.robotwin_policy import (
     InferenceMode,
     RoboNanaRobotWinPolicy,
@@ -17,10 +18,6 @@ from robonana.inference.robotwin_policy import (
     seeded_randn_like,
 )
 from robonana.sampling import QRejectionSample, sample_flux2_action, sample_q_rejection
-from world_action_model.image_layouts import (
-    ROBOTWIN_VIEW_KEYS,
-    build_robotwin_ref_tensor,
-)
 from world_action_model.pipeline.utils import normalize_state
 
 
@@ -103,19 +100,9 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
     def _batched_current_image_tokens(
         self, observations: Sequence[dict[str, Any]]
     ) -> Tensor:
-        composites = []
-        for observation in observations:
-            images = {
-                key: torch.as_tensor(observation[key]) for key in ROBOTWIN_VIEW_KEYS
-            }
-            composites.append(
-                build_robotwin_ref_tensor(images, main_dst_size=self.main_view_size)
-            )
-        images_nchw = torch.stack(composites, dim=0).to(
-            device=self.vae_device,
-            dtype=torch.float32,
-        )
-        tokens = encode_flux2_image_tokens(self.vae, images_nchw.mul(2.0).sub(1.0))
+        if self.main_view_size != MAIN_VIEW_SIZE:
+            raise ValueError("Unified image pipeline requires main view 256x192")
+        tokens = encode_robotwin_observations(self.vae, observations)
         expected = self.grid_height * self.grid_width
         if tuple(tokens.shape[1:]) != (expected, 128):
             raise RuntimeError(

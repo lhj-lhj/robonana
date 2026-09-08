@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from threading import RLock
 from pathlib import Path
 
 import torch
@@ -62,13 +63,38 @@ def patchify_and_normalize(vae, latents: Tensor) -> Tensor:
     return (latents - mean) / std
 
 
+_VAE_LOCK = RLock()
+
+
 @torch.inference_mode()
 def encode_flux2_image_tokens(vae, images: Tensor) -> Tensor:
-    """Encode normalized NCHW images into FLUX.2 image tokens."""
+    """Unique cache/live contract: FP32, one image, no TF32, BF16 roundtrip.
 
-    raw_latents = vae.encode(images).latent_dist.mode()
-    packed = patchify_and_normalize(vae, raw_latents)
-    return packed.flatten(2).transpose(1, 2).contiguous()
+    VAE weights and Qwen are unchanged. Batch grouping is only an I/O concern;
+    every convolution sees N=1, including cache generation and live batch=2.
+    Scoped backend flags are restored; never change Qwen/FLUX global settings.
+    """
+    parameter = next(vae.parameters())
+    if parameter.dtype != torch.float32 or vae.training:
+        raise ValueError("Image pipeline requires frozen eval-mode FP32 VAE")
+    if images.ndim != 4 or images.shape[0] == 0 or images.dtype != torch.float32:
+        raise ValueError("VAE input must be a nonempty FP32 NCHW batch")
+    outputs = []
+    with _VAE_LOCK:
+        precision = torch.get_float32_matmul_precision()
+        try:
+            torch.set_float32_matmul_precision("highest")
+            with torch.autocast(device_type=parameter.device.type, enabled=False), torch.backends.cudnn.flags(
+                enabled=True, benchmark=False, deterministic=True, allow_tf32=False
+            ):
+                for image in images.split(1):
+                    raw = vae.encode(image).latent_dist.mode()
+                    packed = patchify_and_normalize(vae, raw)
+                    tokens = packed.flatten(2).transpose(1, 2).contiguous()
+                    outputs.append(tokens.to(torch.bfloat16).to(torch.float32))
+        finally:
+            torch.set_float32_matmul_precision(precision)
+    return torch.cat(outputs)
 
 
 def pixel_unshuffle_dino_patches(

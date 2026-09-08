@@ -64,9 +64,14 @@ rewritten; a historical continuation can still restore batch 4 / accumulation 2.
 RoboNana is FP32-only: FLUX training, action/world rollout, online/target Q/V
 and environment policy inference. No precision selector is maintained; non-FP32
 training overrides/checkpoint-load requests fail early. EMA storage/update and
-return/loss math remain FP32. Frozen external encoders (Qwen/VAE), their cache
-generation and existing cache storage must remain unchanged per user request.
-Their features are cast to FP32 at the RoboNana model input boundary.
+return/loss math remain FP32. Qwen weights/precision/language caches remain
+unchanged. The 2026-09-08 image-consistency request supersedes the earlier
+freeze on VAE preprocessing: one FACT resize + single-image FP32 VAE + BF16
+roundtrip pipeline now serves both cache generation and live input. Only
+`flux_cache/latents_v2` with matching contracts is accepted. Historical image
+caches must be explicitly rebuilt; do not overwrite/relabel them or claim old
+checkpoints were trained on the new inputs. New HDF5 RGB is lossless PNG.
+See README's Unified image pipeline section and the bounded real-VAE probe.
 Running processes retain their loaded code until explicitly restarted.
 
 Critic-only continuation uses the maintained

@@ -220,6 +220,8 @@ class RoboNanaTrainer(Trainer):
 
     def prepare(self, dataloaders: Any, models: Any, optimizers: Any, schedulers: Any) -> None:
         super().prepare(dataloaders, models, optimizers, schedulers)
+        from robonana.image_pipeline import validate_training_image_contracts
+        validate_training_image_contracts(self.dataloader.dataset, self.vae_checkpoint_dir)
         if self.target_value_ema is not None:
             for optimizer in self.optimizers:
                 self.target_value_ema.assert_not_in_optimizer(optimizer)

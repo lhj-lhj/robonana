@@ -45,7 +45,10 @@ from robonana.data.flux_cache import (
     language_context_path,
 )
 from robonana.encoding import LocalQwen3Embedder, encode_flux2_image_tokens
-from world_action_model.image_layouts import ROBOTWIN_VIEW_KEYS, build_robotwin_three_view_tensor
+from world_action_model.image_layouts import ROBOTWIN_VIEW_KEYS
+from robonana.image_pipeline import (
+    build_robotwin_vae_input, write_image_contract, save_image_cache, valid_image_cache,
+)
 
 
 MAIN_VIEW_SIZE = (256, 192)
@@ -88,6 +91,7 @@ def episode_index(path: Path) -> int:
 
 
 def write_manifest(task_dir: Path, checkpoint: Path) -> None:
+    write_image_contract(task_dir, checkpoint)
     atomic_json_save(
         {
             "schema_version": CACHE_SCHEMA_VERSION,
@@ -186,10 +190,10 @@ def build_composite_batch(handle: h5py.File, start: int, stop: int) -> torch.Ten
         view_key: decode_rgb_batch(handle[f"observation/{camera}/rgb"], start, stop)
         for view_key, camera in zip(ROBOTWIN_VIEW_KEYS, HDF5_CAMERAS, strict=True)
     }
-    composite = build_robotwin_three_view_tensor(views, main_dst_size=MAIN_VIEW_SIZE)
+    composite = build_robotwin_vae_input(views)
     if tuple(composite.shape[-2:]) != (CANVAS_SIZE[1], CANVAS_SIZE[0]):
         raise RuntimeError(f"FACT layout returned unexpected composite shape: {tuple(composite.shape)}")
-    return composite.mul(2.0).sub(1.0)
+    return composite
 
 
 @torch.inference_mode()
@@ -209,18 +213,12 @@ def encode_episode(vae, source: Path, output: Path, device: torch.device, batch_
     expected = (episode_length, EXPECTED_IMAGE_TOKENS, EXPECTED_LATENT_CHANNELS)
     if tuple(frame_latents.shape) != expected:
         raise RuntimeError(f"Unexpected FLUX frame cache shape for {source}: {tuple(frame_latents.shape)} != {expected}")
-    atomic_torch_save(frame_latents, output)
+    save_image_cache(frame_latents, output)
     return episode_length, tuple(frame_latents.shape)
 
 
 def valid_episode_cache(path: Path) -> bool:
-    if not path.is_file():
-        return False
-    try:
-        value = torch.load(path, map_location="cpu", weights_only=True)
-    except Exception:
-        return False
-    return value.ndim == 3 and tuple(value.shape[1:]) == (EXPECTED_IMAGE_TOKENS, EXPECTED_LATENT_CHANNELS)
+    return valid_image_cache(path)
 
 
 def cache_images(
@@ -237,6 +235,7 @@ def cache_images(
 
     episodes: list[tuple[Path, Path, int]] = []
     for task_dir in tasks:
+        write_image_contract(task_dir, checkpoint)
         paths = sorted((task_dir / "data").glob("episode*.hdf5"), key=episode_index)
         if max_episodes_per_task > 0:
             paths = paths[:max_episodes_per_task]

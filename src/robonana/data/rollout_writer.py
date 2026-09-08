@@ -16,7 +16,7 @@ from PIL import Image
 
 CAMERAS = ("head_camera", "left_camera", "right_camera")
 ROLLOUT_VARIANT = "robonana_rollout"
-ROLLOUT_SCHEMA_VERSION = 3
+ROLLOUT_SCHEMA_VERSION = 4
 
 
 def _atomic_json(payload: Mapping[str, Any], path: Path) -> None:
@@ -39,16 +39,15 @@ def _as_uint8_rgb(image: np.ndarray) -> np.ndarray:
     value = value.astype(np.float32, copy=False)
     if value.max(initial=0.0) <= 1.0:
         value = value * 255.0
-    return np.clip(value, 0.0, 255.0).astype(np.uint8)
+    return np.clip(value, 0.0, 255.0).round().astype(np.uint8)
 
 
-def _jpeg_bytes(image: np.ndarray, quality: int) -> bytes:
+def _png_bytes(image: np.ndarray) -> bytes:
     buffer = BytesIO()
     Image.fromarray(_as_uint8_rgb(image), mode="RGB").save(
         buffer,
-        format="JPEG",
-        quality=int(quality),
-        subsampling=0,
+        format="PNG",
+        compress_level=1,
     )
     return buffer.getvalue()
 
@@ -58,7 +57,12 @@ def _is_within(path: Path, parent: Path) -> bool:
 
 
 class RoboTwinRolloutWriter:
-    """Buffer one episode as JPEG frames and publish it atomically as HDF5."""
+    """Buffer lossless RGB PNG frames and publish atomically as HDF5.
+
+    Lossless storage preserves the exact pixels seen by the live VAE input
+    pipeline. Historical JPEG episodes remain readable, but cannot recover
+    their original pre-compression pixels.
+    """
 
     def __init__(
         self,
@@ -66,7 +70,6 @@ class RoboTwinRolloutWriter:
         *,
         initial_dataset_root: str | Path | None = "/workspace/datasets/RoboTwin/hf_dataset",
         variant: str = ROLLOUT_VARIANT,
-        jpeg_quality: int = 95,
         policy_name: str = "robonana",
         checkpoint: str = "",
         policy_version: str = "",
@@ -81,7 +84,6 @@ class RoboTwinRolloutWriter:
                     f"rollout dataset root must be separate from initial data: {self.dataset_root}"
                 )
         self.variant = str(variant)
-        self.jpeg_quality = int(jpeg_quality)
         self.policy_name = str(policy_name)
         self.checkpoint = str(checkpoint)
         self.policy_version = str(policy_version or checkpoint)
@@ -143,7 +145,7 @@ class RoboTwinRolloutWriter:
         elif metadata != self._metadata:
             raise RuntimeError(f"episode identity changed before finalization: {self._metadata} -> {metadata}")
         for camera in CAMERAS:
-            self._frames[camera].append(_jpeg_bytes(images[camera], self.jpeg_quality))
+            self._frames[camera].append(_png_bytes(images[camera]))
         self._states.append(state_value.copy())
         self._actions.append(action_value.copy())
         self._transition_valid.append(True)
@@ -193,7 +195,7 @@ class RoboTwinRolloutWriter:
                 f"final state shape changed: {state_value.shape} != {self._states[-1].shape}"
             )
         for camera in CAMERAS:
-            self._frames[camera].append(_jpeg_bytes(images[camera], self.jpeg_quality))
+            self._frames[camera].append(_png_bytes(images[camera]))
         self._states.append(state_value.copy())
         # The final source row has no outgoing transition. Repeating the last
         # behavior action keeps the fixed HDF5 row shape, while
@@ -248,6 +250,7 @@ class RoboTwinRolloutWriter:
                 handle.attrs.update(
                     {
                         "schema_version": ROLLOUT_SCHEMA_VERSION,
+                        "image_codec": "png",
                         "source": "robonana_policy_rollout",
                         "success": bool(self._success),
                         "failure_episode": not bool(self._success),

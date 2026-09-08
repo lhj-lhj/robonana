@@ -11,7 +11,7 @@ from torch import Tensor
 
 CACHE_SCHEMA_VERSION = 1
 LANGUAGE_CONTEXT_NAME = "language_context.pt"
-LATENT_FOLDER_NAME = "latents"
+LATENT_FOLDER_NAME = "latents_v2"  # Old caches stay on disk but are never silently reused.
 EPISODE_LANGUAGE_FOLDER_NAME = "language"
 
 

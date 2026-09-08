@@ -353,7 +353,6 @@ def _rollout_writer(usr_args) -> RoboTwinRolloutWriter | None:
             "ROBONANA_INITIAL_DATASET_ROOT",
             "/workspace/datasets/RoboTwin/hf_dataset",
         ),
-        jpeg_quality=int(os.environ.get("ROBONANA_ROLLOUT_JPEG_QUALITY", "95")),
         policy_name=str(usr_args.get("policy_name", "robonana_robotwin.adapter")),
         checkpoint=os.environ.get(
             "ROBONANA_ROLLOUT_CHECKPOINT",
