@@ -86,7 +86,7 @@ actor使用的segment 0/1/2/3；丢弃旧horizon/value/DINO分支，不恢复leg
 | 推理服务 | `scripts/services/inference_server_robotwin_batched.py` | checkpoint+A+图像契约 → action |
 | 仿真worker | `scripts/internal/collect_robotwin_pool_worker.py` | 官方RLinf VectorEnv +当前client → 逐帧记录 |
 | 回放准备 | `scripts/prepare_robotwin_rollouts.py` | HDF5 → 索引、统一图像/语言缓存，不重拟合A |
-| Stage 1 | `scripts/run_robotwin_train.sh`；`robonana.configs.robotwin_flux2.config`；`ROBONANA_MAC_PHASE=world_policy` | 预训练/上轮FLUX+累积回放 → Stage-1 checkpoint |
+| Stage 1 | `scripts/run_robotwin_train.sh`；`robonana.configs.robotwin_flux2_4b_mac.config`；`ROBONANA_MAC_PHASE=world_policy` | 预训练/上轮FLUX+累积回放 → Stage-1 checkpoint |
 | Stage 2 | 同一训练入口；`ROBONANA_MAC_PHASE=critic` | 本轮Stage-1 checkpoint → Q/V、Value EMA |
 | 后续采集 | 同一固定清单pool，`--inference-mode action_q_rejection` | Stage-2 checkpoint → 下一轮100条 |
 
