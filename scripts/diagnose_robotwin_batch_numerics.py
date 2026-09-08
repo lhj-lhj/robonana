@@ -32,6 +32,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--probe-config', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--aggregate-only', action='store_true',
+                        help='Replay all original rows with only VAE features substituted')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     cfg = json.loads(args.probe_config.read_text())
@@ -88,6 +90,26 @@ def main():
     noise = torch.stack([torch.stack([seeded_randn_like(torch.zeros(1,48,14,device='cuda'),
         int(o['sampling_seed'])+1009*k)[0] for k in range(32)]) for o in observations])
     model = policy.model
+    if args.aggregate_only:
+        def replay(images, batch, group):
+            outputs, qs, best = [], [], []
+            for start in range(0,len(observations),batch):
+                ids=list(range(start,min(start+batch,len(observations))))
+                c=torch.cat([contexts[k] for k in ids])
+                result=sample_q_rejection(model=model,context=c,current_latents=images[ids],state=state[ids],
+                    context_mask=torch.ones(c.shape[:2],device='cuda',dtype=torch.bool),candidate_count=32,
+                    action_noise=noise[ids],schedule=policy.schedule,grid_height=12,grid_width=24,
+                    candidate_batch_size=group)
+                outputs.append(result.candidates);qs.append(result.candidate_q);best.append(result.best_index)
+            return torch.cat(outputs),torch.cat(qs),torch.cat(best)
+        baseline=replay(solo,1,16)
+        for name,images in [('aggregate_fixed_features',solo),('aggregate_live_vae',pair)]:
+            result=replay(images,2,32)
+            report(name,action_error=error(baseline[0],result[0]),
+                   action_errors_per_row=[error(a,b) for a,b in zip(baseline[0],result[0])],
+                   q_error_return_units=error(baseline[1],result[1])*1000,
+                   indices=result[2].tolist(),reference_indices=baseline[2].tolist())
+        return
     reference = {}
     original = model.predict_action_cached
     original_prefill = model.prefill_condition_cache
