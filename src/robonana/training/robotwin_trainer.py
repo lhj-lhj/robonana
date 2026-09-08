@@ -159,6 +159,12 @@ class RoboNanaTrainer(Trainer):
             self._validate_posttrain_config()
 
     def _validate_posttrain_config(self) -> None:
+        from robonana.inference_contract import sampling_contract
+        settings = sampling_contract(self.posttrain_config)
+        if self.num_inference_steps != settings["num_inference_steps"] or self.flow_shift != settings["flow_shift"]:
+            raise ValueError("train sampling settings must match posttrain.imagination")
+        if (self.grid_height, self.grid_width) != (12, 24):
+            raise ValueError("Checkpoint image contract requires latent grid 12x24")
         configured_mode = str(self.kwargs.get("q_target_mode", ""))
         if configured_mode != "mac_mot_v2":
             raise ValueError(
@@ -222,6 +228,7 @@ class RoboNanaTrainer(Trainer):
         super().prepare(dataloaders, models, optimizers, schedulers)
         from robonana.image_pipeline import validate_training_image_contracts
         validate_training_image_contracts(self.dataloader.dataset, self.vae_checkpoint_dir)
+        self._image_inputs_certified = True
         if self.target_value_ema is not None:
             for optimizer in self.optimizers:
                 self.target_value_ema.assert_not_in_optimizer(optimizer)
@@ -308,6 +315,18 @@ class RoboNanaTrainer(Trainer):
         checkpoint = _config_value(model_config, "checkpoint", None)
         if checkpoint is None:
             raise ValueError("trained MAC initialization requires models.checkpoint")
+        from robonana.inference_contract import build_contract, read_contract, check_contract, CONTRACT_FILE
+        self.inference_contract = build_contract(
+            self.posttrain_config, str(_config_value(model_config, "checkpoint_dir"))
+        )
+        # Missing metadata is never silently promoted to a certified checkpoint.
+        # Only a deliberate new Stage-1 adaptation may start from old weights;
+        # Stage 2 freezes FLUX and cannot certify a changed input representation.
+        contract_path = Path(checkpoint).parent / CONTRACT_FILE
+        if not contract_path.is_file() and self.mac_phase == "world_policy" and self.kwargs.get("allow_uncertified_pretrain", False):
+            self.logger.warning("Explicit uncertified Stage-1 initialization: %s; old weights remain uncertified", checkpoint)
+        else:
+            check_contract(read_contract(checkpoint), self.inference_contract)
         model, report = load_flux2_fact_trained_checkpoint(
             str(checkpoint), action_dim=action_dim, state_dim=state_dim,
             reward_dim=reward_dim, success_dim=success_dim, q_dim=q_dim,
@@ -392,7 +411,16 @@ class RoboNanaTrainer(Trainer):
         return [optimizer]
 
     def save_model_hook(self, models, weights, output_dir: str) -> None:
+        if not getattr(self, "_image_inputs_certified", False) or self.cur_step <= 0:
+            raise RuntimeError("Cannot publish checkpoint before training input contracts are validated")
         super().save_model_hook(models, weights, output_dir)
+        if self.is_main_process:
+            from robonana.inference_contract import write_contract
+            directory = Path(output_dir) / self.model_name
+            exported = list(directory.glob("*.bin")) + list(directory.glob("*.safetensors"))
+            if len(exported) != 1:
+                raise RuntimeError(f"Expected one exported transformer weight file: {directory}")
+            write_contract(exported[0], self.inference_contract, phase=self.mac_phase, step=self.cur_step)
         if self.target_value_ema is not None and self.is_main_process:
             output = Path(output_dir)
             save_file(
@@ -418,6 +446,12 @@ class RoboNanaTrainer(Trainer):
             return
 
     def load_model_hook(self, models, input_dir: str) -> None:
+        from robonana.inference_contract import read_contract, check_contract
+        directory = Path(input_dir) / self.model_name
+        exported = list(directory.glob("*.bin")) + list(directory.glob("*.safetensors"))
+        if len(exported) != 1:
+            raise RuntimeError(f"Expected one exported transformer weight file: {directory}")
+        check_contract(read_contract(exported[0]), self.inference_contract)
         super().load_model_hook(models, input_dir)
         if self.target_value_ema is not None:
             target_path = Path(input_dir) / "target_value_expert.safetensors"

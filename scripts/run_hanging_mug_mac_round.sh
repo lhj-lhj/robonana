@@ -156,9 +156,8 @@ if [[ ! -f ${trained_config} ]]; then
   exit 1
 fi
 
-run_ranked_eval() {
-  local candidate_count=$1
-  local output_dir=$2
+run_action_only_eval() {
+  local output_dir=$1
   env \
     ROBONANA_TRAINED_CHECKPOINT="${trained_checkpoint}" \
     ROBONANA_MODEL_CONFIG="${trained_config}" \
@@ -175,9 +174,7 @@ run_ranked_eval() {
     ROBONANA_ROBOTWIN_STATIC_CAMERAS=head_camera \
     ROBONANA_EVAL_RUN_DIR="${output_dir}" \
     ROBONANA_EVAL_SEED_GROUP="${seed_group}" \
-    ROBONANA_INFERENCE_MODE=action_q_rejection \
-    ROBONANA_REJECTION_CANDIDATE_COUNT="${candidate_count}" \
-    ROBONANA_Q_RETURN_SCALE="${ROBONANA_MAC_RETURN_SCALE:-1000}" \
+    ROBONANA_INFERENCE_MODE=action_only \
     ROBONANA_PORT_BASE="${ROBONANA_PORT_BASE:-18700}" \
     EVAL_VIDEO_LOG="${EVAL_VIDEO_LOG:-1}" \
     bash "${repo_root}/scripts/eval_robotwin_all_tasks_parallel.sh" \
@@ -186,7 +183,8 @@ run_ranked_eval() {
 
 m1_eval_dir=${run_root}/m1_eval
 if [[ ! -f ${state_dir}/m1_eval.done ]]; then
-  run_ranked_eval 1 "${m1_eval_dir}"
+  # Unranked-policy ablation: do not override the checkpoint's Q candidate budget.
+  run_action_only_eval "${m1_eval_dir}"
   touch "${state_dir}/m1_eval.done"
 fi
 
@@ -211,8 +209,6 @@ if [[ ! -f ${state_dir}/m32_collection.done ]]; then
     ROBONANA_EVAL_RUN_DIR="${m32_eval_dir}" \
     ROBONANA_EVAL_SEED_GROUP="${seed_group}" \
     ROBONANA_INFERENCE_MODE=action_q_rejection \
-    ROBONANA_REJECTION_CANDIDATE_COUNT="${ROBONANA_MAC_EVAL_CANDIDATES:-32}" \
-    ROBONANA_Q_RETURN_SCALE="${ROBONANA_MAC_RETURN_SCALE:-1000}" \
     EVAL_VIDEO_LOG="${EVAL_VIDEO_LOG:-1}" \
     TEST_NUM="${collection_num}" \
     PORT="${ROBONANA_COLLECTION_PORT:-18720}" \

@@ -53,6 +53,31 @@ Q is trained from learned-world-model imagined rollouts, not a fabricated real-r
 
 ## Training loop
 
+### Checkpoint inference contract
+
+New checkpoints save `transformer/inference_contract.json` beside the exported
+weights. It binds their SHA-256 to sampling steps, flow shift, fixed/executed
+horizon, reward/discount/return scale, the environment candidate budget, the
+separate imagination candidate budget, canonical A statistics content, and the
+full image pipeline/VAE/runtime fingerprint. Train candidates (default 8) and
+environment candidates (default 32) remain intentionally distinct.
+
+Both phase transitions and same-phase resume validate the contract. Every
+online server reads omitted settings from it and rejects conflicting explicit
+CLI arguments before model loading. The eval launcher no longer supplies an
+independent 20-step default. `action_only` remains an explicit unranked-policy
+ablation; batching/chunking performance knobs do not change the total budget.
+
+Missing contracts, different VAE/runtime/statistics, and mismatched weight
+fingerprints fail closed. A cache certificate or historical run config does
+**not** certify an old checkpoint. Existing checkpoints are not modified.
+For a deliberately requested new Stage-1 adaptation only,
+`ROBONANA_ALLOW_UNCERTIFIED_PRETRAIN=1` permits initialization from weights with
+no contract; it never bypasses mismatched contracts, critic or resume checks,
+or online checks. New checkpoints are certified only after real training with
+validated inputs; this describes their input protocol, not model convergence
+or historical pretraining parity. No adaptation is started automatically.
+
 The default original-data pool for both phases is **Clean/hanging_mug only**
 (50 demonstrations on 190), loaded by `RoboTwinLeRobotDataset` from
 `/workspace/datasets/fact-robotwin-v2/RoboTwin`. Randomized demonstrations are

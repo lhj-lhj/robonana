@@ -257,12 +257,7 @@ run_worker() {
     --model-device cuda:0
     --vae-device cuda:0
     --text-encoder-device cuda:0
-    --action-chunk 48
-    --horizon 48
-    --num-inference-steps 20
     --inference-mode "${inference_mode}"
-    --rejection-candidate-count "${ROBONANA_REJECTION_CANDIDATE_COUNT:-32}"
-    --q-return-scale "${ROBONANA_Q_RETURN_SCALE:-1000}"
     --port "${port}"
     --max-batch-size "${jobs_per_gpu}"
     --max-batch-wait-ms "${batch_wait_ms}"
@@ -273,6 +268,11 @@ run_worker() {
   fi
 
   local server_pid=""
+  # Read omitted settings from the checkpoint; explicit requests must match.
+  [[ -z "${ROBONANA_REJECTION_CANDIDATE_COUNT:-}" ]] || server_args+=(--rejection-candidate-count "${ROBONANA_REJECTION_CANDIDATE_COUNT}")
+  [[ -z "${ROBONANA_Q_RETURN_SCALE:-}" ]] || server_args+=(--q-return-scale "${ROBONANA_Q_RETURN_SCALE}")
+  [[ -z "${ROBONANA_NUM_INFERENCE_STEPS:-}" ]] || server_args+=(--num-inference-steps "${ROBONANA_NUM_INFERENCE_STEPS}")
+  [[ -z "${ROBONANA_MAC_FLOW_SHIFT:-}" ]] || server_args+=(--flow-shift "${ROBONANA_MAC_FLOW_SHIFT}")
   local -a task_slot_pids=()
   cleanup_worker() {
     local task_slot_pid
@@ -488,7 +488,7 @@ expected_episodes=$((expected_task_count * test_num))
 expected_mp4=$((video_log * expected_episodes))
 {
   echo "inference_mode=${inference_mode}"
-  echo "rejection_candidates=${ROBONANA_REJECTION_CANDIDATE_COUNT:-32} candidate_batch_size=${candidate_batch_size}"
+  echo "rejection_candidates=${ROBONANA_REJECTION_CANDIDATE_COUNT:-checkpoint_contract} candidate_batch_size=${candidate_batch_size}"
   echo "renderer=sapien_oidn episode_isolation=1"
   echo "episode_timeout_seconds=${episode_timeout_seconds} gpu_attempts=${episode_gpu_attempts} cpu_fallback=${episode_cpu_fallback}"
   echo "jobs_per_gpu=${jobs_per_gpu} dynamic_batch=$((jobs_per_gpu > 1)) batch_wait_ms=${batch_wait_ms}"

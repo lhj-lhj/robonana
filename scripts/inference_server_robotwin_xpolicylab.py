@@ -41,9 +41,10 @@ def main() -> int:
     parser.add_argument("--model-device", default="cuda:0")
     parser.add_argument("--vae-device", default="cuda:0")
     parser.add_argument("--text-encoder-device", default="cpu")
-    parser.add_argument("--action-chunk", type=int, default=48)
-    parser.add_argument("--horizon", type=int, default=24)
-    parser.add_argument("--num-inference-steps", type=int, default=20)
+    parser.add_argument("--action-chunk", type=int, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--horizon", type=int, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--num-inference-steps", type=int, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--flow-shift", type=float, default=None, help="Must match checkpoint contract")
     parser.add_argument("--max-batch-size", type=int, default=8)
     parser.add_argument("--max-batch-wait-ms", type=float, default=100.0)
     parser.add_argument("--max-clients", type=int, default=32)
@@ -60,6 +61,7 @@ def main() -> int:
         action_chunk=args.action_chunk,
         horizon=args.horizon,
         num_inference_steps=args.num_inference_steps,
+        flow_shift=args.flow_shift,
     )
     resolved = policy.load_report.model_config
     print(

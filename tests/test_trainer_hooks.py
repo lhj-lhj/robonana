@@ -165,7 +165,15 @@ def test_fresh_critic_target_exact_copies_inherited_online_value():
 
 
 def test_critic_resume_rejects_missing_value_ema_files(monkeypatch, tmp_path):
+    import robonana.inference_contract as contracts
     trainer = object.__new__(RoboNanaTrainer)
+    trainer.model_name = "transformer"
+    trainer.inference_contract = {}
+    (tmp_path / "transformer").mkdir()
+    (tmp_path / "transformer/diffusion_pytorch_model.bin").write_bytes(b"fixture")
+    # This test isolates EMA completeness; contract verification is covered
+    # by the dedicated checkpoint-contract tests.
+    monkeypatch.setattr(contracts, "read_contract", lambda path: {})
     trainer.target_value_ema = ValueExpertEMA(torch.nn.Linear(2, 1), decay=0.995)
     monkeypatch.setattr(Trainer, "load_model_hook", lambda self, models, input_dir: None)
 

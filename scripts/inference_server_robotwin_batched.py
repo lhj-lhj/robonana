@@ -42,16 +42,17 @@ def main() -> int:
     parser.add_argument("--model-device", default="cuda:0")
     parser.add_argument("--vae-device", default="cuda:0")
     parser.add_argument("--text-encoder-device", default="cpu")
-    parser.add_argument("--action-chunk", type=int, default=48)
-    parser.add_argument("--horizon", type=int, default=48)
-    parser.add_argument("--num-inference-steps", type=int, default=20)
+    parser.add_argument("--action-chunk", type=int, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--horizon", type=int, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--num-inference-steps", type=int, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--flow-shift", type=float, default=None, help="Must match checkpoint contract")
     parser.add_argument(
         "--inference-mode",
         choices=tuple(mode.value for mode in InferenceMode),
         default=InferenceMode.ACTION_Q_REJECTION.value,
     )
-    parser.add_argument("--rejection-candidate-count", type=int, default=32)
-    parser.add_argument("--q-return-scale", type=float, default=1000.0)
+    parser.add_argument("--rejection-candidate-count", type=int, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--q-return-scale", type=float, default=None, help="Must match checkpoint contract")
     parser.add_argument("--max-batch-size", type=int, default=2)
     parser.add_argument("--max-batch-wait-ms", type=float, default=100.0)
     parser.add_argument("--max-clients", type=int, default=16)
@@ -69,6 +70,7 @@ def main() -> int:
         action_chunk=args.action_chunk,
         horizon=args.horizon,
         num_inference_steps=args.num_inference_steps,
+        flow_shift=args.flow_shift,
         inference_mode=args.inference_mode,
         rejection_candidate_count=args.rejection_candidate_count,
         q_return_scale=args.q_return_scale,

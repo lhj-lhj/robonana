@@ -143,13 +143,13 @@ class RoboNanaRobotWinPolicy:
         vae_device: str | torch.device = "cuda:1",
         text_encoder_device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
-        action_chunk: int = 48,
+        action_chunk: int | None = None,
         action_dim: int | None = None,
         state_dim: int | None = None,
-        horizon: int = 48,
+        horizon: int | None = None,
         max_horizon: int | None = None,
-        num_inference_steps: int = 20,
-        flow_shift: float = 1.0,
+        num_inference_steps: int | None = None,
+        flow_shift: float | None = None,
         grid_height: int = 12,
         grid_width: int = 24,
         main_view_width: int = 256,
@@ -157,15 +157,31 @@ class RoboNanaRobotWinPolicy:
         model_params: Flux2Params | None = None,
         inference_mode: str | InferenceMode = InferenceMode.ACTION_Q_REJECTION,
         vae_decode_batch_size: int = 4,
-        discount: float = 0.999,
-        reward_non_goal: float = -1.0,
-        reward_goal: float = 0.0,
-        success_threshold: float = 0.5,
-        rejection_candidate_count: int = 32,
-        q_return_scale: float = 1000.0,
+        discount: float | None = None,
+        reward_non_goal: float | None = None,
+        reward_goal: float | None = None,
+        success_threshold: float | None = None,
+        rejection_candidate_count: int | None = None,
+        q_return_scale: float | None = None,
     ) -> None:
         self.flux_checkpoint_dir = Path(flux_checkpoint_dir).expanduser().resolve()
         require_a_stats_path(stats_path)  # fail before loading FLUX/Qwen/VAE
+        from robonana.inference_contract import resolve_online_contract
+        self.inference_contract = resolve_online_contract(checkpoint, flux_checkpoint_dir, dict(
+            action_chunk=action_chunk, horizon=horizon, num_inference_steps=num_inference_steps,
+            flow_shift=flow_shift, discount=discount, reward_non_goal=reward_non_goal,
+            reward_goal=reward_goal, success_threshold=success_threshold,
+            rejection_candidate_count=rejection_candidate_count, q_return_scale=q_return_scale,
+        ))
+        settings = self.inference_contract["sampling"]
+        action_chunk, horizon = settings["action_chunk"], settings["horizon"]
+        num_inference_steps, flow_shift = settings["num_inference_steps"], settings["flow_shift"]
+        discount, reward_non_goal, reward_goal = settings["discount"], settings["reward_non_goal"], settings["reward_goal"]
+        success_threshold = settings["success_threshold"]
+        rejection_candidate_count, q_return_scale = settings["rejection_candidate_count"], settings["q_return_scale"]
+        if (grid_height, grid_width) != (12, 24) or (main_view_width, main_view_height) != MAIN_VIEW_SIZE:
+            raise ValueError("Checkpoint image contract requires grid 12x24 and main view 256x192")
+        print(f"Verified checkpoint inference contract: {settings}", flush=True)
         self.model_device = torch.device(model_device)
         self.vae_device = torch.device(vae_device)
         self.text_encoder_device = torch.device(text_encoder_device)

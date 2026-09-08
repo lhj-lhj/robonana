@@ -244,7 +244,13 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
             execute_actions_per_plan=48,
         ),
     )
+    from robonana.inference_contract import sampling_contract
+    sampling_contract(posttrain)  # reject invalid settings at the public entry point
     config["train"].update(
+        # Explicit one-time adaptation only; never an online/critic bypass.
+        allow_uncertified_pretrain=_env_flag("ROBONANA_ALLOW_UNCERTIFIED_PRETRAIN", False),
+        num_inference_steps=posttrain["imagination"]["sampling_steps"],
+        flow_shift=posttrain["imagination"]["flow_shift"],
         posttrain=posttrain,
         q_target_mode="mac_mot_v2",
         discount=posttrain["discount"],

@@ -47,14 +47,15 @@ def main() -> int:
     parser.add_argument("--model-device", default="cuda:0")
     parser.add_argument("--vae-device", default="cuda:1")
     parser.add_argument("--text-encoder-device", default="cpu")
-    parser.add_argument("--action-chunk", type=int, default=48)
-    parser.add_argument("--horizon", type=int, default=48)
-    parser.add_argument("--num-inference-steps", type=int, default=20)
-    parser.add_argument("--discount", type=float, default=0.999)
-    parser.add_argument("--reward-non-goal", type=float, default=-1.0)
-    parser.add_argument("--success-threshold", type=float, default=0.5)
-    parser.add_argument("--rejection-candidate-count", type=int, default=32)
-    parser.add_argument("--q-return-scale", type=float, default=1000.0)
+    parser.add_argument("--action-chunk", type=int, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--horizon", type=int, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--num-inference-steps", type=int, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--flow-shift", type=float, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--discount", type=float, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--reward-non-goal", type=float, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--success-threshold", type=float, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--rejection-candidate-count", type=int, default=None, help="Must match checkpoint contract")
+    parser.add_argument("--q-return-scale", type=float, default=None, help="Must match checkpoint contract")
     parser.add_argument(
         "--inference-mode",
         choices=tuple(mode.value for mode in InferenceMode),
@@ -80,6 +81,7 @@ def main() -> int:
         action_chunk=args.action_chunk,
         horizon=args.horizon,
         num_inference_steps=args.num_inference_steps,
+        flow_shift=args.flow_shift,
         discount=args.discount,
         reward_non_goal=args.reward_non_goal,
         success_threshold=args.success_threshold,

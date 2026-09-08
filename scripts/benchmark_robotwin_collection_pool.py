@@ -77,10 +77,8 @@ def main():
         "--flux-checkpoint-dir", str(ROOT / "checkpoints/FLUX.2-klein-base-4B"),
         "--stats-path", str(A_STATS_PATH),
         "--model-device", "cuda:0", "--vae-device", "cuda:0", "--text-encoder-device", "cuda:0",
-        "--action-chunk", "48", "--horizon", "48", "--num-inference-steps", "20",
-        "--inference-mode", "action_q_rejection", "--rejection-candidate-count", "32",
-        "--q-return-scale", "1000", "--port", str(opts.port),
-        # Scheduling knobs only: M=32, precision and all model math stay unchanged.
+        "--inference-mode", "action_q_rejection", "--port", str(opts.port),
+        # Scheduling knobs only; algorithm settings come from the checkpoint.
         "--max-batch-size", str(opts.inference_batch_size),
         "--max-batch-wait-ms", str(opts.batch_wait_ms), "--max-clients", "8",
         "--batch-metrics-path", str(output / "batch_metrics.jsonl")]
