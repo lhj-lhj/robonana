@@ -64,8 +64,7 @@ def main():
         checkpoint=args.checkpoint, model_config=args.model_config,
         flux_checkpoint_dir=args.flux_checkpoint_dir, stats_path=args.stats_path,
         model_device="cuda:0", vae_device="cuda:0", text_encoder_device="cuda:0",
-        dtype=torch.float32, action_chunk=48, horizon=48, num_inference_steps=20,
-        inference_mode="action_q_rejection", rejection_candidate_count=32, q_return_scale=1000.)
+        dtype=torch.float32, inference_mode="action_q_rejection")
 
     def infer(request_batch):
         candidates, scores, indices = [], [], []

@@ -1,4 +1,6 @@
 import json
+import ast
+from pathlib import Path
 
 import pytest
 
@@ -137,3 +139,23 @@ def test_uncertified_training_cannot_publish_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(Trainer, "save_model_hook", lambda *args: pytest.fail("Must not save"))
     with pytest.raises(RuntimeError, match="validated"):
         trainer.save_model_hook([], [], str(tmp_path))
+
+
+@pytest.mark.parametrize("server", ["robotwin", "robotwin_batched", "robotwin_xpolicylab"])
+def test_server_cli_has_no_independent_sampling_defaults(server):
+    root = Path(__file__).resolve().parents[1]
+    source = (root / f"scripts/inference_server_{server}.py").read_text(encoding="utf-8")
+    names = {"--action-chunk", "--horizon", "--num-inference-steps", "--flow-shift",
+             "--rejection-candidate-count", "--q-return-scale", "--discount",
+             "--reward-non-goal", "--success-threshold"}
+    found = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument" and node.args:
+            name = ast.literal_eval(node.args[0])
+            if name in names:
+                found.add(name)
+                assert next(ast.literal_eval(k.value) for k in node.keywords if k.arg == "default") is None
+    assert {"--num-inference-steps", "--flow-shift"} <= found
+    assert "flow_shift=args.flow_shift" in source
+    launcher = (root / "scripts/eval_robotwin_all_tasks_parallel.sh").read_text(encoding="utf-8")
+    assert "--num-inference-steps 20" not in launcher

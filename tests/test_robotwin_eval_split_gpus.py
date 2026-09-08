@@ -51,8 +51,10 @@ def test_hanging_mug_round_serializes_world_then_critic_then_collection() -> Non
         'touch "${state_dir}/critic.done"'
     )
     assert script.index('touch "${state_dir}/critic.done"') < script.index(
-        "run_ranked_eval 1"
+        'run_action_only_eval "${m1_eval_dir}"'
     )
+    assert "ROBONANA_INFERENCE_MODE=action_only" in script
+    assert 'ROBONANA_REJECTION_CANDIDATE_COUNT="${candidate_count}"' not in script
     # Collection is a separate 100-episode budget, not the comparison eval size.
     assert 'collection_num=${ROBONANA_MAC_COLLECTION_EPISODES:-100}' in script
     assert 'TEST_NUM="${collection_num}"' in script
