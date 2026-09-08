@@ -1,8 +1,9 @@
 """Opt-in probe only: defer action render synchronization, never observations.
 
 Reference: FACT evaluation/robotwin/model2robotwin_interface.py,
-_take_action_low_frequency_rgb, as vendored in our server checkout:
-https://github.com/lhj-lhj/robonana/tree/main/third_party/FACT
+_take_action_low_frequency_rgb in the server's third_party/FACT dependency.
+The wrapped upstream simulator implementation is Base_Task.take_action/get_obs:
+https://github.com/RoboTwin-Platform/RoboTwin/blob/main/envs/_base_task.py
 Unlike that adapter, this does not reduce observation frequency. The production
 client does not import/install it. Validate in SAPIEN before enabling anywhere.
 """

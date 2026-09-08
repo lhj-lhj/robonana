@@ -37,9 +37,14 @@ def main():
     parser.add_argument("--defer", action="store_true")
     parser.add_argument("--max-steps", type=int, default=0)
     opts = parser.parse_args()
+    if opts.max_steps < 0:
+        parser.error("--max-steps must be nonnegative")
+    opts.episode = opts.episode.resolve()
+    if opts.reference:
+        opts.reference = opts.reference.resolve()
     opts.output = opts.output.resolve()
     opts.output.mkdir(parents=True, exist_ok=False)
-    with h5py.File(opts.episode.resolve(), "r") as source:
+    with h5py.File(opts.episode, "r") as source:
         valid = np.asarray(source["transition_valid"], dtype=bool)
         actions = np.asarray(source["policy_action/vector"])[valid]
         recorded_states = np.asarray(source["joint_action/vector"])
@@ -49,6 +54,8 @@ def main():
         instruction = str(source.attrs["instruction"])
     if opts.max_steps:
         actions = actions[:opts.max_steps]
+    if not len(actions):
+        raise ValueError("source episode contains no valid actions")
     os.chdir(opts.robotwin.resolve())
     sys.path[:0] = [str(Path.cwd()), str(Path.cwd() / "script")]
     configure_sapien_runtime()
@@ -106,6 +113,8 @@ def main():
                         print(f"step={step} action_s={timings[-1][0]:.4f} obs_s={timings[-1][1]:.4f}", flush=True)
                 result = {
                     "seed": seed, "defer": opts.defer, "steps": len(timings),
+                    "source_episode": str(opts.episode), "task_config": task_config,
+                    "timing_scope": "take_action plus per-control-step get_obs; excludes setup, dump and policy",
                     "success": bool(task.eval_success), "setup_seconds": setup_seconds,
                     "initial_obs_seconds": initial_obs_seconds,
                     "action_seconds": float(np.sum(timings, axis=0)[0]),
