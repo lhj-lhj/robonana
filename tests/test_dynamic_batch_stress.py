@@ -118,6 +118,9 @@ def test_incomplete_tail_batch_flushes_after_wait_window() -> None:
     try:
         with ThreadPoolExecutor(max_workers=3) as executor:
             results = list(executor.map(infer, range(3)))
+        # Measure tail request completion, not the server's accept-timeout
+        # shutdown/join (which may independently wait about one second).
+        elapsed = time.perf_counter() - started
     finally:
         stop_client = RobotInferenceClient(host="127.0.0.1", port=port, timeout_ms=2000)
         try:
@@ -125,7 +128,6 @@ def test_incomplete_tail_batch_flushes_after_wait_window() -> None:
         finally:
             stop_client.close()
         server_thread.join(timeout=5)
-    elapsed = time.perf_counter() - started
 
     assert [result["request_id"] for result in results] == [0, 1, 2]
     assert policy.batch_sizes == [3]
