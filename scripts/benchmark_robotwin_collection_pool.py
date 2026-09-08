@@ -102,7 +102,9 @@ def main():
                 ROBONANA_INITIAL_DATASET_ROOT=str(opts.initial_dataset.resolve()),
                 ROBONANA_ROLLOUT_CHECKPOINT=str(opts.checkpoint.resolve()))
             logs.append((worker_dir / "client.log").open("w"))
-            worker = subprocess.Popen([str(opts.sim_python.resolve()),
+            # Never resolve a venv python symlink: invoking its target bypasses
+            # pyvenv.cfg and silently selects the wrong SAPIEN dependency set.
+            worker = subprocess.Popen([str(opts.sim_python.absolute()),
                 str(ROOT / "scripts/collect_robotwin_pool_worker.py"), "--jobs", str(job_path),
                 "--robotwin", str(opts.robotwin.resolve()), "--output", str(worker_dir),
                 "--vector-env-checkout", str(ROOT / "third_party/RoboTwin_RLinf"),
