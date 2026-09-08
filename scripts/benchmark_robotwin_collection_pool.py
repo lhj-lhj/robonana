@@ -18,6 +18,7 @@ import time
 import h5py
 
 from robonana.sim.collection_pool import EpisodeQueue, validate_jobs
+from robonana.normalization import A_STATS_PATH
 from eval_robotwin_task_isolated import terminate_process_group
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,7 +75,7 @@ def main():
     server_cmd = [sys.executable, str(ROOT / "scripts/inference_server_robotwin_batched.py"),
         "--checkpoint", str(opts.checkpoint.resolve()), "--model-config", str(opts.model_config.resolve()),
         "--flux-checkpoint-dir", str(ROOT / "checkpoints/FLUX.2-klein-base-4B"),
-        "--stats-path", str(opts.initial_dataset.resolve() / "robonana_norm_stats.json"),
+        "--stats-path", str(A_STATS_PATH),
         "--model-device", "cuda:0", "--vae-device", "cuda:0", "--text-encoder-device", "cuda:0",
         "--action-chunk", "48", "--horizon", "48", "--num-inference-steps", "20",
         "--inference-mode", "action_q_rejection", "--rejection-candidate-count", "32",

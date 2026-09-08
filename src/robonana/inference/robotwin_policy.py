@@ -16,6 +16,7 @@ from torch import Tensor
 
 from robonana.data.robotwin_hdf5 import ALOHA_DELTA_MASK
 from robonana.encoding import LocalQwen3Embedder
+from robonana.normalization import load_a_stats, require_a_stats_path
 from robonana.image_pipeline import encode_robotwin_observations, MAIN_VIEW_SIZE
 from robonana.models.pretrained import load_flux2_fact_trained_checkpoint
 from robonana.sampling import (
@@ -36,7 +37,6 @@ from world_action_model.pipeline.utils import (
     denormalize_action,
     denormalize_state,
     extract_normalization_tensors,
-    load_stats,
     normalize_state,
 )
 
@@ -204,6 +204,7 @@ class RoboNanaRobotWinPolicy:
         q_return_scale: float = 1000.0,
     ) -> None:
         self.flux_checkpoint_dir = Path(flux_checkpoint_dir).expanduser().resolve()
+        require_a_stats_path(stats_path)  # fail before loading FLUX/Qwen/VAE
         self.model_device = torch.device(model_device)
         self.vae_device = torch.device(vae_device)
         self.text_encoder_device = torch.device(text_encoder_device)
@@ -272,7 +273,7 @@ class RoboNanaRobotWinPolicy:
         self.vae.requires_grad_(False)
         self.vae.to(self.vae_device)
 
-        stats = load_stats(str(Path(stats_path).expanduser().resolve()))
+        stats = load_a_stats(stats_path)
         self.normalization = extract_normalization_tensors(
             stats,
             device=self.model_device,
@@ -525,34 +526,6 @@ class RoboNanaRobotWinPolicy:
             q=torch.cat([chunk.q for chunk in chunks], dim=1),
         )
 
-    @torch.inference_mode()
-    def _sample_world(
-        self,
-        *,
-        context: Tensor,
-        current: Tensor,
-        state: Tensor,
-        clean_action: Tensor,
-        sampling_seed: int | None = None,
-    ) -> WorldFlowSample:
-        """Compatibility wrapper for the former one-horizon Stage-2 path."""
-
-        packed = self._sample_stage2(
-            context=context,
-            current=current,
-            state=state,
-            clean_action=clean_action,
-            horizons=torch.tensor([self.horizon]),
-            include_image=True,
-            sampling_seed=sampling_seed,
-        )
-        return WorldFlowSample(
-            future=packed.future[:, 0],
-            future_state=packed.future_state[:, 0, None],
-            reward=packed.reward[:, 0, None],
-            success=packed.success[:, 0, None],
-            q=packed.q[:, 0, None],
-        )
 
     @torch.inference_mode()
     def _decode_stage2_images(self, future_tokens: Tensor) -> Tensor:
@@ -582,7 +555,7 @@ class RoboNanaRobotWinPolicy:
 
     @torch.inference_mode()
     def _decode_stage2_image(self, future_tokens: Tensor) -> Tensor:
-        """Decode one final Stage-2 prediction for the legacy response shape."""
+        """Decode the selected chunk for the maintained world-model report."""
 
         return self._decode_stage2_images(future_tokens[:, None])
 
@@ -793,26 +766,6 @@ class RoboNanaRobotWinPolicy:
             self._sync(self.model_device)
             timing["stage2_sample_ms"] = (time.perf_counter() - start) * 1000.0
 
-        # Preserve the former single-horizon live-eval path for old launch
-        # scripts. New callers should select one of the four explicit modes.
-        legacy_world: WorldFlowSample | None = None
-        legacy_stage2_image: Tensor | None = None
-        if False:  # removed legacy single-horizon stage-2 response path
-            start = time.perf_counter()
-            legacy_world = self._sample_world(
-                context=context,
-                current=current,
-                state=normalized_state,
-                clean_action=sampled_action,
-                sampling_seed=sampling_seed,
-            )
-            self._sync(self.model_device)
-            timing["legacy_stage2_sample_ms"] = (time.perf_counter() - start) * 1000.0
-            if self.return_stage2_image:
-                start = time.perf_counter()
-                legacy_stage2_image = self._decode_stage2_image(legacy_world.future)
-                self._sync(self.vae_device)
-                timing["stage2_image_decode_ms"] = (time.perf_counter() - start) * 1000.0
 
         if log_digest:
             components = observation_component_digests(observation)
@@ -891,30 +844,5 @@ class RoboNanaRobotWinPolicy:
                 response["images"] = self._decode_stage2_images(world_sample.future)
                 self._sync(self.vae_device)
                 timing["stage2_image_decode_ms"] = (time.perf_counter() - start) * 1000.0
-        if legacy_world is not None:
-            reward_probability = float(
-                legacy_world.reward[0, 0].float().reshape(-1)[0].sigmoid().item()
-            )
-            chunk_reward = (
-                self.reward_goal
-                if reward_probability >= self.success_threshold
-                else self.reward_non_goal
-            )
-            chunk_q = float(legacy_world.q[0, 0].float().reshape(-1)[0].item())
-            success_probability = float(
-                legacy_world.success[0, 0].float().reshape(-1)[0].sigmoid().item()
-            )
-            response.update(
-                chunk_reward=chunk_reward,
-                chunk_q=chunk_q,
-                return_horizon=self.horizon,
-                rewards=torch.tensor([chunk_reward], dtype=torch.float32),
-                reward_probs=torch.tensor([reward_probability], dtype=torch.float32),
-                qs=torch.tensor([chunk_q], dtype=torch.float32),
-                success_probs=torch.tensor([success_probability], dtype=torch.float32),
-                selected_index=0,
-            )
-        if legacy_stage2_image is not None:
-            response["images"] = legacy_stage2_image
         timing["total_policy_ms"] = (time.perf_counter() - total_start) * 1000.0
         return response

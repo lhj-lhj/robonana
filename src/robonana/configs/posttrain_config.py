@@ -6,6 +6,7 @@ import copy
 import os
 from pathlib import Path
 from typing import Any
+from robonana.normalization import A_STATS_PATH, require_a_stats_path
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -125,9 +126,9 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
             if item.strip()
         ),
     )
-    stats_path = Path(
-        os.environ.get("ROBONANA_REPLAY_STATS_PATH", str(original["stats_path"]))
-    ).expanduser()
+    # Reject obsolete overrides instead of silently selecting another frame.
+    stats_path = require_a_stats_path(os.environ.get("ROBONANA_REPLAY_STATS_PATH"))
+    original["stats_path"] = str(A_STATS_PATH)
     pools = [
         original,
         _replay_dataset_config(

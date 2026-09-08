@@ -19,6 +19,7 @@ import h5py
 import numpy as np
 from PIL import Image
 import torch
+from robonana.normalization import A_STATS_PATH
 
 from robonana.inference.batched_policy import BatchedRoboNanaRobotWinPolicy
 from world_action_model import apply_runtime_compat
@@ -29,7 +30,7 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--model-config", required=True)
     parser.add_argument("--flux-checkpoint-dir", required=True)
-    parser.add_argument("--stats-path", required=True)
+    parser.add_argument("--stats-path", default=str(A_STATS_PATH), help="Must be Stage-1 statistics A")
     parser.add_argument("--source-episodes", nargs="+", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=3)

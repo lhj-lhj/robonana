@@ -23,7 +23,10 @@ def test_continuation_preserves_data_and_optimizer_with_current_execution():
                                       project_dir=Path("new-run"), max_steps=10000)
     assert source["train"]["max_steps"] == 5000
     assert config["optimizers"]["betas"] == (0.9, 0.95)
-    assert config["dataloaders"]["train"]["data_or_config"] == [{"data_path": "unchanged"}]
+    from robonana.normalization import A_STATS_PATH
+    assert config["dataloaders"]["train"]["data_or_config"] == [
+        {"data_path": "unchanged", "stats_path": str(A_STATS_PATH)}]
+    assert source["dataloaders"]["train"]["data_or_config"] == [{"data_path": "unchanged"}]
     assert config["dataloaders"]["train"]["batch_size_per_gpu"] == 8
     assert config["train"]["gradient_accumulation_steps"] == 1
     assert config["train"]["mixed_precision"] == "no"

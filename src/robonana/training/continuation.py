@@ -2,6 +2,7 @@
 
 import copy
 import math
+from robonana.normalization import A_STATS_PATH
 
 
 def restore_config_tuples(value):
@@ -38,6 +39,11 @@ def build_critic_continuation(source, *, checkpoint, source_config, project_dir,
     config["models"]["checkpoint"] = str(checkpoint / "transformer/diffusion_pytorch_model.bin")
     config["models"]["checkpoint_config"] = str(source_config)
     config["dataloaders"]["train"]["batch_size_per_gpu"] = batch_size_per_gpu
+    pools = config["dataloaders"]["train"]["data_or_config"]
+    for pool in pools if isinstance(pools, (list, tuple)) else [pools]:
+        # User-approved correction, not exact reproduction of the old run.
+        # Only this new config is changed; the saved source config is untouched.
+        pool["stats_path"] = str(A_STATS_PATH)
     config["train"].update(
         max_steps=max_steps, gradient_accumulation_steps=1, mixed_precision="no",
         resume=True, resume_from=str(checkpoint), rebase_scheduler_on_resume=True,

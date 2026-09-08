@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-import h5py
 import numpy as np
 
 from .robotwin_hdf5 import ALOHA_DELTA_MASK, EpisodeRecord, discover_episode_records
@@ -61,75 +60,19 @@ class RunningMoments:
         }
 
 
-def compute_robotwin_metadata(
-    records: Iterable[EpisodeRecord],
-    *,
-    dataset_root: str | Path,
-    action_chunk: int = 48,
-    action_dim: int = 14,
-) -> tuple[dict, dict]:
-    root = Path(dataset_root).expanduser().resolve()
-    records = list(records)
-    if action_dim <= 0 or action_dim > ALOHA_DELTA_MASK.size:
-        raise ValueError(f"action_dim must lie in [1, {ALOHA_DELTA_MASK.size}]")
-    state_moments = RunningMoments(action_dim)
-    action_moments = RunningMoments(action_dim)
-    delta_mask = ALOHA_DELTA_MASK[:action_dim]
-
-    for record in records:
-        with h5py.File(record.source, "r") as handle:
-            vector = np.asarray(handle["joint_action/vector"], dtype=np.float32)[:, :action_dim]
-            action_key = "policy_action/vector" if "policy_action/vector" in handle else "joint_action/vector"
-            policy_action = np.asarray(handle[action_key], dtype=np.float32)[:, :action_dim]
-        state_moments.update(vector)
-        time = np.arange(record.length, dtype=np.int64)[:, None]
-        offsets = np.arange(action_chunk, dtype=np.int64)[None]
-        chunk = policy_action[np.clip(time + offsets, 0, record.length - 1)].copy()
-        chunk[:, :, delta_mask] -= vector[:, None, delta_mask]
-        action_moments.update(chunk)
-
-    index = {
-        "schema_version": 1,
-        "episodes": [_episode_index_row(record, root) for record in records],
-    }
-    stats = {
-        "schema_version": 1,
-        "action_representation": "ALOHA joint delta except grippers",
-        "action_chunk": int(action_chunk),
-        "norm_stats": {
-            "observation.state": state_moments.as_dict(),
-            "action": action_moments.as_dict(),
-            "value": {"min": [-1.0], "max": [2.0]},
-        },
-    }
-    return index, stats
-
-
-def write_robotwin_metadata(
-    dataset_root: str | Path,
-    *,
-    task_glob: str = "*/aloha-agilex_clean_50",
-    action_chunk: int = 48,
-    action_dim: int = 14,
-    index_path: str | Path | None = None,
-    stats_path: str | Path | None = None,
-) -> tuple[Path, Path]:
+def write_robotwin_replay_index(
+    dataset_root: str | Path, *, task_glob: str = "*/robonana_rollout"
+) -> Path:
+    """Index replay without computing or writing another normalization file."""
     root = Path(dataset_root).expanduser().resolve()
     records = discover_episode_records(root, task_glob)
-    index, stats = compute_robotwin_metadata(
-        records,
-        dataset_root=root,
-        action_chunk=action_chunk,
-        action_dim=action_dim,
-    )
-    index_output = Path(index_path).expanduser() if index_path else root / "robonana_index.json"
-    stats_output = Path(stats_path).expanduser() if stats_path else root / "robonana_norm_stats.json"
-    for path, payload in ((index_output, index), (stats_output, stats)):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(path)
-    return index_output, stats_output
+    index = {"schema_version": 1,
+             "episodes": [_episode_index_row(record, root) for record in records]}
+    output = root / "robonana_index.json"
+    temporary = output.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(output)
+    return output
 
 
 def compute_robotwin_lerobot_metadata(

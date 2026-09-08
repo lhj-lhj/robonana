@@ -91,6 +91,8 @@ def test_cache_contract_and_training_pools_fail_closed(tmp_path, monkeypatch):
                             for key in ("observation.state", "action")}}
     stats_path = tmp_path / "stats.json"
     stats_path.write_text(json.dumps(stats))
+    from robonana import normalization
+    monkeypatch.setattr(normalization, "A_STATS_PATH", stats_path)
     dataset = SimpleNamespace(_ensure_index=lambda: None,
                               stats_path=stats_path,
                               records=[SimpleNamespace(task_dir=tmp_path)])
@@ -99,7 +101,7 @@ def test_cache_contract_and_training_pools_fail_closed(tmp_path, monkeypatch):
     stats["norm_stats"]["action"]["mean"] = [1.0]
     other_path.write_text(json.dumps(stats))
     other = SimpleNamespace(_ensure_index=lambda: None, records=dataset.records, stats_path=other_path)
-    with pytest.raises(RuntimeError, match="Mixed state/action"):
+    with pytest.raises(ValueError, match="Only Stage-1"):
         pipeline.validate_training_image_contracts(SimpleNamespace(datasets=[dataset, other]), tmp_path)
     proof = output.with_suffix(".json")
     proof.unlink()

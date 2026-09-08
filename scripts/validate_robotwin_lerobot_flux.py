@@ -14,6 +14,7 @@ from robonana.data.flux_cache import (
     episode_language_context_path,
 )
 from robonana.data.robotwin_lerobot import load_lerobot_episode_records
+from robonana.normalization import load_a_stats
 
 
 def main() -> None:
@@ -24,9 +25,8 @@ def main() -> None:
     args = parser.parse_args()
     root = args.dataset_root.expanduser().resolve()
     index_path = root / "robonana_index.json"
-    stats_path = root / "robonana_norm_stats.json"
     index = json.loads(index_path.read_text(encoding="utf-8"))
-    stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    stats = load_a_stats()
     records = load_lerobot_episode_records(root, ("Clean/*", "Randomized/*"), index_path)
     clean = sum(record.task_dir.parent.name == "Clean" for record in records)
     randomized = sum(record.task_dir.parent.name == "Randomized" for record in records)

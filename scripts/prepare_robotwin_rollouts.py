@@ -40,7 +40,8 @@ from robonana.data.flux_cache import (  # noqa: E402
     episode_language_context_path,
 )
 from robonana.data.robotwin_hdf5 import RoboTwinHDF5Dataset, discover_episode_records  # noqa: E402
-from robonana.data.stats import write_robotwin_metadata  # noqa: E402
+from robonana.data.stats import write_robotwin_replay_index  # noqa: E402
+from robonana.normalization import A_STATS_PATH, load_a_stats, require_a_stats_path
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -52,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--initial-dataset-root", type=Path, default=Path("/workspace/datasets/RoboTwin/hf_dataset"))
-    parser.add_argument("--stats-source", type=Path)
+    parser.add_argument("--stats-source", type=Path, default=A_STATS_PATH, help="Must be Stage-1 statistics A")
     parser.add_argument("--task-glob", default="*/robonana_rollout")
     parser.add_argument("--device", default=None)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -78,17 +79,9 @@ def main() -> int:
         raise FileNotFoundError(checkpoint)
     records = discover_episode_records(dataset_root, args.task_glob)
     tasks = discover_task_dirs(dataset_root, args.task_glob, max_tasks=0)
-    index_path, stats_path = write_robotwin_metadata(
-        dataset_root,
-        task_glob=args.task_glob,
-        index_path=dataset_root / "robonana_index.json",
-        stats_path=dataset_root / "robonana_norm_stats.json",
-    )
-    if args.stats_source is not None:
-        source = args.stats_source.expanduser().resolve()
-        payload = json.loads(source.read_text(encoding="utf-8"))
-        payload["source_stats"] = str(source)
-        atomic_json_save(payload, stats_path)
+    stats_path = require_a_stats_path(args.stats_source)
+    load_a_stats(stats_path)  # Validate before writing anything; never refit replay statistics.
+    index_path = write_robotwin_replay_index(dataset_root, task_glob=args.task_glob)
     if args.stage == "metadata":
         print(f"episode index: {index_path}")
         print(f"normalization stats: {stats_path}")

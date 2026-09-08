@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from robonana.normalization import require_a_stats_path
 
 # A config can be consumed by standalone DataLoader tools before the Trainer is
 # imported, so register RoboNana's dataset and samplers here explicitly.
@@ -79,7 +80,7 @@ def _dataset_config(root: Path, task_glob: str, *, stats_path: Path | None = Non
     return dict(
         _class_name="RoboTwinHDF5Dataset",
         data_path=str(root),
-        stats_path=str(stats_path or (root / "robonana_norm_stats.json")),
+        stats_path=str(require_a_stats_path(stats_path)),
         index_path=str(root / "robonana_index.json"),
         task_glob=task_glob,
         action_chunk=48,

@@ -172,8 +172,7 @@ def validate_training_image_contracts(dataset, checkpoint):
     """Fail before training if any original/replay pool uses incompatible caches."""
     expected = image_contract(str(Path(checkpoint).resolve()))
     checked = set()
-    normalization = None
-    normalization_source = None
+    from robonana.normalization import require_a_stats_path
     pending = [dataset]
     visited = set()
     while pending:
@@ -184,15 +183,9 @@ def validate_training_image_contracts(dataset, checkpoint):
         if hasattr(node, "_ensure_index") and hasattr(node, "records"):
             node._ensure_index()
             # A shared image pipeline is insufficient if replay changes the
-            # coordinate system for state/clean action. Compare actual values,
-            # not file names (historical critic configs used two stats files).
-            stats = json.loads(Path(node.stats_path).read_text())["norm_stats"]
-            signature = {key: {field: stats[key][field] for field in ("mean", "std")}
-                         for key in ("observation.state", "action")}
-            if normalization is not None and signature != normalization:
-                raise RuntimeError(f"Mixed state/action normalization: {normalization_source} vs {node.stats_path}; "
-                                   "use the Stage-1 policy statistics for every pool")
-            normalization, normalization_source = signature, node.stats_path
+            # coordinate system for state/clean action. Only canonical A is
+            # accepted, even if all replay pools consistently point to B.
+            require_a_stats_path(node.stats_path)
             for record in node.records:
                 if record.task_dir not in checked:
                     require_image_contract(record.task_dir, expected)

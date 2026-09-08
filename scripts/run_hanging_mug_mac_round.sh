@@ -200,7 +200,7 @@ if [[ ! -f ${state_dir}/m32_collection.done ]]; then
     ROBONANA_ROBOTWIN_PYTHON="${robotwin_python}" \
     ROBONANA_ROLLOUT_BASE="${rollout_base}" \
     ROBONANA_INITIAL_DATASET_ROOT="${initial_dataset_root}" \
-    ROBONANA_STATS_SOURCE="${initial_dataset_root}/robonana_norm_stats.json" \
+    ROBONANA_STATS_SOURCE="/workspace/datasets/fact-robotwin-v2/RoboTwin/robonana_norm_stats.json" \
     ROBONANA_TRAINED_CHECKPOINT="${trained_checkpoint}" \
     ROBONANA_COLLECTION_ROUND="${next_round}" \
     ROBONANA_POLICY_VERSION="mac_round${round_id}_m32" \

@@ -21,6 +21,7 @@ for upstream in reversed(
         sys.path.insert(0, str(upstream))
 
 import torch
+from robonana.normalization import A_STATS_PATH
 
 from robonana.inference.batched_policy import BatchedRoboNanaRobotWinPolicy
 from robonana.inference.xpolicylab_server import XPolicyLabDynamicBatchServer
@@ -33,7 +34,7 @@ def main() -> int:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--model-config", default=None)
     parser.add_argument("--flux-checkpoint-dir", required=True)
-    parser.add_argument("--stats-path", required=True)
+    parser.add_argument("--stats-path", default=str(A_STATS_PATH), help="Must be Stage-1 statistics A")
     parser.add_argument("--xpolicylab-root", required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8094)

@@ -378,8 +378,14 @@ and HDF5 preprocessing commands with `--stage images` to rebuild explicitly.
 Old `latents` files and checkpoints are retained, not overwritten or relabeled.
 Batch-size flags now group I/O; VAE execution remains N=1.
 
-The same preflight rejects different state/action mean/std values across
-training pools. All pools must use the Stage-1 policy's normalization.
+All training pools, online policy and replay preparation now use only
+`/workspace/datasets/fact-robotwin-v2/RoboTwin/robonana_norm_stats.json` (A).
+`robonana.normalization` is the authoritative loader; B and dataset-local
+statistics are rejected even when all pools consistently select them.
+Replay preparation writes only an episode index and references A, never
+recomputes or overwrites a replay statistics file. Newly generated continuation
+configs explicitly correct every pool to A; saved source configs stay untouched.
+See [the maintained code map and cleanup scope](docs/CURRENT_CODE_MAP.md).
 
 **Historical caveat:** original LeRobot preprocessing and replay preprocessing
 previously differed in resize antialiasing. Live encoding also lacked the

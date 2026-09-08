@@ -4,6 +4,14 @@ RoboNana now has one supported path: `mac_mot_v2`, fixed `chunk_horizon=48`.
 Do not add variable-horizon or legacy checkpoint branches back into the main
 training/inference code.
 
+Read `docs/CURRENT_CODE_MAP.md` for the maintained entry points and the
+2026-09-08 cleanup boundary. Historical experiment reports are evidence, not
+alternate architecture specifications. Normalization has exactly one source:
+`robonana.normalization.A_STATS_PATH` (FACT-v2 Stage-1 statistics A). Do not
+derive statistics from a replay root or reintroduce replay-fitted statistics.
+New continuation configs correct all pools to A without editing saved runs;
+this is an intentional correction, not exact historical reproduction.
+
 ## Operational boundaries
 
 * Source checkout: `D:\Robotic\robonana`

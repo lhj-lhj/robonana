@@ -1,5 +1,6 @@
 from robonana.configs.posttrain_config import apply_mac_posttrain_config
 import pytest
+from robonana.normalization import A_STATS_PATH
 
 
 def _base(tmp_path):
@@ -26,6 +27,14 @@ def test_mac_posttrain_defaults_to_fixed48_and_1000_step_checkpoint(monkeypatch,
     assert config["train"]["posttrain"]["chunk_horizon"] == 48
     assert config["train"]["posttrain"]["ema"]["target"] == "value_expert_only"
     assert "forward_autocast_dtype" not in config["train"]["posttrain"]["ema"]
+    assert all(pool["stats_path"] == str(A_STATS_PATH)
+               for pool in config["dataloaders"]["train"]["data_or_config"])
+
+
+def test_replay_cannot_override_normalization_a(monkeypatch, tmp_path):
+    monkeypatch.setenv("ROBONANA_REPLAY_STATS_PATH", "/old/B.json")
+    with pytest.raises(ValueError, match="Only Stage-1"):
+        apply_mac_posttrain_config(_base(tmp_path))
 
 
 def test_mac_critic_phase_only_changes_expert_training_surface(monkeypatch, tmp_path):

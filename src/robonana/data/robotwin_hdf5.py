@@ -364,7 +364,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
     def open(self) -> None:
         self._ensure_index()
         if self._stats is None:
-            self._stats = json.loads(Path(self.stats_path).expanduser().read_text(encoding="utf-8"))
+            from robonana.normalization import load_a_stats
+            self._stats = load_a_stats(self.stats_path)
 
     def close(self) -> None:
         for handle in self._hdf5_cache.values():
