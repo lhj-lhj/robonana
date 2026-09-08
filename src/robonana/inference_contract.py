@@ -85,16 +85,24 @@ def read_contract(weights):
 
 
 def check_contract(actual, expected):
+    if actual.get('phase') == 'converted_action_only':
+        raise ValueError('Converted actor is not a certified training/critic checkpoint; explicitly adapt in Stage 1')
     for key, value in expected.items():
         if actual.get(key) != value:
             raise ValueError(f"Checkpoint inference contract mismatch: {key}")
 
 
-def resolve_online_contract(weights, vae_checkpoint, overrides):
+def resolve_online_contract(weights, vae_checkpoint, overrides, *, inference_mode=None):
     from robonana.image_pipeline import image_contract
     from robonana.normalization import require_a_stats_path
     actual = read_contract(weights)
-    check_contract(actual, dict(
+    execution = actual
+    if actual.get('phase') == 'converted_action_only':
+        if inference_mode != 'action_only' or actual.get('capabilities') != ['action_only']:
+            raise ValueError('Converted 120k actor only supports action_only; Q/world heads are untrained')
+        # Explicit execution-only migration, never historical input certification.
+        execution = dict(actual, phase='execution_validation')
+    check_contract(execution, dict(
         image=image_contract(str(Path(vae_checkpoint).expanduser().resolve())),
         normalization_sha256=sha256_file(require_a_stats_path()),
         action_mapping="A_zscore_delta_to_absolute_no_clip_nonfinite_fallback_v1",

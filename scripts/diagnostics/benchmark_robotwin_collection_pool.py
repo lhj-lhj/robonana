@@ -23,6 +23,7 @@ import h5py
 
 from robonana.sim.collection_pool import EpisodeQueue, validate_jobs
 from robonana.normalization import A_STATS_PATH
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "internal"))
 from eval_robotwin_task_isolated import terminate_process_group
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +45,7 @@ def main():
     parser.add_argument("--inference-batch-size", type=int, default=1)
     parser.add_argument("--batch-wait-ms", type=float, default=0)
     parser.add_argument("--candidate-batch-size", type=int, default=16)
+    parser.add_argument("--inference-mode", choices=("action_only", "action_q_rejection"), default="action_q_rejection")
     opts = parser.parse_args()
     if not 1 <= opts.inference_batch_size <= 8 or not 1 <= opts.candidate_batch_size <= 32:
         parser.error("request batch must be 1..8 and candidate batch 1..32")
@@ -81,7 +83,7 @@ def main():
         "--flux-checkpoint-dir", str(ROOT / "checkpoints/FLUX.2-klein-base-4B"),
         "--stats-path", str(A_STATS_PATH),
         "--model-device", "cuda:0", "--vae-device", "cuda:0", "--text-encoder-device", "cuda:0",
-        "--inference-mode", "action_q_rejection", "--port", str(opts.port),
+        "--inference-mode", opts.inference_mode, "--port", str(opts.port),
         # Scheduling knobs only; algorithm settings come from the checkpoint.
         "--max-batch-size", str(opts.inference_batch_size),
         "--max-batch-wait-ms", str(opts.batch_wait_ms), "--max-clients", "8",
@@ -90,6 +92,8 @@ def main():
     configuration["source_episodes"] = [str(p) for p in opts.source_episodes]
     configuration["commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     (output / "config.json").write_text(json.dumps(configuration, indent=2), encoding="utf-8")
+    (output / "seeds.json").write_text(json.dumps({"task_name": task_name,
+        "task_config": task_config, "jobs": jobs}, indent=2), encoding="utf-8")
     children, logs, workers = [], [], []
     start = time.perf_counter()
     def interrupted(signum, _frame):

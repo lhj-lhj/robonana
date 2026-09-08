@@ -55,6 +55,16 @@ def test_checkpoint_contract_roundtrip_and_weight_binding(tmp_path):
         contracts.read_contract(weights)
 
 
+def test_converted_actor_is_not_a_certified_training_checkpoint(tmp_path):
+    weights, expected = _saved(tmp_path)
+    contracts.write_contract(weights, dict(expected, capabilities=['action_only'],
+        historical_training_inputs_certified=False), phase='converted_action_only', step=120000)
+    with pytest.raises(ValueError, match='not a certified'):
+        contracts.check_contract(contracts.read_contract(weights), expected)
+    with pytest.raises(ValueError, match='only supports action_only'):
+        contracts.resolve_online_contract(weights, tmp_path, {}, inference_mode='action_q_rejection')
+
+
 def test_old_checkpoint_never_infers_certificate_from_run_config(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"train": {"num_inference_steps": 20}}))
     with pytest.raises(FileNotFoundError, match="Uncertified checkpoint"):

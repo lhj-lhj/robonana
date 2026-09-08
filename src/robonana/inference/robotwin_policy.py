@@ -172,7 +172,7 @@ class RoboNanaRobotWinPolicy:
             flow_shift=flow_shift, discount=discount, reward_non_goal=reward_non_goal,
             reward_goal=reward_goal, success_threshold=success_threshold,
             rejection_candidate_count=rejection_candidate_count, q_return_scale=q_return_scale,
-        ))
+        ), inference_mode=inference_mode)
         settings = self.inference_contract["sampling"]
         action_chunk, horizon = settings["action_chunk"], settings["horizon"]
         num_inference_steps, flow_shift = settings["num_inference_steps"], settings["flow_shift"]
