@@ -200,7 +200,7 @@ class RoboNanaRobotWinPolicy:
             or self.vae_decode_batch_size <= 0
         ):
             raise ValueError(
-                "action_chunk, num_inference_steps, 
+                "action_chunk, num_inference_steps, "
                 "and vae_decode_batch_size must be positive"
             )
 
