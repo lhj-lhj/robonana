@@ -98,6 +98,16 @@ only when a complete 48-step chunk exists and are never padded.
 
 ## Validation
 
+Collection infrastructure probes and their verified timing/data-equivalence
+results are documented in `docs/COLLECTION_POOL.md`. The opt-in collector loads
+the pinned official RoboTwin RLinf-support VectorEnv directly, reuses isolated
+environment processes and distributes accepted seeds through an atomic FIFO.
+On 2026-09-08, doubling workers from two to four on GPUs 6/7 did not improve
+throughput for the same eight episodes (1433.123 versus 1462.043 seconds).
+Inference batch remains one; no RoboNana algorithm or production collection
+default changed. Do not confuse GPU utilization or free memory with a measured
+hardware throughput ceiling, or merge benchmark data into replay automatically.
+
 Run on 190 after syncing the commit:
 
 ```bash

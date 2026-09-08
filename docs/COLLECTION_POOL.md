@@ -123,3 +123,76 @@ Production collection defaults remain unchanged until a longer stress test.
 The old render-sync probe and its test/report were removed at the user's request;
 their historical results remain recoverable in Git. Its ~1% simulated-step gain
 did not justify enabling it. Remote raw benchmark artifacts were not removed.
+
+## Dynamic queue: two versus four environments (2026-09-08)
+
+Both runs used implementation commit `5dd6730`, the same step11000 checkpoint,
+the same eight accepted seeds/instructions, and only B200 GPUs 6/7. Both kept
+FP32, 48 actions, 20 denoising steps, M=32, candidate batch=16 and server request
+batch=1. The only A/B difference was worker count/placement; both used the new
+FIFO queue. The two-environment run finished before the four-environment run
+started. These are one trial per configuration, not repeated confidence bounds.
+
+| Configuration | Worker GPU slots | Wall time, startup included | Episodes/hour | Peak GPU6 / GPU7 memory |
+|---|---|---:|---:|---:|
+| 2 persistent environments | 6, 7 | 1433.123 s (23m53s) | 20.096 | 41,577 / 7,037 MiB |
+| 4 persistent environments | 6, 7, 6, 7 | 1462.043 s (24m22s) | 19.698 | 48,605 / 14,065 MiB |
+
+Four environments took **2.02% longer**, with **0.980x throughput**. This small
+difference does not establish a statistically meaningful slowdown, but it shows
+no useful gain from doubling environments in this placement. Keep two workers
+as the measured baseline; do not call this the B200 hardware ceiling.
+
+Mean sampled GPU utilization after the first 60 seconds (including queue drain)
+was GPU6/GPU7 **81.83%/46.03%** for two environments and **97.87%/36.48%** for four.
+Samples were taken approximately every two seconds. Utilization measures device
+activity, not achieved FLOPs or complete occupancy. Plenty of memory remained;
+the test was not memory-capacity limited. Per-episode times generally increased
+substantially with four workers. The model server still serializes requests, and
+GPU6 shares inference with rendering; resource contention and final-job tail
+effects are plausible explanations, not a separately isolated profile result.
+
+| Seed | Result | Actions | 2-env episode seconds | 4-env episode seconds |
+|---|---|---:|---:|---:|
+| 100000 | success | 328 | 202.847 | 379.398 |
+| 100001 | success | 326 | 217.207 | 366.619 |
+| 100003 | success | 329 | 165.883 | 392.369 |
+| 100004 | failure | 900 | 438.706 | 956.419 |
+| 100005 | failure | 900 | 417.107 | 863.018 |
+| 100006 | failure | 900 | 420.791 | 857.220 |
+| 100008 | failure | 900 | 385.191 | 853.314 |
+| 100009 | failure | 900 | 340.961 | 489.127 |
+
+Validation compared final HDF5s **by seed**, not their completion-order filenames:
+
+- All eight seeds completed exactly once; both SQLite queues contain eight done
+  rows. Both supervisor ledger/final-observation checks passed.
+- Both runs produced three successes, five full 900-step failures and **5,491
+  observations**. All **16,473 camera JPEGs** are byte-identical.
+- All 11 datasets per episode match exactly: joint/policy actions, three camera
+  streams, candidate counts/Qs, selected indices/Qs, margins and transition masks.
+- Success, instruction, task/config and final-observation attributes match.
+- Ten collection-pool unit tests passed locally and on 190 before both runs.
+  Model, loss, inference, sampling and dataset-writer code was not changed.
+
+Authoritative artifacts on 190:
+
+```text
+/data3/hongjia/robonana/outputs/collection_pool_dynamic2_8_20260908
+/data3/hongjia/robonana/outputs/collection_pool_dynamic4_8_20260908
+```
+
+Each contains `summary.json`, `config.json`, `gpu_usage.jsonl`, the SQLite queue,
+worker logs/episode ledgers and the separate dataset. Use these ledgers rather
+than the stock RoboTwin `_result.txt`: its outer evaluation count is not the
+number dynamically claimed by an individual worker. No probe dataset was merged
+into replay, and production collection defaults were not changed.
+
+Linear extrapolation at this exact episode-length mix is **4.98 hours per 100
+episodes** with two workers versus **5.08 hours** with four. This is not a measured
+100-episode duration: seed discovery is excluded, startup/drain costs do not scale
+linearly, success/length mix can change, and eight-reset/long-run stability remains
+untested. A sensible next controlled test is a dedicated inference GPU6 with two
+environment workers on GPU7 (`--sim-gpus 7 7`). Request batching is another distinct
+experiment requiring action/Q numerical and selected-index checks; neither was
+enabled or claimed faster by this test.
