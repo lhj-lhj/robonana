@@ -19,8 +19,9 @@ from diffusers.models import AutoencoderKLFlux2
 from preprocess_robotwin_flux import build_composite_batch, HDF5_CAMERAS
 from robonana.encoding import encode_flux2_image_tokens
 from robonana.image_pipeline import (
-    VIEW_KEYS, build_robotwin_vae_input, encode_robotwin_observations, image_contract,
+    VIEW_KEYS, build_robotwin_vae_input, image_contract,
 )
+from robonana.inference.batched_policy import BatchedRoboNanaRobotWinPolicy
 
 
 def main():
@@ -43,13 +44,20 @@ def main():
                     obs[key] = np.asarray(image.convert("RGB")).copy()
             observations.append(obs)
     report = {"contract": image_contract(str(args.checkpoint)), "sources": {}}
+    # Exercise the actual live adapters without loading unrelated FLUX/Qwen
+    # weights. These two image methods require only the frozen VAE and layout.
+    policy = object.__new__(BatchedRoboNanaRobotWinPolicy)
+    policy.vae = vae
+    policy.main_view_size = (256, 192)
+    policy.grid_height, policy.grid_width = 12, 24
+    policy.model_device, policy.dtype = torch.device(args.device), torch.float32
 
     def check(label, pixels, rows):
         live_pixels = torch.cat([build_robotwin_vae_input(row) for row in rows])
         assert torch.equal(pixels, live_pixels), f"{label}: pixel mismatch"
         cache = encode_flux2_image_tokens(vae, pixels.to(args.device)).bfloat16().float()
-        batch = encode_robotwin_observations(vae, rows)
-        solo = torch.cat([encode_robotwin_observations(vae, [row]) for row in rows])
+        batch = policy._batched_current_image_tokens(rows)
+        solo = torch.cat([policy._current_image_tokens(row) for row in rows])
         assert torch.equal(cache, batch) and torch.equal(cache, solo), f"{label}: token mismatch"
         report["sources"][label] = {"pixel_equal": True, "cache_live_b1_b2_equal": True,
                                      "max_abs_error": float((cache - batch).abs().max()),

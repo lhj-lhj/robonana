@@ -137,7 +137,8 @@ It imports the common FACT/FLUX dimensions and applies the MAC overlay:
 These are defaults for new runs, not overrides of saved continuation configs.
 RoboNana FLUX, imagination, Q/V and environment policy inference are FP32-only.
 There is no alternate precision switch; stale mixed-precision overrides fail
-early. Frozen external encoders (Qwen/VAE) and their cache formats are unchanged.
+early. Frozen Qwen is unchanged; image preprocessing follows the unified
+contract documented below.
 The already-running critic-only continuation retains its old mixed-precision
 behavior until explicitly restarted; see [the precision boundary](docs/WORLD_PREFIX_CACHE.md#sharing-with-critics-and-precision).
 
@@ -377,6 +378,9 @@ and HDF5 preprocessing commands with `--stage images` to rebuild explicitly.
 Old `latents` files and checkpoints are retained, not overwritten or relabeled.
 Batch-size flags now group I/O; VAE execution remains N=1.
 
+The same preflight rejects different state/action mean/std values across
+training pools. All pools must use the Stage-1 policy's normalization.
+
 **Historical caveat:** original LeRobot preprocessing and replay preprocessing
 previously differed in resize antialiasing. Live encoding also lacked the
 cache BF16 roundtrip and had batch-dependent VAE execution. Old checkpoints
@@ -390,6 +394,12 @@ the pixels supplied to live inference. Old JPEG data remains readable.
 and online batch=1/2 with the real VAE; it writes no dataset caches. Equality
 on this test does not promise bit-identical results across GPU/runtime changes
 or certify action sampling numerics, which are a separate boundary.
+
+190 validation at `1c83eb0`: 155 tests passed, one skipped; real B200/FP32 VAE
+on two decoded HDF5 replay frames and two decoded Clean LeRobot frames gave
+bitwise-equal pixels and `[2,288,128]` model inputs for cache/live B1/live B2
+(max absolute error 0). This is a bounded regression probe, not a full-dataset
+audit or proof of old-cache parity. See [the audit](docs/IMAGE_PIPELINE_AUDIT.md).
 
 ## Archived history
 

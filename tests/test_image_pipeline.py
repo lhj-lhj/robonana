@@ -87,9 +87,20 @@ def test_cache_contract_and_training_pools_fail_closed(tmp_path, monkeypatch):
     pipeline.save_image_cache(torch.zeros(2, 288, 128), output)
     assert pipeline.valid_image_cache(output, 2)
     assert not pipeline.valid_image_cache(output, 3)
+    stats = {"norm_stats": {key: {"mean": [0.0], "std": [1.0]}
+                            for key in ("observation.state", "action")}}
+    stats_path = tmp_path / "stats.json"
+    stats_path.write_text(json.dumps(stats))
     dataset = SimpleNamespace(_ensure_index=lambda: None,
+                              stats_path=stats_path,
                               records=[SimpleNamespace(task_dir=tmp_path)])
     pipeline.validate_training_image_contracts(SimpleNamespace(datasets=[dataset]), tmp_path)
+    other_path = tmp_path / "other_stats.json"
+    stats["norm_stats"]["action"]["mean"] = [1.0]
+    other_path.write_text(json.dumps(stats))
+    other = SimpleNamespace(_ensure_index=lambda: None, records=dataset.records, stats_path=other_path)
+    with pytest.raises(RuntimeError, match="Mixed state/action"):
+        pipeline.validate_training_image_contracts(SimpleNamespace(datasets=[dataset, other]), tmp_path)
     proof = output.with_suffix(".json")
     proof.unlink()
     assert not pipeline.valid_image_cache(output)
