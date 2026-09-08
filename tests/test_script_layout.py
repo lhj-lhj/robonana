@@ -56,6 +56,13 @@ def test_all_shell_scripts_parse():
         subprocess.run(["bash", "-n", str(path)], check=True, capture_output=True, text=True)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Executable permissions are validated on 190")
+def test_moved_executable_entrypoints_keep_their_permissions():
+    for relative in ("env/robotwin_eval_python.sh", "env/install_sapien_oidn_blackwell.sh",
+                     "services/inference_server_robotwin_xpolicylab.py"):
+        assert os.access(SCRIPTS / relative, os.X_OK), relative
+
+
 @pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="Dependency environment is on 190")
 @pytest.mark.parametrize("relative", [
     "services/inference_server_robotwin.py",
