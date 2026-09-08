@@ -23,6 +23,7 @@ import h5py
 
 from robonana.sim.collection_pool import EpisodeQueue, validate_jobs
 from robonana.normalization import A_STATS_PATH
+from robonana.inference_contract import sha256_file
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "internal"))
 from eval_robotwin_task_isolated import terminate_process_group
 
@@ -48,6 +49,7 @@ def main():
     parser.add_argument("--batch-wait-ms", type=float, default=0)
     parser.add_argument("--candidate-batch-size", type=int, default=16)
     parser.add_argument("--inference-mode", choices=("action_only", "action_q_rejection"), default="action_q_rejection")
+    parser.add_argument('--collection-round', type=int, default=0)
     opts = parser.parse_args()
     if not 1 <= opts.inference_batch_size <= 8 or not 1 <= opts.candidate_batch_size <= 32:
         parser.error("request batch must be 1..8 and candidate batch 1..32")
@@ -55,6 +57,8 @@ def main():
         parser.error("use a positive bounded wait (<=1000 ms) for dynamic multi-request batching")
     if any(gpu < 0 for gpu in opts.sim_gpus):
         parser.error("GPU ids must be nonnegative; repeat an id for multiple isolated workers")
+    if opts.collection_round < 0:
+        parser.error('collection round must be nonnegative')
     jobs, signatures = [], set()
     if opts.jobs_json:
         manifest = json.loads(opts.jobs_json.read_text())
@@ -62,6 +66,11 @@ def main():
             parser.error('jobs manifest must record expert validation')
         jobs = manifest['jobs']
         signatures.add((manifest['task_name'], manifest['task_config']))
+        if manifest.get('purpose') == 'fixed_training_scenes_not_heldout_eval':
+            revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=opts.robotwin, text=True).strip()
+            digest = sha256_file(opts.robotwin / 'task_config' / (manifest['task_config'] + '.yml'))
+            if revision != manifest['robotwin_commit'] or digest != manifest['task_config_sha256']:
+                parser.error('fixed scene manifest simulator commit/task config mismatch')
     for path in opts.source_episodes:
         with h5py.File(path, "r") as handle:
             signatures.add((str(handle.attrs["task_name"]), str(handle.attrs["task_config"])))
@@ -81,6 +90,7 @@ def main():
     pythonpath = os.pathsep.join(str(ROOT / p) for p in
         ("src", "third_party/FACT", "third_party/flux2_official/src", "third_party/flux2/src"))
     common = dict(os.environ, PYTHONPATH=pythonpath, PYTHONUNBUFFERED="1")
+    common['ROBONANA_COLLECTION_ROUND'] = str(opts.collection_round)
     # Do not inherit optional diagnostics or global instruction overrides.
     common.update(ROBONANA_SELECTED_WORLD_ROOT="", ROBONANA_EVAL_INSTRUCTION="",
                   ROBONANA_OVERLAY_CHUNK_RETURN="0", ROBONANA_Q_DIAGNOSTICS_PATH="")
@@ -100,8 +110,8 @@ def main():
     configuration["source_episodes"] = [str(p) for p in opts.source_episodes]
     configuration["commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     (output / "config.json").write_text(json.dumps(configuration, indent=2), encoding="utf-8")
-    (output / "seeds.json").write_text(json.dumps({"task_name": task_name,
-        "task_config": task_config, "jobs": jobs}, indent=2), encoding="utf-8")
+    fixture = manifest if opts.jobs_json else dict(task_name=task_name, task_config=task_config, jobs=jobs)
+    (output / "seeds.json").write_text(json.dumps(fixture, indent=2), encoding="utf-8")
     children, logs, workers = [], [], []
     start = time.perf_counter()
     def interrupted(signum, _frame):
@@ -155,7 +165,7 @@ def main():
         rows = []
         for complete in sorted(output.glob("worker_*/complete.json")):
             rows.extend(json.loads(complete.read_text()))
-        actual = []
+        actual, files_by_seed = [], {}
         for file in dataset.glob("*/robonana_rollout/data/episode*.hdf5"):
             with h5py.File(file, "r") as handle:
                 frames = len(handle["joint_action/vector"])
@@ -165,12 +175,21 @@ def main():
                 for camera in ("head_camera", "left_camera", "right_camera"):
                     assert len(handle[f"observation/{camera}/rgb"]) == frames
                 actual.append(int(handle.attrs["seed"]))
+                files_by_seed[int(handle.attrs['seed'])] = str(file)
         expected = sorted(int(job["seed"]) for job in jobs)
         if sorted(actual) != expected or sorted(r["seed"] for r in rows) != expected:
             raise RuntimeError("completed ledger/HDF5 seeds disagree with assigned jobs")
         if queue.counts() != {"done": len(jobs)}:
             raise RuntimeError("queue has unfinished claims")
+        instructions = {int(job['seed']): job['instruction'] for job in jobs}
+        rows.sort(key=lambda row: row['seed'])
+        for row in rows:
+            row.update(instruction=instructions[row['seed']], hdf5=files_by_seed[row['seed']],
+                       round=opts.collection_round)
         summary = {"episodes": rows, "wall_seconds_including_startup": elapsed,
+                   "success_count": sum(bool(row['success']) for row in rows),
+                   "success_rate": sum(bool(row['success']) for row in rows) / len(rows),
+                   "collection_round": opts.collection_round, "inference_mode": opts.inference_mode,
                    "episodes_per_hour": len(rows) * 3600 / elapsed,
                    "dataset_validated": True, "inference_batch_size": opts.inference_batch_size,
                    "candidate_batch_size": opts.candidate_batch_size,
