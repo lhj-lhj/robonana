@@ -55,10 +55,6 @@ def _parse_inference_mode(value: str | InferenceMode) -> InferenceMode:
         raise ValueError(f"inference_mode must be one of: {choices}") from error
 
 
-def _clamp_like(value: Tensor, lower: Tensor, upper: Tensor) -> Tensor:
-    return torch.maximum(torch.minimum(value, upper), lower)
-
-
 def seeded_randn_like(reference: Tensor, seed: int | None) -> Tensor:
     """Sample without coupling evaluation noise to the server's global RNG."""
 
@@ -116,7 +112,9 @@ def postprocess_action(
 
     action = denormalize_action(normalized_action.float(), normalization, mode="zscore")
     action = torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
-    action = _clamp_like(action, normalization.action_min, normalization.action_max)
+    # DO NOT ENABLE action-range clipping: Q and the world model condition on
+    # the sampled action, not a clipped replacement. Keep finite actions intact.
+    # action = torch.maximum(torch.minimum(action, normalization.action_max), normalization.action_min)
     action = add_state_to_action(
         action,
         raw_state.float(),
@@ -125,7 +123,10 @@ def postprocess_action(
     )
     fallback = raw_state.float().unsqueeze(0).expand(action.shape[0], -1)[..., : action.shape[-1]]
     action = torch.where(torch.isfinite(action), action, fallback)
-    return _clamp_like(action, normalization.state_min, normalization.state_max)
+    # DO NOT ENABLE state-range clipping either: after restoring absolute joint
+    # targets this would again change the action selected/scored by the model.
+    # action = torch.maximum(torch.minimum(action, normalization.state_max), normalization.state_min)
+    return action
 
 
 class RoboNanaRobotWinPolicy:
