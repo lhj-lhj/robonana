@@ -32,6 +32,10 @@ Removed after checking source/script/test callers:
 
 1. Unreachable `if False` legacy world response branch and its output assembly
    in `robotwin_policy.py`, plus `_sample_world`, called only by that branch.
+   The second reference audit also removed the disabled variable-horizon reward
+   curve/query chain, its `_sample_stage2*` wrappers, external-action inverse
+   adapter and unused horizon-batch CLI flag. Current reports use
+   `selected_world.predict_selected_world -> sample_mac_world`, not this chain.
 2. `scripts/diagnose_robotwin_batch_numerics.py`, the one-off investigation of
    the former batch-dependent VAE. Its old solo/batched VAE comparison no
    longer tests the removed pipeline. Keep the recorded results in outputs

@@ -62,12 +62,6 @@ def main() -> int:
         help="Sample 48-step action candidates and select argmax Q.",
     )
     parser.add_argument(
-        "--stage2-image-horizon-batch-size",
-        type=int,
-        default=4,
-        help="Packed horizon blocks per Stage-2 forward when future images are enabled.",
-    )
-    parser.add_argument(
         "--vae-decode-batch-size",
         type=int,
         default=4,
@@ -92,7 +86,6 @@ def main() -> int:
         rejection_candidate_count=args.rejection_candidate_count,
         q_return_scale=args.q_return_scale,
         inference_mode=args.inference_mode,
-        stage2_image_horizon_batch_size=args.stage2_image_horizon_batch_size,
         vae_decode_batch_size=args.vae_decode_batch_size,
     )
     resolved = policy.load_report.model_config

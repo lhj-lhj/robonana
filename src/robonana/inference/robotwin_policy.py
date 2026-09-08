@@ -21,10 +21,8 @@ from robonana.image_pipeline import encode_robotwin_observations, MAIN_VIEW_SIZE
 from robonana.models.pretrained import load_flux2_fact_trained_checkpoint
 from robonana.sampling import (
     QRejectionSample,
-    WorldFlowSample,
     flow_euler_schedule,
     sample_flux2_action,
-    sample_flux2_world,
     sample_q_rejection,
 )
 from robonana.training.visualization import decode_flux2_tokens
@@ -35,7 +33,6 @@ from world_action_model.pipeline.utils import (
     NormalizationTensors,
     add_state_to_action,
     denormalize_action,
-    denormalize_state,
     extract_normalization_tensors,
     normalize_state,
 )
@@ -75,16 +72,6 @@ def seeded_randn_like(reference: Tensor, seed: int | None) -> Tensor:
         dtype=reference.dtype,
         generator=generator,
     )
-
-
-def discounted_reward_sum(rewards: Tensor, discount: float) -> Tensor:
-    """Discount and sum a one-dimensional per-horizon reward curve."""
-
-    rewards = rewards.float().reshape(-1)
-    if not 0.0 < float(discount) <= 1.0:
-        raise ValueError("discount must lie in (0, 1]")
-    powers = torch.arange(rewards.numel(), device=rewards.device, dtype=rewards.dtype)
-    return (rewards * float(discount) ** powers).sum()
 
 
 def observation_digest(observation: dict[str, Any]) -> str:
@@ -141,32 +128,6 @@ def postprocess_action(
     return _clamp_like(action, normalization.state_min, normalization.state_max)
 
 
-def preprocess_action_chunk(
-    absolute_action: Tensor,
-    raw_state: Tensor,
-    normalization: NormalizationTensors,
-    *,
-    delta_mask: Tensor,
-) -> Tensor:
-    """Apply the exact inverse of ``postprocess_action`` for Stage-2 inputs."""
-
-    if absolute_action.ndim != 2:
-        raise ValueError("action_chunk must have shape [T, action_dim]")
-    action_dim = normalization.action_mean.shape[-1]
-    if absolute_action.shape[-1] != action_dim:
-        raise ValueError(f"action_chunk must have action_dim={action_dim}")
-    if raw_state.numel() < action_dim:
-        raise ValueError(f"observation state must contain at least {action_dim} values")
-    if not torch.isfinite(absolute_action).all():
-        raise ValueError("action_chunk contains non-finite values")
-    delta_mask = delta_mask.to(device=absolute_action.device, dtype=torch.bool)
-    delta = absolute_action.float().clone()
-    delta[:, delta_mask] -= raw_state.float()[None, :action_dim][:, delta_mask]
-    return (
-        delta - normalization.action_mean.to(device=delta.device)
-    ) / normalization.action_std.to(device=delta.device).clamp_min(1e-8)
-
-
 class RoboNanaRobotWinPolicy:
     """Encode a live RoboTwin observation and sample one absolute action chunk."""
 
@@ -194,7 +155,6 @@ class RoboNanaRobotWinPolicy:
         main_view_height: int = 192,
         model_params: Flux2Params | None = None,
         inference_mode: str | InferenceMode = InferenceMode.ACTION_Q_REJECTION,
-        stage2_image_horizon_batch_size: int = 4,
         vae_decode_batch_size: int = 4,
         discount: float = 0.999,
         reward_non_goal: float = -1.0,
@@ -219,7 +179,6 @@ class RoboNanaRobotWinPolicy:
         self.grid_width = int(grid_width)
         self.main_view_size = (int(main_view_width), int(main_view_height))
         self.inference_mode = _parse_inference_mode(inference_mode)
-        self.stage2_image_horizon_batch_size = int(stage2_image_horizon_batch_size)
         self.vae_decode_batch_size = int(vae_decode_batch_size)
         self.discount = float(discount)
         self.reward_non_goal = float(reward_non_goal)
@@ -238,11 +197,10 @@ class RoboNanaRobotWinPolicy:
         if (
             self.action_chunk <= 0
             or self.num_inference_steps <= 0
-            or self.stage2_image_horizon_batch_size <= 0
             or self.vae_decode_batch_size <= 0
         ):
             raise ValueError(
-                "action_chunk, num_inference_steps, stage2_image_horizon_batch_size, "
+                "action_chunk, num_inference_steps, 
                 "and vae_decode_batch_size must be positive"
             )
 
@@ -388,146 +346,6 @@ class RoboNanaRobotWinPolicy:
         raise RuntimeError(f"unsupported inference mode: {self.inference_mode}")
 
     @torch.inference_mode()
-    def _sample_stage2_chunk(
-        self,
-        *,
-        context: Tensor,
-        current: Tensor,
-        state: Tensor,
-        clean_action: Tensor,
-        horizons: Tensor,
-        include_image: bool,
-        sampling_seed: int | None = None,
-    ) -> WorldFlowSample:
-        """Jointly sample isolated horizon blocks under one clean action track."""
-
-        batch_size = 1
-        horizons = torch.as_tensor(
-            horizons,
-            device=self.model_device,
-            dtype=torch.long,
-        ).reshape(-1)
-        if horizons.numel() == 0:
-            raise ValueError("Stage-2 requires at least one horizon")
-        if torch.any(horizons < 1) or torch.any(horizons > self.max_horizon):
-            raise ValueError(f"Stage-2 horizons must lie in [1, {self.max_horizon}]")
-        horizon_count = int(horizons.numel())
-        horizon_matrix = horizons[None]
-        if include_image:
-            image_tokens = self.grid_height * self.grid_width
-        else:
-            image_tokens = 0
-        context_mask = torch.ones(
-            batch_size,
-            context.shape[1],
-            device=self.model_device,
-            dtype=torch.bool,
-        )
-        future_template = torch.zeros(
-            batch_size,
-            horizon_count,
-            image_tokens,
-            current.shape[-1],
-            device=self.model_device,
-            dtype=self.dtype,
-        )
-        future_state_template = torch.zeros(
-            batch_size,
-            horizon_count,
-            self.state_dim,
-            device=self.model_device,
-            dtype=self.dtype,
-        )
-        reward_template = torch.zeros(
-            batch_size,
-            horizon_count,
-            self.model.reward_dim,
-            device=self.model_device,
-            dtype=self.dtype,
-        )
-        q_template = torch.zeros(
-            batch_size,
-            horizon_count,
-            self.model.q_dim,
-            device=self.model_device,
-            dtype=self.dtype,
-        )
-
-        def stream_seed(offset: int) -> int | None:
-            return None if sampling_seed is None else int(sampling_seed) + int(offset)
-
-        future_noise = seeded_randn_like(future_template, stream_seed(1))
-        future_state_noise = seeded_randn_like(future_state_template, stream_seed(2))
-        reward_query = reward_template
-        q_noise = seeded_randn_like(q_template, stream_seed(4))
-        return sample_flux2_world(
-            model=self.model,
-            context=context,
-            current_latents=current,
-            state=state,
-            context_mask=context_mask,
-            clean_action=clean_action,
-            chunk_horizon=horizon_matrix,
-            future_noise=future_noise,
-            future_state_noise=future_state_noise,
-            reward_template=reward_query,
-            q_noise=q_noise,
-            schedule=self.schedule,
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-        )
-
-    @torch.inference_mode()
-    def _sample_stage2(
-        self,
-        *,
-        context: Tensor,
-        current: Tensor,
-        state: Tensor,
-        clean_action: Tensor,
-        horizons: Tensor,
-        include_image: bool,
-        sampling_seed: int | None = None,
-    ) -> WorldFlowSample:
-        """Sample all requested horizons, chunking only the dense image suffix."""
-
-        horizons = torch.as_tensor(horizons, device=self.model_device, dtype=torch.long).reshape(-1)
-        if horizons.numel() == 0:
-            raise ValueError("Stage-2 requires at least one horizon")
-        chunk_size = (
-            min(self.stage2_image_horizon_batch_size, int(horizons.numel()))
-            if include_image
-            else int(horizons.numel())
-        )
-        chunks = []
-        for start in range(0, int(horizons.numel()), chunk_size):
-            chunk_horizons = horizons[start : start + chunk_size]
-            chunk_seed = (
-                None
-                if sampling_seed is None
-                else int(sampling_seed) + 10_000 * int(chunk_horizons[0].item())
-            )
-            chunks.append(
-                self._sample_stage2_chunk(
-                    context=context,
-                    current=current,
-                    state=state,
-                    clean_action=clean_action,
-                    horizons=chunk_horizons,
-                    include_image=include_image,
-                    sampling_seed=chunk_seed,
-                )
-            )
-        return WorldFlowSample(
-            future=torch.cat([chunk.future for chunk in chunks], dim=1),
-            future_state=torch.cat([chunk.future_state for chunk in chunks], dim=1),
-            reward=torch.cat([chunk.reward for chunk in chunks], dim=1),
-            success=torch.cat([chunk.success for chunk in chunks], dim=1),
-            q=torch.cat([chunk.q for chunk in chunks], dim=1),
-        )
-
-
-    @torch.inference_mode()
     def _decode_stage2_images(self, future_tokens: Tensor) -> Tensor:
         """Decode ``[B,K,N,C]`` FLUX tokens to FACT's ``[B,C,K,H,W]``."""
 
@@ -600,172 +418,22 @@ class RoboNanaRobotWinPolicy:
             if observation.get("sampling_seed") is None
             else int(observation["sampling_seed"])
         )
-        needs_input_action = False
-        if needs_input_action:
-            if "action_chunk" not in observation:
-                raise KeyError(f"{self.inference_mode.value} requires observation['action_chunk']")
-            action = torch.as_tensor(
-                observation["action_chunk"],
-                device=self.model_device,
-                dtype=torch.float32,
-            )
-            expected_action_shape = (self.action_chunk, self.action_dim)
-            if tuple(action.shape) != expected_action_shape:
-                raise ValueError(
-                    f"action_chunk must have shape {expected_action_shape}, got {tuple(action.shape)}"
-                )
-            sampled_action = preprocess_action_chunk(
-                action,
-                raw_state[0],
-                self.normalization,
-                delta_mask=self.delta_mask,
-            ).to(dtype=self.dtype)[None]
-        else:
-            self._sync(self.model_device)
-            start = time.perf_counter()
-            sampled_action = self._sample_action(
-                context=context,
-                current=current,
-                state=normalized_state,
-                sampling_seed=sampling_seed,
-            )
-            self._sync(self.model_device)
-            timing["action_sample_ms"] = (time.perf_counter() - start) * 1000.0
-            action = postprocess_action(
-                sampled_action[0],
-                raw_state[0],
-                self.normalization,
-                delta_mask=self.delta_mask,
-            )
-
-        world_sample: WorldFlowSample | None = None
-        horizons: Tensor | None = None
-        include_image = False
-        conditional_reward_curve: Tensor | None = None
-        conditional_accumulated_reward: float | None = None
-        conditional_terminal_horizon: int | None = None
-        reward_curve_evaluated = False
-        if False:  # removed variable-horizon reward-curve compatibility path
-            start = time.perf_counter()
-            # A terminal earlier than h=48 necessarily makes the clipped h=48
-            # state terminal too.  Query that endpoint first and only pay for
-            # the dense 1..48 reward/success curve when it can contain a goal.
-            terminal_check_horizons = torch.tensor(
-                [self.action_chunk], device=self.model_device, dtype=torch.long
-            )
-            terminal_check = self._sample_stage2(
-                context=context,
-                current=current,
-                state=normalized_state,
-                clean_action=sampled_action,
-                horizons=terminal_check_horizons,
-                include_image=False,
-                sampling_seed=sampling_seed,
-            )
-            terminal_probability = float(
-                terminal_check.success[0, 0].float().sigmoid().item()
-            )
-            if terminal_probability >= self.success_threshold:
-                prefix_horizons = torch.arange(
-                    1, self.action_chunk, device=self.model_device, dtype=torch.long
-                )
-                if prefix_horizons.numel():
-                    prefix = self._sample_stage2(
-                        context=context,
-                        current=current,
-                        state=normalized_state,
-                        clean_action=sampled_action,
-                        horizons=prefix_horizons,
-                        include_image=False,
-                        sampling_seed=sampling_seed,
-                    )
-                    world_sample = WorldFlowSample(
-                        future=torch.cat([prefix.future, terminal_check.future], dim=1),
-                        future_state=torch.cat(
-                            [prefix.future_state, terminal_check.future_state], dim=1
-                        ),
-                        reward=torch.cat([prefix.reward, terminal_check.reward], dim=1),
-                        success=torch.cat(
-                            [prefix.success, terminal_check.success], dim=1
-                        ),
-                        q=torch.cat([prefix.q, terminal_check.q], dim=1),
-                    )
-                else:
-                    world_sample = terminal_check
-                horizons = torch.arange(
-                    1, self.action_chunk + 1, device=self.model_device, dtype=torch.long
-                )
-                reward_curve_evaluated = True
-                probabilities = world_sample.success[0].float().reshape(-1).sigmoid()
-                terminal_indices = torch.where(probabilities >= self.success_threshold)[0]
-                conditional_terminal_horizon = (
-                    int(terminal_indices[0].item()) + 1
-                    if terminal_indices.numel()
-                    else self.action_chunk
-                )
-                reward_probabilities = world_sample.reward[0].float().reshape(-1).sigmoid()
-                conditional_reward_curve = torch.where(
-                    reward_probabilities >= self.success_threshold,
-                    torch.full_like(reward_probabilities, self.reward_goal),
-                    torch.full_like(reward_probabilities, self.reward_non_goal),
-                )
-                conditional_accumulated_reward = float(
-                    discounted_reward_sum(
-                        conditional_reward_curve[:conditional_terminal_horizon],
-                        self.discount,
-                    ).item()
-                )
-            else:
-                world_sample = terminal_check
-                horizons = terminal_check_horizons
-                conditional_reward_curve = torch.full(
-                    (self.action_chunk,),
-                    self.reward_non_goal,
-                    device=self.model_device,
-                    dtype=torch.float32,
-                )
-                conditional_accumulated_reward = float(
-                    discounted_reward_sum(
-                        conditional_reward_curve,
-                        self.discount,
-                    ).item()
-                )
-            self._sync(self.model_device)
-            timing["stage2_sample_ms"] = (time.perf_counter() - start) * 1000.0
-        elif False:  # removed offline all-horizons compatibility path
-            horizons = torch.arange(1, self.action_chunk + 1, device=self.model_device)
-            # Offline return annotation needs the same packed h=1..T world
-            # query without paying for dense FLUX image tokens or VAE decode.
-            # Keep the public WORLD_ALL default unchanged for existing callers.
-            include_image = bool(observation.get("include_image", True))
-        elif False:  # removed externally supplied horizon compatibility path
-            if "horizon" not in observation:
-                raise KeyError("world_horizon requires observation['horizon']")
-            requested_horizon = torch.as_tensor(observation["horizon"])
-            if requested_horizon.numel() != 1:
-                raise ValueError("horizon must be one integer scalar")
-            horizon_value = int(requested_horizon.item())
-            if float(requested_horizon.item()) != float(horizon_value):
-                raise ValueError("horizon must be an integer")
-            if not 1 <= horizon_value <= self.action_chunk:
-                raise ValueError(f"horizon must lie in [1, {self.action_chunk}]")
-            horizons = torch.tensor([horizon_value], device=self.model_device)
-            include_image = True
-
-        if horizons is not None and world_sample is None:
-            start = time.perf_counter()
-            world_sample = self._sample_stage2(
-                context=context,
-                current=current,
-                state=normalized_state,
-                clean_action=sampled_action,
-                horizons=horizons,
-                include_image=include_image,
-                sampling_seed=sampling_seed,
-            )
-            self._sync(self.model_device)
-            timing["stage2_sample_ms"] = (time.perf_counter() - start) * 1000.0
-
+        self._sync(self.model_device)
+        start = time.perf_counter()
+        sampled_action = self._sample_action(
+            context=context,
+            current=current,
+            state=normalized_state,
+            sampling_seed=sampling_seed,
+        )
+        self._sync(self.model_device)
+        timing["action_sample_ms"] = (time.perf_counter() - start) * 1000.0
+        action = postprocess_action(
+            sampled_action[0],
+            raw_state[0],
+            self.normalization,
+            delta_mask=self.delta_mask,
+        )
 
         if log_digest:
             components = observation_component_digests(observation)
@@ -800,49 +468,5 @@ class RoboNanaRobotWinPolicy:
                 ),
                 candidate_count=self.rejection_candidate_count,
             )
-        if world_sample is not None and horizons is not None:
-            future_states = denormalize_state(
-                world_sample.future_state[0].float(), self.normalization, mode="zscore"
-            ).cpu()
-            reward_probs = world_sample.reward[0].float().reshape(-1).sigmoid().cpu()
-            rewards = torch.where(
-                reward_probs >= self.success_threshold,
-                torch.full_like(reward_probs, self.reward_goal),
-                torch.full_like(reward_probs, self.reward_non_goal),
-            )
-            success_probs = world_sample.success[0].float().reshape(-1).sigmoid().cpu()
-            qs = world_sample.q[0].float().reshape(-1).cpu()
-            response.update(
-                horizons=horizons.detach().cpu(),
-                future_states=future_states,
-                rewards=rewards,
-                reward_probs=reward_probs,
-                success_probs=success_probs,
-                qs=qs,
-            )
-            if self.horizon in horizons.tolist():
-                selected_index = horizons.tolist().index(self.horizon)
-            else:
-                selected_index = 0
-            response.update(
-                chunk_reward=float(rewards[selected_index].item()),
-                chunk_q=float(qs[selected_index].item()),
-                return_horizon=int(horizons[selected_index].item()),
-                selected_index=selected_index,
-            )
-            if conditional_reward_curve is not None:
-                response.update(
-                    reward_curve=conditional_reward_curve.detach().cpu(),
-                    reward_curve_horizons=torch.arange(1, self.action_chunk + 1),
-                    accumulated_reward=conditional_accumulated_reward,
-                    terminal_horizon=conditional_terminal_horizon,
-                    reward_curve_evaluated=reward_curve_evaluated,
-                )
-            if include_image:
-                response["future_latents"] = world_sample.future[0].detach().cpu()
-                start = time.perf_counter()
-                response["images"] = self._decode_stage2_images(world_sample.future)
-                self._sync(self.vae_device)
-                timing["stage2_image_decode_ms"] = (time.perf_counter() - start) * 1000.0
         timing["total_policy_ms"] = (time.perf_counter() - total_start) * 1000.0
         return response
