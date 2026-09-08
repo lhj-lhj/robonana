@@ -30,7 +30,7 @@ labels still come exclusively from the existing writer/training data pipeline.
   recorded instructions. Never replace an invalid seed silently. This benchmark
   intentionally excludes expert seed discovery; count that cost separately when
   collecting previously unchecked seeds.
-- New output directories only, disjoint seed shards, bounded process supervision,
+- New output directories only, atomic FIFO seed claims, bounded process supervision,
   source/commit config, GPU samples and final ledger/HDF5 consistency checks.
 - Generated datasets are separate from training replay. No automatic training,
   merge, preprocessing or production-default change.
@@ -59,6 +59,14 @@ The actual current policy chooses fresh actions using its existing stable seed.
 
 - Serial control: `--sim-gpus 7 --server-gpu 6`.
 - Parallel probe: `--sim-gpus 6 7 --server-gpu 6`.
+- Four-environment probe: `--sim-gpus 6 7 6 7 --server-gpu 6`.
+
+Workers now claim the next pending episode from `episode_queue.sqlite` whenever
+their current episode finishes. The same prevalidated seed list is visible to all
+workers; transactional ownership prevents duplicates. Claimed jobs are not silently
+requeued after a crash: a failed worker aborts the probe, leaving auditable state.
+All queue rows must be `done` and match the HDF5/ledger seed multiset before success.
+Repeated GPU IDs mean separate persistent processes, not shared-thread scenes.
 
 Use the identical source-episode list, checkpoint/config and different output
 directories. Keep failed episodes in the comparison. Report episode wall time,

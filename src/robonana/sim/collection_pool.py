@@ -12,8 +12,11 @@ This preserves the deployed simulator, camera and action execution semantics.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import importlib.util
+import json
 from pathlib import Path
+import sqlite3
 import subprocess
 
 RLINF_ROBOTWIN_COMMIT = "0008ae6800df9f75fc8de7098bacb01735fd8fd2"
@@ -41,8 +44,8 @@ def load_vector_env(checkout):
     return module.VectorEnv
 
 
-def partition_jobs(jobs, workers):
-    """Never silently repeat a seed or change its instruction during sharding."""
+def validate_jobs(jobs, workers):
+    """Never silently repeat a seed or change its instruction during scheduling."""
     if workers < 1 or not jobs or workers > len(jobs):
         raise ValueError("workers must be between one and the number of jobs")
     seeds = [int(job["seed"]) for job in jobs]
@@ -50,7 +53,49 @@ def partition_jobs(jobs, workers):
         raise ValueError("duplicate episode seeds")
     if any(not str(job.get("instruction", "")).strip() for job in jobs):
         raise ValueError("each prevalidated seed needs its recorded instruction")
-    return [jobs[index::workers] for index in range(workers)]
+
+
+class EpisodeQueue:
+    """Atomic FIFO claims shared by GPU-isolated workers, not a policy queue.
+
+    Scheduling extension around official VectorEnv's selected-env reset. SQLite
+    transactions only cover tiny metadata operations, never simulation/inference.
+    Claimed work is NOT automatically retried: the supervisor fails the whole
+    probe on worker death, avoiding duplicate trajectories/false completion.
+    """
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def initialize(self, jobs):
+        validate_jobs(jobs, 1)
+        with self.path.open("xb"):
+            pass
+        with closing(sqlite3.connect(self.path, timeout=30)) as connection, connection:
+            connection.execute("CREATE TABLE jobs (seed INTEGER PRIMARY KEY, ordinal INTEGER, "
+                               "payload TEXT, status TEXT, owner TEXT, result TEXT)")
+            connection.executemany("INSERT INTO jobs VALUES (?, ?, ?, 'pending', NULL, NULL)",
+                [(int(job["seed"]), index, json.dumps(job)) for index, job in enumerate(jobs)])
+
+    def claim(self, worker):
+        with closing(sqlite3.connect(self.path, timeout=30)) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT seed, payload FROM jobs WHERE status='pending' "
+                                     "ORDER BY ordinal LIMIT 1").fetchone()
+            if row is None:
+                return None
+            connection.execute("UPDATE jobs SET status='claimed', owner=? WHERE seed=?", (worker, row[0]))
+            return json.loads(row[1])
+
+    def complete(self, seed, worker, result):
+        with closing(sqlite3.connect(self.path, timeout=30)) as connection, connection:
+            cursor = connection.execute("UPDATE jobs SET status='done', result=? "
+                "WHERE seed=? AND status='claimed' AND owner=?", (json.dumps(result), int(seed), worker))
+            if cursor.rowcount != 1:
+                raise RuntimeError("queue completion does not match a unique owned claim")
+
+    def counts(self):
+        with closing(sqlite3.connect(self.path, timeout=30)) as connection:
+            return dict(connection.execute("SELECT status, count(*) FROM jobs GROUP BY status"))
 
 
 class RoboNanaSubEnv:

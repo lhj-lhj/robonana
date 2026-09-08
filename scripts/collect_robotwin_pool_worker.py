@@ -9,7 +9,7 @@ import sys
 import time
 
 from robonana.sim import configure_sapien_runtime
-from robonana.sim.collection_pool import RoboNanaSubEnv, load_vector_env, make_vector_env
+from robonana.sim.collection_pool import EpisodeQueue, RoboNanaSubEnv, load_vector_env, make_vector_env
 from robotwin_eval_bootstrap import _install_static_camera_filter
 
 
@@ -20,10 +20,13 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--vector-env-checkout", type=Path, required=True)
+    parser.add_argument("--queue", type=Path, required=True)
+    parser.add_argument("--worker-id", required=True)
     opts = parser.parse_args()
     payload = json.loads(opts.jobs.read_text())
     output = opts.output.resolve()
     vector_checkout = opts.vector_env_checkout.resolve()
+    queue = EpisodeQueue(opts.queue.resolve())
     output.mkdir(parents=True, exist_ok=True)
     os.chdir(opts.robotwin.resolve())
     sys.path[:0] = [str(Path.cwd()), str(Path.cwd() / "script")]
@@ -44,11 +47,13 @@ def main():
         slot = RoboNanaSubEnv(task, model, payload["jobs"], args, adapter)
         vector = make_vector_env(slot, vector_class)
         try:
-            for job in payload["jobs"]:
+            while (job := queue.claim(opts.worker_id)) is not None:
                 start = time.perf_counter()
                 vector.reset(env_idx=[0], env_seeds=[int(job["seed"])])
                 while not slot.done:
                     _, _, _, _, infos = vector.step([None])
+                    if infos[0]["steps"] % 48 == 0:
+                        print(json.dumps({"progress": infos[0], "worker": opts.worker_id}), flush=True)
                 result = infos[0]
                 result["duration_seconds"] = time.perf_counter() - start
                 results.append(result)
@@ -57,6 +62,7 @@ def main():
                     handle.flush()
                     os.fsync(handle.fileno())
                 print(json.dumps(result), flush=True)
+                queue.complete(job["seed"], opts.worker_id, result)
         finally:
             vector.close()
             vector.env_thread_pool.shutdown(wait=True)

@@ -2,19 +2,50 @@ from types import SimpleNamespace
 
 import pytest
 
-from robonana.sim.collection_pool import RoboNanaSubEnv, partition_jobs
+from concurrent.futures import ThreadPoolExecutor
+
+from robonana.sim.collection_pool import EpisodeQueue, RoboNanaSubEnv, validate_jobs
 
 
-def test_disjoint_seed_assignment():
+def test_valid_seed_list():
     jobs = [{"seed": i, "instruction": "hang mug"} for i in range(4)]
-    assert partition_jobs(jobs, 2) == [jobs[::2], jobs[1::2]]
+    assert validate_jobs(jobs, 2) is None
 
 
 @pytest.mark.parametrize("jobs,workers", [([], 1), ([{"seed": 1}], 1),
     ([{"seed": 1, "instruction": "x"}] * 2, 2)])
 def test_invalid_jobs_rejected(jobs, workers):
     with pytest.raises(ValueError):
-        partition_jobs(jobs, workers)
+        validate_jobs(jobs, workers)
+
+
+def test_dynamic_queue_claims_once_and_finishes(tmp_path):
+    queue = EpisodeQueue(tmp_path / "queue.sqlite")
+    queue.initialize([{"seed": seed, "instruction": "hang"} for seed in range(24)])
+    def worker(owner):
+        seeds = []
+        while (job := queue.claim(owner)) is not None:
+            seeds.append(job["seed"])
+            queue.complete(job["seed"], owner, {"success": False})
+        return seeds
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(worker, ["0", "1", "2", "3"]))
+    assert sorted(seed for group in results for seed in group) == list(range(24))
+    assert queue.counts() == {"done": 24}
+
+
+def test_queue_rejects_wrong_owner_and_duplicate_completion(tmp_path):
+    queue = EpisodeQueue(tmp_path / "queue.sqlite")
+    queue.initialize([{"seed": 1, "instruction": "hang"}])
+    queue.claim("worker")
+    with pytest.raises(RuntimeError):
+        queue.complete(1, "intruder", {})
+    assert queue.counts() == {"claimed": 1}
+    queue.complete(1, "worker", {})
+    with pytest.raises(RuntimeError):
+        queue.complete(1, "worker", {})
+    with pytest.raises(FileExistsError):
+        queue.initialize([{"seed": 2, "instruction": "hang"}])
 
 
 @pytest.mark.parametrize("success", [False, True])

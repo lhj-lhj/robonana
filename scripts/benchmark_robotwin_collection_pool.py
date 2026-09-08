@@ -17,7 +17,7 @@ import time
 
 import h5py
 
-from robonana.sim.collection_pool import partition_jobs
+from robonana.sim.collection_pool import EpisodeQueue, validate_jobs
 from eval_robotwin_task_isolated import terminate_process_group
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,8 +37,8 @@ def main():
     parser.add_argument("--port", type=int, default=8194)
     parser.add_argument("--timeout-seconds", type=int, default=2400)
     opts = parser.parse_args()
-    if len(set(opts.sim_gpus)) != len(opts.sim_gpus):
-        parser.error("use one persistent simulator per distinct GPU")
+    if any(gpu < 0 for gpu in opts.sim_gpus):
+        parser.error("GPU ids must be nonnegative; repeat an id for multiple isolated workers")
     jobs, signatures = [], set()
     for path in opts.source_episodes:
         with h5py.File(path, "r") as handle:
@@ -49,10 +49,13 @@ def main():
     if len(signatures) != 1:
         parser.error("all seeds must belong to the same task/config")
     task_name, task_config = signatures.pop()
-    shards = partition_jobs(jobs, len(opts.sim_gpus))
+    validate_jobs(jobs, len(opts.sim_gpus))
     output = opts.output.resolve()
     output.mkdir(parents=True, exist_ok=False)  # Never resume/overwrite a probe.
     dataset = output / "dataset"
+    queue_path = output / "episode_queue.sqlite"
+    queue = EpisodeQueue(queue_path)
+    queue.initialize(jobs)
     pythonpath = os.pathsep.join(str(ROOT / p) for p in
         ("src", "third_party/FACT", "third_party/flux2_official/src", "third_party/flux2/src"))
     common = dict(os.environ, PYTHONPATH=pythonpath, PYTHONUNBUFFERED="1")
@@ -87,12 +90,12 @@ def main():
         server = subprocess.Popen(server_cmd, env=server_env, cwd=ROOT, stdout=logs[-1],
                                   stderr=subprocess.STDOUT, start_new_session=True)
         children.append(server)
-        for rank, (gpu, shard) in enumerate(zip(opts.sim_gpus, shards)):
+        for rank, gpu in enumerate(opts.sim_gpus):
             worker_dir = output / f"worker_{rank}_gpu_{gpu}"
             worker_dir.mkdir()
             job_path = worker_dir / "jobs.json"
             job_path.write_text(json.dumps({"task_name": task_name, "task_config": task_config,
-                                           "jobs": shard}), encoding="utf-8")
+                                           "jobs": jobs}), encoding="utf-8")
             runtime = worker_dir / "runtime"
             runtime.mkdir(mode=0o700)
             worker_env = dict(common, CUDA_VISIBLE_DEVICES=str(gpu), OIDN_DEFAULT_DEVICE="cuda",
@@ -108,6 +111,7 @@ def main():
                 str(ROOT / "scripts/collect_robotwin_pool_worker.py"), "--jobs", str(job_path),
                 "--robotwin", str(opts.robotwin.resolve()), "--output", str(worker_dir),
                 "--vector-env-checkout", str(ROOT / "third_party/RoboTwin_RLinf"),
+                "--queue", str(queue_path), "--worker-id", str(rank),
                 "--port", str(opts.port)], cwd=ROOT, env=worker_env, stdout=logs[-1],
                 stderr=subprocess.STDOUT, start_new_session=True)
             children.append(worker)
@@ -141,9 +145,12 @@ def main():
         expected = sorted(int(job["seed"]) for job in jobs)
         if sorted(actual) != expected or sorted(r["seed"] for r in rows) != expected:
             raise RuntimeError("completed ledger/HDF5 seeds disagree with assigned jobs")
+        if queue.counts() != {"done": len(jobs)}:
+            raise RuntimeError("queue has unfinished claims")
         summary = {"episodes": rows, "wall_seconds_including_startup": elapsed,
                    "episodes_per_hour": len(rows) * 3600 / elapsed,
-                   "dataset_validated": True, "inference_batch_size": 1}
+                   "dataset_validated": True, "inference_batch_size": 1,
+                   "queue_counts": queue.counts(), "workers": len(workers)}
         (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         print(json.dumps(summary), flush=True)
     finally:
