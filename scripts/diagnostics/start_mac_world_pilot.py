@@ -1,3 +1,7 @@
+# 中文：实验诊断：执行有界的 world-model 拟合试验。
+# English: Experimental diagnostic: run a bounded world-model fitting pilot.
+# 调用 / Invocation: 会启动训练并写新实验目录，不是只读检查，也不会自动进入 critic。 / Starts training in a new experiment directory; not read-only and never auto-starts critic training.
+# 导航 / Guide: scripts/README.md (diagnostics)
 """Run the bounded world-fit pilot in a dedicated directory (usually via tmux).
 
 Do not chain a critic job based solely on a completed world training budget:
@@ -15,7 +19,7 @@ import sys
 
 
 def main():
-    repo = Path(__file__).resolve().parents[1]
+    repo = Path(__file__).resolve().parents[2]
     project = Path(os.environ["ROBONANA_PROJECT_DIR"]).resolve()
     project.mkdir(parents=True, exist_ok=False)
     from robonana.configs.robotwin_flux2_4b_mac_pilot import config
@@ -36,7 +40,7 @@ def main():
         status_file.write_text(json.dumps(dict(stage=stage, pid=os.getpid(), **extra), indent=2) + "\n")
         print(f"pilot stage: {stage}", flush=True)
     def probe(checkpoint, model_config, name):
-        command = [sys.executable, "scripts/probe_mac_world_fit.py", "--checkpoint", str(checkpoint),
+        command = [sys.executable, "scripts/diagnostics/probe_mac_world_fit.py", "--checkpoint", str(checkpoint),
                    "--model-config", str(model_config), "--data-config", str(snapshot),
                    "--output-dir", str(project / name)]
         # Training uses physical GPUs 6,7; the serial probes need just GPU 6.

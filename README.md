@@ -11,6 +11,10 @@ the shared VAE decoder. See [code map](docs/CURRENT_CODE_MAP.md) for cleanup bou
 
 ## Source version and deployment
 
+常用命令与工具分类见 [脚本导航 / Script guide](scripts/README.md)。
+The six top-level scripts are the public entry points; data tools, diagnostics,
+environment helpers, services and internal workers live in named subdirectories.
+
 Maintain one code version through [GitHub main](https://github.com/lhj-lhj/robonana).
 Commit and push validated source changes locally; on 190, use `git pull --ff-only`
 in `/data3/hongjia/robonana` and verify the same commit with `git rev-parse HEAD`.
@@ -131,7 +135,7 @@ bash scripts/run_hanging_mug_mac_round.sh
 Validate a complete checkpoint:
 
 ```bash
-python scripts/validate_mac_mot_v2_checkpoint.py \
+python scripts/diagnostics/validate_mac_mot_v2_checkpoint.py \
   --checkpoint <checkpoint>/transformer/diffusion_pytorch_model.bin \
   --model-config <checkpoint>/config.json --smoke-forward
 ```
@@ -146,7 +150,7 @@ The loader is intentionally strict: architecture must be `mac_mot_v2`, chunk/rew
 * `src/robonana/data/robotwin_hdf5.py` — success/failure windowing and absorbing-terminal targets.
 * `src/robonana/sampling.py` — action flow, one-chunk world rollout, and Q rejection sampling.
 * `src/robonana/training/robotwin_trainer.py` — two-phase training and Value EMA updates.
-* `scripts/start_mac_world_pilot.py` — bounded world-model pilot and probes.
+* `scripts/diagnostics/start_mac_world_pilot.py` — bounded world-model pilot and probes.
 
 ## Configuration reference
 
@@ -334,12 +338,12 @@ cd /data3/hongjia/robonana
 git status --short
 nvidia-smi
 python -m pytest -q
-python scripts/validate_mac_mot_v2_checkpoint.py \
+python scripts/diagnostics/validate_mac_mot_v2_checkpoint.py \
   --checkpoint <checkpoint>/transformer/diffusion_pytorch_model.bin \
   --model-config <checkpoint>/config.json --device cuda:0 --smoke-forward
 ```
 
-For a world-only pilot, use `scripts/start_mac_world_pilot.py`. It writes a
+For a world-only pilot, use `scripts/diagnostics/start_mac_world_pilot.py`. It writes a
 source manifest, probes fixed windows before and after training, and stops at
 `world_complete_review_required`; inspect metrics before starting critic. The
 completed hanging-mug 5,000-step pilot remains in its existing experiment
@@ -433,7 +437,7 @@ claiming train/live parity. Historical JPEG/MP4 compression is irreversible.
 New collected HDF5 RGB uses lossless PNG (schema 4) so replay retains exactly
 the pixels supplied to live inference. Old JPEG data remains readable.
 
-`scripts/verify_image_pipeline.py` tests identical decoded frames through cache
+`scripts/diagnostics/verify_image_pipeline.py` tests identical decoded frames through cache
 and online batch=1/2 with the real VAE; it writes no dataset caches. Equality
 on this test does not promise bit-identical results across GPU/runtime changes
 or certify action sampling numerics, which are a separate boundary.

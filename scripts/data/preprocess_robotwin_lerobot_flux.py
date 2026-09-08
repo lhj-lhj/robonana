@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：数据工具：生成 LeRobot 原始数据的 Qwen 和 VAE 缓存。
+# English: Data tool: generate Qwen and VAE caches for original LeRobot data.
+# 调用 / Invocation: 准备原始数据时调用；可能使用 GPU 并写缓存。 / Run during original-data preparation; may use GPUs and writes caches.
+# 导航 / Guide: scripts/README.md (data)
 """Cache Qwen3 contexts and per-frame FLUX.2 tokens for FACT RoboTwin-v2."""
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ from pathlib import Path
 import torch
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 for upstream in (
     REPO_ROOT / "third_party" / "FACT",
     REPO_ROOT / "third_party" / "flux2" / "src",

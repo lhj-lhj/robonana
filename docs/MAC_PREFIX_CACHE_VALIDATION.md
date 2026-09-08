@@ -115,7 +115,7 @@ From the canonical checkout with the existing dependencies:
 CUDA_VISIBLE_DEVICES=6 \
 PYTHONPATH=src:third_party/FACT:third_party/flux2/src \
 /data3/hongjia/conda/envs/robonana/bin/python \
-  scripts/benchmark_mac_prefix_cache.py \
+  scripts/diagnostics/benchmark_mac_prefix_cache.py \
   --checkpoint <step-120000 diffusion_pytorch_model.bin> \
   --model-config <matching config.json> \
   --counts 1 8 32 --group-sizes 4 8 --sampling-steps 10 --repeats 2

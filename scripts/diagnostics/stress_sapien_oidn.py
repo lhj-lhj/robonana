@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：诊断：压力测试 SAPIEN Vulkan/CUDA 与 OIDN 的交接。
+# English: Diagnostic: stress-test the SAPIEN Vulkan/CUDA and OIDN hand-off.
+# 调用 / Invocation: 显式仿真/GPU 测试，不加载 policy。 / Explicit simulator/GPU test; does not load a policy.
+# 导航 / Guide: scripts/README.md (diagnostics)
 """Exercise SAPIEN's Vulkan/CUDA OIDN hand-off without loading a policy model."""
 
 from __future__ import annotations

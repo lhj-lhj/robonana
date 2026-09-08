@@ -144,7 +144,7 @@ def test_uncertified_training_cannot_publish_contract(monkeypatch, tmp_path):
 @pytest.mark.parametrize("server", ["robotwin", "robotwin_batched", "robotwin_xpolicylab"])
 def test_server_cli_has_no_independent_sampling_defaults(server):
     root = Path(__file__).resolve().parents[1]
-    source = (root / f"scripts/inference_server_{server}.py").read_text(encoding="utf-8")
+    source = (root / f"scripts/services/inference_server_{server}.py").read_text(encoding="utf-8")
     names = {"--action-chunk", "--horizon", "--num-inference-steps", "--flow-shift",
              "--rejection-candidate-count", "--q-return-scale", "--discount",
              "--reward-non-goal", "--success-threshold"}

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：正式入口：为已采集的 HDF5 回放生成索引和语言/图像缓存。
+# English: Public entry: index collected HDF5 replay and generate language/image caches.
+# 调用 / Invocation: 手动调用或由采集脚本调用；写缓存，不训练、不重算 A 统计。 / Manual or collector use; writes caches, never trains or refits A statistics.
+# 导航 / Guide: scripts/README.md (public / 正式入口)
 """Prepare one separate RoboTwin rollout collection for RoboNana training."""
 
 from __future__ import annotations
@@ -24,6 +28,8 @@ for source_root in (
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
 
+# 中文：复用分类后的数据工具。 English: reuse the relocated data helper.
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "data"))
 from preprocess_robotwin_flux import (  # noqa: E402
     atomic_json_save,
     cache_images,

@@ -10,7 +10,7 @@ import pytest
 def test_real_accelerate_two_rank_nonfinite_aborts_before_step(bad, micro):
     if sys.platform == "win32":
         pytest.skip("distributed integration is validated on Linux/190")
-    script = Path(__file__).resolve().parents[1] / "scripts/validate_mac_distributed_safety.py"
+    script = Path(__file__).resolve().parents[1] / "scripts/diagnostics/validate_mac_distributed_safety.py"
     result = subprocess.run(
         [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nproc_per_node=2",
          str(script), "--bad", bad, "--micro", str(micro)],

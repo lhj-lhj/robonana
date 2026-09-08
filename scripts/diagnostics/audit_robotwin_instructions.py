@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：诊断：审查数据语言指令与 RoboTwin 模板的一致性。
+# English: Diagnostic: audit dataset instructions against RoboTwin templates.
+# 调用 / Invocation: 由评测入口预检或手动调用；不更新模型。 / Eval preflight or manual use; never updates models.
+# 导航 / Guide: scripts/README.md (diagnostics)
 """Audit RoboNana training prompts against RoboTwin seen/unseen templates."""
 
 from __future__ import annotations

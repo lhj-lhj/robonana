@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：诊断：检查 LeRobot 元数据与 FLUX/Qwen 缓存完整性。
+# English: Diagnostic: validate LeRobot metadata and FLUX/Qwen cache completeness.
+# 调用 / Invocation: 读取数据和缓存做校验，不重建训练数据。 / Reads data/caches for validation; does not rebuild training data.
+# 导航 / Guide: scripts/README.md (diagnostics)
 """Validate full FACT RoboTwin-v2 metadata and RoboNana FLUX/Qwen caches."""
 
 from __future__ import annotations

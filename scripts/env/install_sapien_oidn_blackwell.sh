@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# 中文：环境维护：安装 Blackwell/B200 所需的 SAPIEN/OIDN 依赖修复。
+# English: Environment maintenance: install SAPIEN/OIDN fixes for Blackwell/B200.
+# 调用 / Invocation: 仅显式维护时运行；会修改 Python 环境和依赖。 / Explicit maintenance only; modifies the Python environment and dependencies.
+# 导航 / Guide: scripts/README.md (env)
 set -euo pipefail
 
 sapien_version=3.0.0.dev20260601+6a50b78b
@@ -12,7 +16,7 @@ if [[ $# -lt 1 || $# -gt 2 ]]; then
   exit 2
 fi
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 env_prefix=$(realpath "$1")
 build_root=${2:-${env_prefix}/.robonana-sapien-oidn}
 mkdir -p "${build_root}"

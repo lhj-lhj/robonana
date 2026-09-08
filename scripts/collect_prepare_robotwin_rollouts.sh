@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# 中文：正式入口：采集指定任务并准备独立回放数据池。
+# English: Public entry: collect a task and prepare a separate replay pool.
+# 调用 / Invocation: 由用户或轮次脚本调用；会运行仿真并写入数据和缓存。 / User or round launcher; runs simulation and writes data/caches.
+# 导航 / Guide: scripts/README.md (public / 正式入口)
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

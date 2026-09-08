@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：内部辅助：按 episode 隔离仿真进程并执行单任务评测。
+# English: Internal helper: evaluate one task with isolated episode processes.
+# 调用 / Invocation: 由并行评测入口启动；写评测状态和结果。 / Spawned by the parallel evaluator; writes eval state and results.
+# 导航 / Guide: scripts/README.md (internal)
 """Evaluate one RoboTwin task with one fresh simulator process per episode."""
 
 from __future__ import annotations

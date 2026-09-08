@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：内部辅助：将训练配置交给 FACT launcher。
+# English: Internal helper: pass the training config to FACT's launcher.
+# 调用 / Invocation: 由 scripts/run_robotwin_train.sh 调用；会启动训练。 / Called by scripts/run_robotwin_train.sh; starts training.
+# 导航 / Guide: scripts/README.md (internal)
 """Launch the RoboNana training config through FACT's launcher."""
 
 from __future__ import annotations

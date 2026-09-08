@@ -1,3 +1,7 @@
+# 中文：正式入口：把已保存的选中动作重建结果汇总为 HTML 报告。
+# English: Public entry: render saved selected-action world predictions as an HTML report.
+# 调用 / Invocation: 离线读取评测产物并写报告，不运行模型。 / Reads saved eval artifacts and writes reports; no model inference.
+# 导航 / Guide: scripts/README.md (public / 正式入口)
 """Build an offline HTML report for selected-action world-model eval artifacts."""
 
 import argparse

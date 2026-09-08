@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：内部辅助：运行单个持久化采集环境与客户端。
+# English: Internal helper: run one persistent collection environment and client.
+# 调用 / Invocation: 由并行采集管理器启动，不作为用户独立入口。 / Spawned by the collection supervisor, not a standalone user entry.
+# 导航 / Guide: scripts/README.md (internal)
 """One GPU-bound persistent environment/client; launched by the pool supervisor."""
 import argparse
 import json
@@ -10,6 +14,8 @@ import time
 
 from robonana.sim import configure_sapien_runtime
 from robonana.sim.collection_pool import EpisodeQueue, RoboNanaSubEnv, load_vector_env, make_vector_env
+# 中文：复用仿真环境适配。 English: reuse the simulator environment bootstrap.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "env"))
 from robotwin_eval_bootstrap import _install_static_camera_filter
 
 

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：诊断：验证缓存生成与在线 VAE 编码的一致性。
+# English: Diagnostic: verify parity between cache generation and online VAE encoding.
+# 调用 / Invocation: 显式真实 VAE 测试；不覆盖数据集缓存。 / Explicit real-VAE test; never overwrites dataset caches.
+# 导航 / Guide: scripts/README.md (diagnostics)
 """Bounded real-VAE cache/live parity probe; never modifies dataset caches.
 
 Use an existing HDF5 episode and optionally one LeRobot task. Tests identical
@@ -16,6 +20,9 @@ import torch
 from PIL import Image
 from diffusers.models import AutoencoderKLFlux2
 
+# 中文：跨目录复用同一预处理实现。 English: reuse the same preprocessing implementation.
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "data"))
 from preprocess_robotwin_flux import build_composite_batch, HDF5_CAMERAS
 from robonana.encoding import encode_flux2_image_tokens
 from robonana.image_pipeline import (

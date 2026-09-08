@@ -58,5 +58,5 @@ def test_hanging_mug_round_serializes_world_then_critic_then_collection() -> Non
     # Collection is a separate 100-episode budget, not the comparison eval size.
     assert 'collection_num=${ROBONANA_MAC_COLLECTION_EPISODES:-100}' in script
     assert 'TEST_NUM="${collection_num}"' in script
-    collector = (Path(__file__).resolve().parents[1] / "scripts/collect_prepare_robotwin_rollouts.sh").read_text()
+    collector = (Path(__file__).resolve().parents[1] / "scripts/collect_prepare_robotwin_rollouts.sh").read_text(encoding="utf-8")
     assert 'test_num=${TEST_NUM:-${ROBONANA_MAC_COLLECTION_EPISODES:-100}}' in collector

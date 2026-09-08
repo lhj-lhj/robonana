@@ -8,7 +8,7 @@ from robonana.configs.robotwin_flux2_4b_mac_pilot import apply_pilot_config
 
 
 def load_probe():
-    path = Path(__file__).resolve().parents[1] / "scripts/probe_mac_world_fit.py"
+    path = Path(__file__).resolve().parents[1] / "scripts/diagnostics/probe_mac_world_fit.py"
     spec = importlib.util.spec_from_file_location("world_probe", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -53,7 +53,7 @@ the exact file bytes against Git. The dependency remains unmodified/untracked.
 
 ## Benchmark
 
-`scripts/benchmark_robotwin_collection_pool.py --help` lists required inputs.
+`scripts/diagnostics/benchmark_robotwin_collection_pool.py --help` lists required inputs.
 Use the model Python and existing RoboTwin Python separately. Source episode
 HDF5s provide accepted seeds/instructions; they are not replayed action inputs.
 The actual current policy chooses fresh actions using its existing stable seed.
@@ -68,7 +68,7 @@ The actual current policy chooses fresh actions using its existing stable seed.
   environment step barrier. Production defaults remain unchanged.
 
 Before a changed grouping is used for collection, the offline
-`scripts/benchmark_robotwin_inference_batch.py` probe compares warmed 1x16,
+`scripts/diagnostics/benchmark_robotwin_inference_batch.py` probe compares warmed 1x16,
 1x32 and 2x32 inference on identical recorded images/state/instructions and
 fixed probe noise seeds. It reports all-candidate action/Q differences, argmax
 indices and CUDA allocated/reserved peaks, and refuses a silent argmax change.

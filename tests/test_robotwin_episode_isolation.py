@@ -22,7 +22,7 @@ def load_script(name: str, relative_path: str):
 
 
 def test_bootstrap_runs_one_episode_from_explicit_seed(tmp_path: Path) -> None:
-    bootstrap = load_script("robotwin_eval_bootstrap_test", "scripts/robotwin_eval_bootstrap.py")
+    bootstrap = load_script("robotwin_eval_bootstrap_test", "scripts/env/robotwin_eval_bootstrap.py")
     entrypoint = tmp_path / "eval_policy.py"
     entrypoint.write_text(
         """
@@ -53,7 +53,7 @@ def main(usr_args):
 
 def test_bootstrap_retains_only_policy_static_cameras() -> None:
     bootstrap = load_script(
-        "robotwin_eval_bootstrap_cameras", "scripts/robotwin_eval_bootstrap.py"
+        "robotwin_eval_bootstrap_cameras", "scripts/env/robotwin_eval_bootstrap.py"
     )
     camera_bundle = SimpleNamespace(
         static_camera_name=["head_camera", "front_camera"],
@@ -72,7 +72,7 @@ def test_bootstrap_retains_only_policy_static_cameras() -> None:
 
 
 def test_attempt_modes_keep_oidn_enabled_and_make_cpu_fallback_explicit() -> None:
-    isolated = load_script("robotwin_task_isolated_modes", "scripts/eval_robotwin_task_isolated.py")
+    isolated = load_script("robotwin_task_isolated_modes", "scripts/internal/eval_robotwin_task_isolated.py")
 
     assert [(mode.name, mode.oidn_device) for mode in isolated.attempt_modes(2, True)] == [
         ("oidn_cuda_1", "cuda"),
@@ -83,7 +83,7 @@ def test_attempt_modes_keep_oidn_enabled_and_make_cpu_fallback_explicit() -> Non
 
 
 def test_cpu_fallback_is_disabled_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    isolated = load_script("robotwin_task_isolated_defaults", "scripts/eval_robotwin_task_isolated.py")
+    isolated = load_script("robotwin_task_isolated_defaults", "scripts/internal/eval_robotwin_task_isolated.py")
     launch_client = tmp_path / "launch_client.sh"
     launch_client.touch()
     monkeypatch.setattr(
@@ -108,7 +108,7 @@ def test_cpu_fallback_is_disabled_by_default(tmp_path: Path, monkeypatch: pytest
 
 
 def test_ledger_requires_contiguous_episode_and_seed_chain(tmp_path: Path) -> None:
-    isolated = load_script("robotwin_task_isolated_ledger", "scripts/eval_robotwin_task_isolated.py")
+    isolated = load_script("robotwin_task_isolated_ledger", "scripts/internal/eval_robotwin_task_isolated.py")
     ledger = tmp_path / "episodes.jsonl"
     rows = [
         {
@@ -137,7 +137,7 @@ def test_ledger_requires_contiguous_episode_and_seed_chain(tmp_path: Path) -> No
 
 
 def test_swallowed_error_watchdog_reads_only_bounded_tail(tmp_path: Path) -> None:
-    isolated = load_script("robotwin_task_isolated_watchdog", "scripts/eval_robotwin_task_isolated.py")
+    isolated = load_script("robotwin_task_isolated_watchdog", "scripts/internal/eval_robotwin_task_isolated.py")
     log = tmp_path / "episode.log"
     assert isolated.swallowed_error_count(log) == 0
     log.write_bytes(b"error occurs !\n" + b"x" * (2 * 1024 * 1024) + b"\nerror occurs !\n" * 3)

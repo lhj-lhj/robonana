@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：诊断：对比 world model 前缀缓存的数值和耗时。
+# English: Diagnostic: compare world-model prefix-cache numerics and timing.
+# 调用 / Invocation: 读取真实窗口与权重；写测量结果，不训练。 / Reads real windows/weights and writes measurements; no training.
+# 导航 / Guide: scripts/README.md (diagnostics)
 """Paired 20-step world-cache benchmark on real training windows.
 
 Reads a checkpoint and saved stage-1 data config, never trains or writes model

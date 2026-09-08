@@ -1,3 +1,7 @@
+# 中文：诊断：验证多进程有限值保护和 DeepSpeed checkpoint 协议。
+# English: Diagnostic: verify multi-rank finite-value guards and DeepSpeed checkpoint lifecycle.
+# 调用 / Invocation: 使用 torchrun 和小模型测试；不启动正式训练。 / Uses torchrun and tiny test models; never starts production training.
+# 导航 / Guide: scripts/README.md (diagnostics)
 """Two-rank integration checks for real Accelerate/ZeRO, not mocked reducers.
 
 Run with torchrun --standalone --nproc_per_node=2. CPU checks run in pytest;

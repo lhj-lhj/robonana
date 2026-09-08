@@ -88,4 +88,4 @@ def test_inference_entrypoints_have_no_dtype_switch():
     root = Path(__file__).resolve().parents[1]
     for name in ("inference_server_robotwin.py", "inference_server_robotwin_batched.py",
                  "inference_server_robotwin_xpolicylab.py", "eval_robotwin_all_tasks_parallel.sh"):
-        assert "--dtype" not in (root / "scripts" / name).read_text(encoding="utf-8")
+        assert "--dtype" not in (root / "scripts" / "services" / name).read_text(encoding="utf-8")

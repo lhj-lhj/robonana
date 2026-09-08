@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：服务入口：适配 RoboTwin/XPolicyLab 的批量推理协议。
+# English: Service entry: adapt batched inference to the RoboTwin/XPolicyLab protocol.
+# 调用 / Invocation: 仅对应协议需要时启动，不是另一套算法。 / Start only for that protocol; this is not another algorithm.
+# 导航 / Guide: scripts/README.md (services)
 """Serve RoboNana actions to the official RoboTwin/XPolicyLab batch evaluator."""
 
 from __future__ import annotations
@@ -8,7 +12,7 @@ import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 for upstream in reversed(
     (
         REPO_ROOT / "src",

@@ -117,7 +117,7 @@ without replacing the running critic-only experiment's source or process.
 The benchmark includes G/R/U prefill in cached timing. C prefill is excluded
 because Stage-2 action selection has already produced it. Both modes start
 from the same input and noise; order alternates between repeats. Run
-`scripts/benchmark_mac_world_cache.py --help` for checkpoint/data arguments
+`scripts/diagnostics/benchmark_mac_world_cache.py --help` for checkpoint/data arguments
 (the script now runs FP32 only), and `--batch-size 4` to
 exercise the training batch shape (repeated windows, independent noise).
 

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：数据工具：生成 HDF5 数据的 Qwen 和 VAE 缓存。
+# English: Data tool: generate Qwen and VAE caches for HDF5 data.
+# 调用 / Invocation: 手动调用或由回放预处理复用；可能使用 GPU 并写缓存。 / Manual use or replay-preparation helper; may use GPUs and writes caches.
+# 导航 / Guide: scripts/README.md (data)
 """Cache Qwen3 language context and FLUX.2 AE tokens for raw RoboTwin data.
 
 The script deliberately reuses FACT's public three-view layout helper and the
@@ -25,7 +29,7 @@ import torch
 from PIL import Image
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 for upstream in (
     REPO_ROOT / "third_party" / "FACT",
     REPO_ROOT / "third_party" / "flux2",

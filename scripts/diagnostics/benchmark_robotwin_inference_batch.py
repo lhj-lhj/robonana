@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：诊断：对比同一观测和噪声下的候选分组与环境 batch 性能。
+# English: Diagnostic: compare candidate grouping and environment batching on identical inputs/noise.
+# 调用 / Invocation: 显式 GPU 性能测试；写测量结果，不更新模型。 / Explicit GPU benchmark; writes measurements, never updates models.
+# 导航 / Guide: scripts/README.md (diagnostics)
 """Compare existing policy batching on identical recorded observations/noise.
 
 No new model/sampler math: use BatchedRoboNanaRobotWinPolicy.inference_batch.

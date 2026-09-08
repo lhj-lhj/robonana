@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "audit_robotwin_instructions.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "diagnostics" / "audit_robotwin_instructions.py"
 SPEC = importlib.util.spec_from_file_location("audit_robotwin_instructions", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 audit = importlib.util.module_from_spec(SPEC)

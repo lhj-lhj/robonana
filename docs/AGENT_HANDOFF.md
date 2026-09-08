@@ -126,7 +126,7 @@ Run on 190 after syncing the commit:
 ```bash
 cd /data3/hongjia/robonana
 python -m pytest -q
-python scripts/validate_mac_mot_v2_checkpoint.py \
+python scripts/diagnostics/validate_mac_mot_v2_checkpoint.py \
   --checkpoint <mac checkpoint>/transformer/diffusion_pytorch_model.bin \
   --model-config <mac checkpoint>/config.json --device cuda:0 --smoke-forward
 ```

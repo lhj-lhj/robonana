@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：诊断：对比 Q 候选前缀缓存与参考实现的数值及性能。
+# English: Diagnostic: compare Q-prefix caching against the reference implementation.
+# 调用 / Invocation: 显式 GPU 测试；不改模型权重。 / Explicit GPU test; never changes model weights.
+# 导航 / Guide: scripts/README.md (diagnostics)
 """Measure cached rejection against the full asymmetric-forward reference.
 
 The reference intentionally repeats C and evaluates unused Value, matching the

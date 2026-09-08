@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# 中文：正式入口：启动推理服务和并行 RoboTwin 评测。
+# English: Public entry: launch inference services and parallel RoboTwin evaluation.
+# 调用 / Invocation: 通过 bash 调用；采样配置读取 checkpoint 契约，写入评测结果。 / Run with bash; uses checkpoint sampling contract and writes eval results.
+# 导航 / Guide: scripts/README.md (public / 正式入口)
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -29,8 +33,8 @@ static_camera_csv=${ROBONANA_ROBOTWIN_STATIC_CAMERAS:-head_camera}
 video_log=${EVAL_VIDEO_LOG:-0}
 seed_group=${ROBONANA_EVAL_SEED_GROUP:-0}
 candidate_batch_size=${ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE:-16}
-client_python_wrapper=${repo_root}/scripts/robotwin_eval_python.sh
-isolated_task_runner=${repo_root}/scripts/eval_robotwin_task_isolated.py
+client_python_wrapper=${repo_root}/scripts/env/robotwin_eval_python.sh
+isolated_task_runner=${repo_root}/scripts/internal/eval_robotwin_task_isolated.py
 
 terminate_process_tree() {
   local root_pid=$1
@@ -147,7 +151,7 @@ manifest_path = library_root / "robonana_oidn_gpu_serial.json"
 if not manifest_path.is_file():
     raise SystemExit(
         f"serialized GPU OIDN manifest is missing: {manifest_path}; "
-        "run scripts/install_sapien_oidn_blackwell.sh"
+        "run scripts/env/install_sapien_oidn_blackwell.sh"
     )
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 expected = {
@@ -223,7 +227,7 @@ expected_task_count=${#tasks[@]}
 
 mkdir -p "${run_dir}/workers"
 [[ -e "${run_dir}/.started" ]] || touch "${run_dir}/.started"
-"${model_python}" "${repo_root}/scripts/audit_robotwin_instructions.py" \
+"${model_python}" "${repo_root}/scripts/diagnostics/audit_robotwin_instructions.py" \
   --dataset-root "${dataset_root}" \
   --robotwin-root "${robotwin_path}" \
   --output "${run_dir}/instruction_audit.json" \
@@ -250,7 +254,7 @@ run_worker() {
   [[ -f "${results_csv}" ]] || echo "task,success,total,success_rate" > "${results_csv}"
 
   local server_args=(
-    "${model_python}" "${repo_root}/scripts/inference_server_robotwin_batched.py"
+    "${model_python}" "${repo_root}/scripts/services/inference_server_robotwin_batched.py"
     --checkpoint "${checkpoint}"
     --flux-checkpoint-dir "${flux_checkpoint}"
     --stats-path "${stats_path}"

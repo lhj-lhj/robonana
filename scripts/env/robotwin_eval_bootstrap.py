@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：环境辅助：在进入 RoboTwin 前配置 SAPIEN 与运行时适配。
+# English: Environment helper: configure SAPIEN/runtime adapters before RoboTwin starts.
+# 调用 / Invocation: 由仿真 Python 包装器调用；随后执行传入的评测入口。 / Called by the simulation wrapper, then executes the supplied evaluator.
+# 导航 / Guide: scripts/README.md (env)
 """Configure SAPIEN before executing RoboTwin's unmodified eval entrypoint."""
 
 from __future__ import annotations

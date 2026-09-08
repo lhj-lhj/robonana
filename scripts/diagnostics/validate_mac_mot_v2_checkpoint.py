@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：诊断：审查 MAC checkpoint 的结构及 critic 参数。
+# English: Diagnostic: inspect MAC checkpoint structure and critic parameters.
+# 调用 / Invocation: 可选 GPU smoke forward；不训练、不改权重。 / Optional GPU smoke forward; never trains or modifies weights.
+# 导航 / Guide: scripts/README.md (diagnostics)
 """Audit a complete mac_mot_v2 checkpoint and its critic surface."""
 
 from __future__ import annotations

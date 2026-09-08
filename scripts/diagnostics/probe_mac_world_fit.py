@@ -1,3 +1,7 @@
+# 中文：诊断：用训练集固定窗口检查 world model 重建能力。
+# English: Diagnostic: probe world-model reconstruction on fixed training windows.
+# 调用 / Invocation: 写重建图和指标，不训练；不能当作泛化成功率。 / Writes reconstructions/metrics without training; not a generalization success-rate evaluation.
+# 导航 / Guide: scripts/README.md (diagnostics)
 """Fixed real-action, pure-noise MAC world probes, separately by replay pool.
 
 This checks TRAINING-SET fitting, not held-out generalization or policy success.

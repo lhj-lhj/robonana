@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# 中文：诊断：测量 RLinf 持久化并行采集的吞吐。
+# English: Diagnostic: measure RLinf persistent parallel collection throughput.
+# 调用 / Invocation: 会启动服务与仿真并写测试轨迹；不是正式训练轮次入口。 / Starts services/simulators and writes probe rollouts; not a production round launcher.
+# 导航 / Guide: scripts/README.md (diagnostics)
 """Benchmark RLinf-style persistent collectors with the existing policy server.
 
 This is an opt-in infrastructure probe, not a replacement training/eval launcher.
@@ -21,7 +25,7 @@ from robonana.sim.collection_pool import EpisodeQueue, validate_jobs
 from robonana.normalization import A_STATS_PATH
 from eval_robotwin_task_isolated import terminate_process_group
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def main():
@@ -72,7 +76,7 @@ def main():
                   ROBONANA_OVERLAY_CHUNK_RETURN="0", ROBONANA_Q_DIAGNOSTICS_PATH="")
     server_env = dict(common, CUDA_VISIBLE_DEVICES=str(opts.server_gpu),
                       ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE=str(opts.candidate_batch_size))
-    server_cmd = [sys.executable, str(ROOT / "scripts/inference_server_robotwin_batched.py"),
+    server_cmd = [sys.executable, str(ROOT / "scripts/services/inference_server_robotwin_batched.py"),
         "--checkpoint", str(opts.checkpoint.resolve()), "--model-config", str(opts.model_config.resolve()),
         "--flux-checkpoint-dir", str(ROOT / "checkpoints/FLUX.2-klein-base-4B"),
         "--stats-path", str(A_STATS_PATH),
@@ -115,7 +119,7 @@ def main():
             # Never resolve a venv python symlink: invoking its target bypasses
             # pyvenv.cfg and silently selects the wrong SAPIEN dependency set.
             worker = subprocess.Popen([str(opts.sim_python.absolute()),
-                str(ROOT / "scripts/collect_robotwin_pool_worker.py"), "--jobs", str(job_path),
+                str(ROOT / "scripts/internal/collect_robotwin_pool_worker.py"), "--jobs", str(job_path),
                 "--robotwin", str(opts.robotwin.resolve()), "--output", str(worker_dir),
                 "--vector-env-checkout", str(ROOT / "third_party/RoboTwin_RLinf"),
                 "--queue", str(queue_path), "--worker-id", str(rank),

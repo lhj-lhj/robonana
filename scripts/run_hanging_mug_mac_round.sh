@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
+# 中文：正式入口：顺序执行 hanging_mug 两阶段训练、对照评测和下一轮采集。
+# English: Public entry: run the hanging_mug training, evaluation and collection round.
+# 调用 / Invocation: 通过 bash 调用；会训练模型并写入新采集数据。 / Run with bash; trains models and writes new rollout data.
+# 导航 / Guide: scripts/README.md (public / 正式入口)
 set -Eeuo pipefail
 
-# Run the two serialized fixed-48 MAC phases, compare M=1 versus M=32, and
+# Run the two serialized fixed-48 MAC phases, compare unranked policy versus checkpoint-configured Q rejection, and
 # append selected-policy trajectories to replay.  There is one FLUX checkpoint:
 # phase 1 updates policy/world; phase 2 freezes it and updates only V/Q experts.
 
