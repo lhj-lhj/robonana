@@ -86,6 +86,6 @@ def test_non_fp32_weights_and_ambient_autocast_are_rejected():
 
 def test_inference_entrypoints_have_no_dtype_switch():
     root = Path(__file__).resolve().parents[1]
-    for name in ("inference_server_robotwin.py", "inference_server_robotwin_batched.py",
-                 "inference_server_robotwin_xpolicylab.py", "eval_robotwin_all_tasks_parallel.sh"):
-        assert "--dtype" not in (root / "scripts" / "services" / name).read_text(encoding="utf-8")
+    for relative in ("services/inference_server_robotwin.py", "services/inference_server_robotwin_batched.py",
+                     "services/inference_server_robotwin_xpolicylab.py", "eval_robotwin_all_tasks_parallel.sh"):
+        assert "--dtype" not in (root / "scripts" / relative).read_text(encoding="utf-8")
