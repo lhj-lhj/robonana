@@ -50,6 +50,7 @@ statistics for replay or treat metadata maintenance as a daily training step.
 - `benchmark_mac_world_cache.py`: World model 前缀缓存数值与速度 / World-prefix parity and timing.
 - `benchmark_robotwin_inference_batch.py`: 推理 batch 数值与速度 / Inference-batch parity and timing.
 - `benchmark_robotwin_collection_pool.py`: 并行采集吞吐，会写测试轨迹 / Collection throughput; writes probe rollouts.
+  支持 `--inference-mode action_only` 和已验证的 `--jobs-json` 种子清单；始终输出 `seeds.json`。 / Supports action-only and validated seed manifests; always exports seeds.json.
 - `verify_image_pipeline.py`: 真实 VAE 缓存/在线一致性 / Real-VAE cache/live parity.
 - `validate_mac_mot_v2_checkpoint.py`: 权重结构与可选 forward / Weight structure and optional forward check.
 - `validate_mac_distributed_safety.py`: 小模型多卡保护/恢复测试 / Tiny-model distributed guards and resume tests.

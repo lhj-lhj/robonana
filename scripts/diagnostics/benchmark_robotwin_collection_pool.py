@@ -31,7 +31,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-episodes", type=Path, nargs="+", required=True)
+    sources = parser.add_mutually_exclusive_group(required=True)
+    sources.add_argument("--source-episodes", type=Path, nargs="+", default=[])
+    sources.add_argument("--jobs-json", type=Path, help="Explicit expert-validated seed/instruction manifest")
     parser.add_argument("--sim-gpus", type=int, nargs="+", required=True)
     parser.add_argument("--server-gpu", type=int, default=6)
     parser.add_argument("--sim-python", type=Path, required=True)
@@ -54,6 +56,12 @@ def main():
     if any(gpu < 0 for gpu in opts.sim_gpus):
         parser.error("GPU ids must be nonnegative; repeat an id for multiple isolated workers")
     jobs, signatures = [], set()
+    if opts.jobs_json:
+        manifest = json.loads(opts.jobs_json.read_text())
+        if manifest.get('expert_validated') is not True:
+            parser.error('jobs manifest must record expert validation')
+        jobs = manifest['jobs']
+        signatures.add((manifest['task_name'], manifest['task_config']))
     for path in opts.source_episodes:
         with h5py.File(path, "r") as handle:
             signatures.add((str(handle.attrs["task_name"]), str(handle.attrs["task_config"])))
