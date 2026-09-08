@@ -1,5 +1,7 @@
 # RoboNana — `mac_mot_v2`
 
+当前实验：[Hanging mug 固定100场景 RL loop](docs/HANGING_MUG_FIXED100_EXPERIMENT.md)（round 0、阶段脚本、参数、实际运行台账）。
+
 This repository maintains one RoboTwin training and inference path: a fixed action chunk of **48 steps**, one FLUX backbone, a deterministic online Q expert, and a deterministic Value expert with an EMA target copy. The implementation follows the public [MAC repository](https://github.com/kwanyoungpark/MAC) and the cached MoT expert pattern from [ImageWAM](https://github.com/yuyangalin/ImageWAM).
 
 The old `idx_h`/variable-horizon, 800M, full-FLUX-EMA, TD/MC, and 120k runtime-loading paths are removed. The original 120k checkpoint is an external archived artifact and is not deleted; it is no longer a valid runtime input. Every new run starts from the current 1,000-step MAC checkpoint unless `ROBONANA_MAC_PRETRAIN_CHECKPOINT` explicitly points to another complete `mac_mot_v2` checkpoint.
