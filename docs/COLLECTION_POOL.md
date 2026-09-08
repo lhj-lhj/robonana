@@ -210,3 +210,111 @@ untested. A sensible next controlled test is a dedicated inference GPU6 with two
 environment workers on GPU7 (`--sim-gpus 7 7`). Request batching is another distinct
 experiment requiring action/Q numerical and selected-index checks; neither was
 enabled or claimed faster by this test.
+
+## Request batch 2, candidate group 32: offline probe (2026-09-08)
+
+Implementation/test commit `9bd4ed8`. Nineteen focused tests passed on 190
+(collection queue, metrics wrapper, multi-client batching/stress, context cache).
+Eleven dependency-free tests passed locally; the local default Python lacks
+PyTorch, so model-related local tests cannot be collected. The existing tail
+latency test now times request completion separately from server shutdown.
+
+The real step11000 checkpoint was loaded on otherwise idle B200 GPU6. The probe
+used first/last planning-boundary observations from one success and one failure
+episode, with fixed probe seeds 12345..12348. Each setting warmed the actual policy
+and language cache, then processed the same four observations three times. Timing
+includes live image encoding, policy/action/Q computation and identical small CPU
+copies for verification; simulator work and model startup are excluded.
+
+| Request batch x candidate group | Median time for 4 observations | Peak CUDA allocated / reserved | Throughput versus 1x16 |
+|---|---:|---:|---:|
+| 1 x 16 | 18.659 s | 31.39 / 32.92 GiB | 1.000x |
+| 1 x 32 | 16.905 s | 34.32 / 37.23 GiB | 1.104x |
+| 2 x 32 | 16.638 s | 42.14 / 48.43 GiB | 1.121x |
+
+Thus 64 candidate rows fit in memory. Most measured gain came from eliminating
+the two candidate groups; cross-request batching added only about 1.6% throughput
+over 1x32 in this small warm-cache probe. Do not infer end-to-end collection speed
+from this isolated measurement or confuse CUDA allocator peaks with total device
+memory occupied by the simulator/driver.
+
+All outputs were finite and selected indices stayed `[7, 6, 24, 13]`. Against
+1x16, all-candidate normalized-action maximum absolute error was `3.99e-6` for
+1x32 and `0.00175744` for 2x32. Maximum Q error in return units (scale 1000) was
+`0.00035763` and `0.23978949`, respectively. This is **not bitwise equivalence**;
+the unchanged frozen encoders also execute with a different batch shape. This
+probe did not isolate the source of the numerical differences and does not
+guarantee unchanged argmax on other observations or identical closed-loop SR.
+
+Raw config/results:
+`/data3/hongjia/robonana/outputs/inference_batch2_candidate32_20260908`.
+The benchmark calls the existing `BatchedRoboNanaRobotWinPolicy.inference_batch`
+and sampler; no model, precision, reward, action count or Q selection math changed.
+
+### Completed live collection
+
+The four-worker 2x32 run at commit `9bd4ed8` finished in **1445.930 seconds**
+(24m06s), 19.918 episodes/hour, versus 1462.043 seconds for four workers with
+1x16. It issued 49 double-request and 18 single-request calls (116 requests;
+84.48% served in double batches). Three episodes succeeded, but the successful
+seed set changed: 100000 became a failure and 100006 became a success. Total
+control steps were 5447 versus 5483 in the baseline, so raw wall-time differences
+are not a clean compute-only speedup. No useful end-to-end gain is established.
+Both queue and supervisor data-integrity checks passed. GPU processes exited.
+Artifact: `/data3/hongjia/robonana/outputs/collection_pool_batch2_candidate32_8_20260908`.
+
+### Numerical cause isolated (2026-09-08)
+
+Read-only diagnostic commits `0284a8a` / `1c07bd9` used the same real checkpoint
+and original four observations/noise seeds. No production precision, encoder,
+model, mask or cache implementation was changed. The diagnostic's temporary
+backend switch was restored in `finally` and its process exited.
+
+Runtime: PyTorch 2.8.0+cu128, CUDA 12.8; matrix-multiply TF32 disabled,
+float32 matmul precision `highest`, VAE parameters FP32, **cuDNN TF32 enabled**.
+FP32 tensor storage alone therefore did not establish strict-FP32 convolution.
+
+| Controlled comparison | Maximum absolute difference |
+|---|---:|
+| VAE image tokens: individual vs paired encoding, deployed backend | 0.00335121 |
+| Same comparison with cuDNN TF32 disabled only for diagnosis | 0.0000340343 |
+| Cold official Qwen encoding, individual vs two different-length prompts | 0 (tested pair) |
+| Original four observations: full 2x32 versus 1x16, normalized candidate actions | 0.00175744295 |
+| Same computation, substituting only individually encoded VAE features | 0.00001725554 |
+| Original maximum Q difference, return units | 0.239789486 |
+| Q difference after that VAE-only substitution | 0.000596046 |
+
+The original action and Q errors were reproduced exactly. Removing batch-dependent
+VAE feature differences reduced the maximum action error about 102x and Q error
+about 402x. This causally identifies the VAE encoding path as the dominant source
+of the observed gap; disabling convolution TF32 reduced the feature gap about 98x.
+The experiment does not claim all remaining FP32 rounding disappears.
+
+Additional controls used identical encoded inputs and noise:
+
+- Repeating singleton A produced identical output and all 20 velocities.
+- A in `[A,B]` and `[B,A]`, and with B's context/image/state/noise radically
+  replaced, showed the same small A error profile: final action `9.54e-7`,
+  Q `0.00035763` return units. No large cross-sample influence was observed.
+- Adding eight explicitly masked language tokens of value 123 left final action
+  error `1.19e-6` and Q error `0.00041723`; no padding-mask failure was observed.
+- The existing independent full asymmetric-forward oracle versus cached execution
+  on two observations gave action error `4.77e-7`, Q error `0.00011921`.
+- Thirteen prefix-cache/full-forward, language-cache and batching regression
+  tests passed on 190 CPU. One expected no-CUDA warning was emitted.
+
+With the changed VAE features, the first velocity already differed (A max
+`1.42e-4`) and the final velocity differed `9.88e-4`. Flow integration propagates
+the upstream discrepancy; new random noise or a changed Euler schedule did not
+cause it. These checks identify this measured regression, not a proof that every
+possible input is free of all implementation bugs.
+
+Raw diagnostic JSONs:
+`/data3/hongjia/robonana/outputs/batch_numerical_diagnosis_20260908/summary.json`
+and `/data3/hongjia/robonana/outputs/batch_numerical_aggregate_20260908/summary.json`.
+
+Recommended next bounded implementation test: preserve the existing single-image
+VAE encoding path and batch only FLUX/action/Q. This avoids changing the frozen
+VAE's historical single-image feature convention. Do not silently toggle TF32
+globally: preprocessing/cache and online encoding conventions must be considered
+together. No production fix or new collection run was started by this diagnosis.
