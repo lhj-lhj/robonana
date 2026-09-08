@@ -130,8 +130,8 @@ Value复制；同一阶段断点恢复才恢复原EMA/optimizer。
 |---|---|---|
 | export-120k | fixed48、FP32、20步、shift1、action-only | `checkpoints/120k_action_only_export_20260909`；已完成 |
 | speed-2env | GPU4推理；GPU5两个持久环境；request batch2；wait10ms；4episodes；无Q | `outputs/round0_120k_speed_2env_20260909`；正在测量，不计入round0 |
-| seed-preflight-6 | GPU6；200000起，接受50个seed | `outputs/hanging_mug_fixed100_20260909/seed_preflight_gpu6`；进行中 |
-| seed-preflight-7 | GPU7；210000起，接受50个seed | `outputs/hanging_mug_fixed100_20260909/seed_preflight_gpu7`；进行中 |
+| seed-preflight-6 | GPU6；200000起，接受50个seed | `outputs/hanging_mug_fixed100_20260909/seed_preflight_gpu6`；已完成，最后接受seed200062 |
+| seed-preflight-7 | GPU7；210000起，接受50个seed | `outputs/hanging_mug_fixed100_20260909/seed_preflight_gpu7`；已完成，最后接受seed210063 |
 | round-0 | 固定100训练seed；120k actor；无Q；并行度待测速 | 尚未启动，SR_0待100条完成后计算 |
 | Stage 1/2 | 20k/10k | 尚未启动 |
 

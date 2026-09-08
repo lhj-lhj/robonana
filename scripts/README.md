@@ -32,6 +32,8 @@ and model inputs. See the [project README](../README.md) for training commands.
 
 ### data — 数据准备 / Data preparation
 
+- `publish_robotwin_scene_manifest.py`: 发布唯一、固定的seed/指令清单并绑定环境配置哈希。 / Publish unique fixed seeds/instructions with simulator metadata.
+
 - `convert_120k_action_checkpoint.py`: 显式一次性导出归档 actor，保留 action segment，限制 action-only；不认证旧训练输入，也不恢复 legacy 运行时。 / One-time archived actor export, preserving action segments; action-only execution, not historical training certification.
 
 - `preprocess_robotwin_lerobot_flux.py`: 原始 LeRobot 的语言/图像缓存 / Original LeRobot language/image caches.
