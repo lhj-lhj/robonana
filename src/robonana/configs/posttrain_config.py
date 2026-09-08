@@ -107,6 +107,10 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
     original = copy.deepcopy(config["dataloaders"]["train"]["data_or_config"])
     if isinstance(original, list):
         original = original[0]
+    # Fail at config construction, not inside a worker: task_globs belongs to
+    # LeRobot originals, whereas collected HDF5 replay uses task_glob.
+    if original.get("_class_name") != "RoboTwinLeRobotDataset" or "task_glob" in original:
+        raise ValueError("MAC original data must use RoboTwinLeRobotDataset with task_globs")
     original.update(
         q_target_mode="mac_mot_v2",
         fixed_horizon=48,
@@ -127,6 +131,8 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
         ),
     )
     # Reject obsolete overrides instead of silently selecting another frame.
+    if not original["task_globs"]:
+        raise ValueError("ROBONANA_POSTTRAIN_ORIGINAL_TASK_GLOBS must not be empty")
     stats_path = require_a_stats_path(os.environ.get("ROBONANA_REPLAY_STATS_PATH"))
     original["stats_path"] = str(A_STATS_PATH)
     pools = [

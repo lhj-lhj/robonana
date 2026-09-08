@@ -2,7 +2,58 @@ from __future__ import annotations
 
 import importlib
 import sys
+import os
+import json
 import pytest
+
+
+@pytest.mark.parametrize("phase", ["world_policy", "critic"])
+def test_default_mac_entrypoint_constructs_real_datasets_clean_only(monkeypatch, tmp_path, phase):
+    from robonana.data.robotwin_hdf5 import RoboTwinHDF5Dataset
+    from robonana.data.robotwin_lerobot import RoboTwinLeRobotDataset
+
+    for key in list(os.environ):
+        if key.startswith("ROBONANA_"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("ROBONANA_MAC_PHASE", phase)
+    modules = ("robonana.configs.robotwin_flux2_4b_mac", "robonana.configs.robotwin_flux2")
+    for name in modules:
+        sys.modules.pop(name, None)
+    try:
+        config = importlib.import_module(modules[0]).config
+        pools = config["dataloaders"]["train"]["data_or_config"]
+        assert pools[0]["_class_name"] == "RoboTwinLeRobotDataset"
+        assert pools[0]["data_path"].replace("\\", "/") == "/workspace/datasets/fact-robotwin-v2/RoboTwin"
+        assert pools[0]["task_globs"] == ("Clean/hanging_mug",)
+        assert "task_glob" not in pools[0]
+        original = RoboTwinLeRobotDataset.load(pools[0])
+        original.close()
+        for pool in pools[1:]:
+            assert pool["_class_name"] == "RoboTwinHDF5Dataset"
+            assert "task_globs" not in pool
+            RoboTwinHDF5Dataset.load(pool).close()
+
+        # Exercise actual discovery with both source categories present. Empty
+        # parquet placeholders suffice: this test indexes, never decodes frames.
+        for category in ("Clean", "Randomized"):
+            task = tmp_path / category / "hanging_mug"
+            (task / "meta").mkdir(parents=True)
+            (task / "meta/episodes.jsonl").write_text(
+                json.dumps({"episode_index": 0, "length": 100}) + "\n", encoding="utf-8")
+            parquet = task / "data/chunk-000/episode_000000.parquet"
+            parquet.parent.mkdir(parents=True)
+            parquet.touch()
+        fixture = dict(pools[0], data_path=str(tmp_path), index_path=str(tmp_path / "index.json"))
+        dataset = RoboTwinLeRobotDataset.load(fixture)
+        try:
+            dataset._ensure_index()
+            assert len(dataset.records) == 1
+            assert dataset.records[0].task_dir == (tmp_path / "Clean/hanging_mug").resolve()
+        finally:
+            dataset.close()
+    finally:
+        for name in modules:
+            sys.modules.pop(name, None)
 
 
 @pytest.mark.parametrize("key", ["ROBONANA_BATCH_SIZE", "ROBONANA_GRADIENT_ACCUMULATION_STEPS"])

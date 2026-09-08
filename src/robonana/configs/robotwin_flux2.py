@@ -1,4 +1,4 @@
-"""Shared FACT/HDF5 and FLUX.2 Klein 4B compatibility config."""
+"""Shared LeRobot-original/HDF5-replay and FLUX.2 Klein 4B config."""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ from robonana.normalization import require_a_stats_path
 # A config can be consumed by standalone DataLoader tools before the Trainer is
 # imported, so register RoboNana's dataset and samplers here explicitly.
 from robonana.data import robotwin_hdf5 as _robotwin_hdf5  # noqa: F401
+from robonana.data import robotwin_lerobot as _robotwin_lerobot  # noqa: F401
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DATASET_ROOT = Path(os.environ.get("ROBONANA_DATASET_ROOT", "/workspace/datasets/RoboTwin/hf_dataset"))
+DATASET_ROOT = Path(os.environ.get("ROBONANA_DATASET_ROOT", "/workspace/datasets/fact-robotwin-v2/RoboTwin"))
 ROLLOUT_DATASET_ROOT_VALUE = os.environ.get("ROBONANA_ROLLOUT_DATASET_ROOT", "").strip()
 ROLLOUT_DATASET_ROOT = Path(ROLLOUT_DATASET_ROOT_VALUE) if ROLLOUT_DATASET_ROOT_VALUE else None
 ROLLOUT_DATASET_WEIGHT = float(os.environ.get("ROBONANA_ROLLOUT_DATASET_WEIGHT", "1.0"))
@@ -76,13 +77,19 @@ KLEIN4B_MODEL_PARAMS = dict(
 )
 
 
-def _dataset_config(root: Path, task_glob: str, *, stats_path: Path | None = None) -> dict:
+def _dataset_config(root: Path, *, replay: bool = False) -> dict:
+    # Original demonstrations are LeRobot v2; collected replay is HDF5.
+    # The constructors deliberately have different filter argument names.
+    source = (
+        dict(_class_name="RoboTwinHDF5Dataset", task_glob="*/robonana_rollout")
+        if replay else
+        dict(_class_name="RoboTwinLeRobotDataset", task_globs=("Clean/hanging_mug",))
+    )
     return dict(
-        _class_name="RoboTwinHDF5Dataset",
+        **source,
         data_path=str(root),
-        stats_path=str(require_a_stats_path(stats_path)),
+        stats_path=str(require_a_stats_path()),
         index_path=str(root / "robonana_index.json"),
-        task_glob=task_glob,
         action_chunk=48,
         action_dim=14,
         max_horizon=48,
@@ -94,14 +101,14 @@ def _dataset_config(root: Path, task_glob: str, *, stats_path: Path | None = Non
     )
 
 
-INITIAL_DATA_CONFIG = _dataset_config(DATASET_ROOT, "*/aloha-agilex_clean_50")
+INITIAL_DATA_CONFIG = _dataset_config(DATASET_ROOT)
 if ROLLOUT_DATASET_ROOT is None:
     TRAIN_DATA_CONFIG = INITIAL_DATA_CONFIG
     TRAIN_SAMPLER = dict(type="RoboTwinEpisodeSampler", infinite=True)
 else:
     TRAIN_DATA_CONFIG = [
         INITIAL_DATA_CONFIG,
-        _dataset_config(ROLLOUT_DATASET_ROOT, "*/robonana_rollout"),
+        _dataset_config(ROLLOUT_DATASET_ROOT, replay=True),
     ]
     TRAIN_SAMPLER = dict(
         type="RoboTwinMixtureSampler",

@@ -7,13 +7,20 @@ def _base(tmp_path):
     return {
         "project_dir": str(tmp_path),
         "dataloaders": {"train": {"data_or_config": {
-            "_class_name": "RoboTwinHDF5Dataset",
+            "_class_name": "RoboTwinLeRobotDataset",
             "data_path": str(tmp_path / "data"),
             "stats_path": str(tmp_path / "stats.json"),
         }, "sampler": {}}},
         "models": {},
         "train": {"loss_weights": {}, "tracker_init_kwargs": {"wandb": {}}},
     }
+
+
+def test_mac_rejects_hdf5_original_before_dataset_construction(tmp_path):
+    base = _base(tmp_path)
+    base["dataloaders"]["train"]["data_or_config"]["_class_name"] = "RoboTwinHDF5Dataset"
+    with pytest.raises(ValueError, match="original data must use RoboTwinLeRobotDataset"):
+        apply_mac_posttrain_config(base)
 
 
 def test_mac_posttrain_defaults_to_fixed48_and_1000_step_checkpoint(monkeypatch, tmp_path):

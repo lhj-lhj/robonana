@@ -53,6 +53,13 @@ Q is trained from learned-world-model imagined rollouts, not a fabricated real-r
 
 ## Training loop
 
+The default original-data pool for both phases is **Clean/hanging_mug only**
+(50 demonstrations on 190), loaded by `RoboTwinLeRobotDataset` from
+`/workspace/datasets/fact-robotwin-v2/RoboTwin`. Randomized demonstrations are
+not included by default. Collected replay remains a separate HDF5 data source.
+All pools retain the canonical A normalization statistics; choosing Clean only
+does not recompute statistics or rewrite historical experiment configurations.
+
 1. Load the 1,000-step checkpoint and collect/prepare fixed-48 replay windows.
 2. Phase 1 trains the action/world model. BC loss is multiplied by `action_loss_mask`, which is one only for successful trajectories. World losses always run on both success and failure data.
 3. For successful terminal windows, observations after the terminal frame are padded as an absorbing state for the remaining chunk suffix. Failure windows are never padded: their final complete chunk ends exactly at the last recorded observation.
