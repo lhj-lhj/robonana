@@ -44,6 +44,19 @@ Removed after checking source/script/test callers:
 3. HDF5 replay statistics fitting/writing functions. Tests of the removed
    refitting route were replaced with tests that replay indexing preserves
    episode metadata and cannot create/overwrite normalization files.
+4. Legacy `sample_flux2_world`, `sample_world_flow`, `sample_two_stage_flow`
+   and flow-Q result containers; the action sampler now accepts MAC only.
+   Trainer forward dispatch is exclusively `world_policy` or `critic`.
+5. The unreachable non-MAC forward, joint flow-Q/DINO loss, online DINO encoder,
+   DINO dataset image loading, and their obsolete tests/dependency. Removed the
+   old periodic multi-horizon pixel-eval chain and its dataset accessors too.
+   Current `sample_mac_world`, shared VAE decoding and selected-world reports
+   are retained. Continuation strips removed configuration keys from a copy;
+   original saved run configurations are never rewritten.
+
+The shared `Flux2FACTModel` base still supplies modules and block helpers used
+by `MacFlux2FACTModel`; it is not an independently supported training route.
+This cleanup does not rename inherited parameters or migrate checkpoint weights.
 
 Retained intentionally: source LeRobot metadata/statistics provenance utility,
 pilot/fit probes, batch/cache benchmarks, both required socket transports,

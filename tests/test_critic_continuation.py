@@ -33,6 +33,9 @@ def test_continuation_preserves_data_and_optimizer_with_current_execution():
     assert "forward_autocast_dtype" not in config["train"]["posttrain"]["ema"]
     assert "id" not in config["train"]["tracker_init_kwargs"]["wandb"]
     assert config["schedulers"] == dict(warmup_steps=250, decay_steps=10000)
+    # Removed dataset features must not leak back from a saved run's metadata.
+    source["dataloaders"]["train"]["data_or_config"][0].update(
+        dino_online=False, dino_image_size=None, eval_horizons=[12, 24, 48])
     larger = build_critic_continuation(source, checkpoint=Path("source/ckpt"),
                                       source_config=Path("source/config.json"),
                                       project_dir=Path("larger-run"), max_steps=17000,
@@ -40,6 +43,8 @@ def test_continuation_preserves_data_and_optimizer_with_current_execution():
     assert larger["dataloaders"]["train"]["batch_size_per_gpu"] == 16
     assert larger["train"]["gradient_accumulation_steps"] == 1
     assert larger["optimizers"] == config["optimizers"]
+    assert larger["dataloaders"]["train"]["data_or_config"] == config["dataloaders"]["train"]["data_or_config"]
+    assert "eval_horizons" in source["dataloaders"]["train"]["data_or_config"][0]
     assert larger["schedulers"]["decay_steps"] == 17000
     with pytest.raises(ValueError, match="positive integer"):
         build_critic_continuation(source, checkpoint=Path("source/ckpt"),

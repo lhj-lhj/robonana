@@ -23,7 +23,6 @@ def _replay_dataset_config(
     pool_name: str,
     episode_filter: str,
     current_round: int,
-    dino_online: bool,
     q_target_mode: str,
 ) -> dict[str, Any]:
     config: dict[str, Any] = dict(
@@ -35,15 +34,12 @@ def _replay_dataset_config(
         action_chunk=48,
         action_dim=14,
         max_horizon=48,
-        eval_horizons=(12, 24, 48),
         discount=0.999,
         reward_non_goal=-1.0,
         reward_goal=0.0,
         q_target_mode=q_target_mode,
         episode_filter=episode_filter,
         pool_name=pool_name,
-        dino_online=dino_online,
-        dino_image_size=(480, 640) if dino_online else None,
         allow_empty=pool_name in {
             "collected_success_replay",
             "historical_failure_replay",
@@ -120,8 +116,6 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
         pool_name="original_success",
         allow_empty=False,
         require_final_observation=False,
-        dino_online=False,
-        dino_image_size=None,
         task_globs=tuple(
             item.strip()
             for item in os.environ.get(
@@ -143,7 +137,6 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
             pool_name="collected_success_replay",
             episode_filter="success",
             current_round=current_round,
-            dino_online=False,
             q_target_mode="mac_mot_v2",
         ),
         _replay_dataset_config(
@@ -152,7 +145,6 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
             pool_name="historical_failure_replay",
             episode_filter="failure",
             current_round=current_round,
-            dino_online=False,
             q_target_mode="mac_mot_v2",
         ),
         _replay_dataset_config(
@@ -161,7 +153,6 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
             pool_name="latest_failure",
             episode_filter="failure",
             current_round=current_round,
-            dino_online=False,
             q_target_mode="mac_mot_v2",
         ),
     ]
@@ -257,7 +248,6 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
         reward_non_goal=-1.0,
         reward_goal=0.0,
         resume=_env_flag("ROBONANA_RESUME", True),
-        pixel_eval_interval=0,
         checkpoint_save_optimizer=True,
         with_ema=False,
     )
@@ -269,7 +259,6 @@ def apply_mac_posttrain_config(config: dict[str, Any]) -> dict[str, Any]:
         success_loss=0.1,
         value_loss=1.0,
         q_loss=1.0,
-        dino_loss=0.0,
     )
     if phase == "critic":
         critic_lr = float(os.environ.get("ROBONANA_MAC_CRITIC_LR", "1e-4"))

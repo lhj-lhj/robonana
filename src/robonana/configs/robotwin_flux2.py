@@ -38,7 +38,6 @@ if BATCH_SIZE_PER_GPU <= 0 or GRADIENT_ACCUMULATION_STEPS <= 0:
     raise ValueError("batch size and gradient accumulation steps must be positive")
 NUM_WORKERS = int(os.environ.get("ROBONANA_NUM_WORKERS", "4"))
 TRAIN_MODE = os.environ.get("ROBONANA_TRAIN_MODE", "full")
-PIXEL_EVAL_INTERVAL = int(os.environ.get("ROBONANA_PIXEL_EVAL_INTERVAL", "100"))
 LOG_INTERVAL = int(os.environ.get("ROBONANA_LOG_INTERVAL", "10"))
 MEMORY_LIMIT_GIB = float(os.environ.get("ROBONANA_MEMORY_LIMIT_GIB", "0"))
 NUM_INFERENCE_STEPS = int(os.environ.get("ROBONANA_NUM_INFERENCE_STEPS", "20"))
@@ -93,7 +92,6 @@ def _dataset_config(root: Path, *, replay: bool = False) -> dict:
         action_chunk=48,
         action_dim=14,
         max_horizon=48,
-        eval_horizons=(12, 24, 48),
         discount=DISCOUNT,
         reward_non_goal=REWARD_NON_GOAL,
         reward_goal=REWARD_GOAL,
@@ -192,7 +190,6 @@ config = dict(
         tracker_project_name="robonana",
         tracker_init_kwargs=dict(wandb=dict(entity="hongjia-liu-aalto-university")),
         log_interval=LOG_INTERVAL,
-        pixel_eval_interval=PIXEL_EVAL_INTERVAL,
         latent_grid_height=12,
         latent_grid_width=24,
         flow_shift=1.0,

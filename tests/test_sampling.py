@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import torch
+import pytest
 
 from robonana.sampling import (
     flow_euler_schedule,
@@ -8,8 +9,7 @@ from robonana.sampling import (
     generate_mac_imaginary_rollout_h1,
     sample_q_rejection,
     sample_action_flow,
-    sample_two_stage_flow,
-    sample_world_flow,
+    sample_flux2_action,
 )
 
 
@@ -174,91 +174,20 @@ def test_action_only_sampler_uses_the_shared_schedule():
     torch.testing.assert_close(result, clean)
 
 
-def test_two_stage_sampler_feeds_clean_action_into_world_stage():
-    schedule = flow_euler_schedule(4, flow_shift=1.0, device="cpu")
-    clean_action = torch.tensor([[1.0, 2.0]])
-    clean_future = torch.tensor([[3.0, 4.0]])
-    clean_state = torch.tensor([[5.0]])
-    clean_reward = torch.tensor([[6.0]])
-    clean_success = torch.tensor([[8.0]])
-    clean_q = torch.tensor([[7.0]])
-    action_noise = torch.tensor([[7.0, 8.0]])
-    future_noise = torch.tensor([[9.0, 10.0]])
-    state_noise = torch.tensor([[11.0]])
-    reward_template = torch.zeros_like(clean_reward)
-    q_noise = torch.tensor([[13.0]])
-    world_actions = []
-
-    def predict_action(sample, sigma):
-        return action_noise - clean_action
-
-    def predict_world(future, state, reward_query, q, action, sigma):
-        world_actions.append(action.clone())
-        return (
-            future_noise - clean_future,
-            state_noise - clean_state,
-            clean_reward,
-            clean_success,
-            q_noise - clean_q,
-        )
-
-    result = sample_two_stage_flow(
-        action_noise=action_noise,
-        future_noise=future_noise,
-        future_state_noise=state_noise,
-        reward_template=reward_template,
-        q_noise=q_noise,
-        schedule=schedule,
-        predict_action=predict_action,
-        predict_world=predict_world,
-    )
-    torch.testing.assert_close(result.action, clean_action)
-    torch.testing.assert_close(result.future, clean_future)
-    torch.testing.assert_close(result.future_state, clean_state)
-    torch.testing.assert_close(result.reward, clean_reward)
-    torch.testing.assert_close(result.success, clean_success)
-    torch.testing.assert_close(result.q, clean_q)
-    assert len(world_actions) == 5
-    assert all(torch.equal(action, clean_action) for action in world_actions)
-
-
-def test_world_sampler_uses_supplied_gt_action_without_action_sampling():
-    schedule = flow_euler_schedule(4, flow_shift=1.0, device="cpu")
-    clean_action = torch.tensor([[1.0, 2.0]])
-    clean_future = torch.tensor([[3.0, 4.0]])
-    clean_state = torch.tensor([[5.0]])
-    clean_reward = torch.tensor([[6.0]])
-    clean_success = torch.tensor([[8.0]])
-    clean_q = torch.tensor([[7.0]])
-    future_noise = torch.tensor([[9.0, 10.0]])
-    state_noise = torch.tensor([[11.0]])
-    reward_template = torch.zeros_like(clean_reward)
-    q_noise = torch.tensor([[13.0]])
-    world_actions = []
-
-    def predict_world(future, state, reward_query, q, action, sigma):
-        world_actions.append(action.clone())
-        return (
-            future_noise - clean_future,
-            state_noise - clean_state,
-            clean_reward,
-            clean_success,
-            q_noise - clean_q,
-        )
-
-    result = sample_world_flow(
-        clean_action=clean_action,
-        future_noise=future_noise,
-        future_state_noise=state_noise,
-        reward_template=reward_template,
-        q_noise=q_noise,
-        schedule=schedule,
-        predict_world=predict_world,
-    )
-    torch.testing.assert_close(result.future, clean_future)
-    torch.testing.assert_close(result.future_state, clean_state)
-    torch.testing.assert_close(result.reward, clean_reward)
-    torch.testing.assert_close(result.success, clean_success)
-    torch.testing.assert_close(result.q, clean_q)
-    assert len(world_actions) == 5
-    assert all(torch.equal(action, clean_action) for action in world_actions)
+@pytest.mark.parametrize("architecture,horizon", [("mac_mot_v2", 48), ("legacy", 48), ("mac_mot_v2", 24)])
+def test_action_sampler_is_mac_only_and_uses_one_condition_cache(architecture, horizon):
+    model = _FakeMacModel()
+    model.architecture_version = architecture
+    noise = torch.randn(2, 48, 2)
+    kwargs = dict(model=model, context=torch.zeros(2, 1, 3),
+                  current_latents=torch.zeros(2, 1, 4), state=torch.zeros(2, 1, 2),
+                  context_mask=torch.ones(2, 1, dtype=torch.bool), action_noise=noise,
+                  chunk_horizon=horizon, schedule=flow_euler_schedule(3, flow_shift=1.0, device="cpu"),
+                  grid_height=1, grid_width=1)
+    if architecture != "mac_mot_v2" or horizon != 48:
+        with pytest.raises(ValueError, match="mac_mot_v2"):
+            sample_flux2_action(**kwargs)
+        assert model.prefill_count == 0
+    else:
+        torch.testing.assert_close(sample_flux2_action(**kwargs), noise)
+        assert model.prefill_count == 1

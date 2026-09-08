@@ -6,20 +6,16 @@ import json
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterator
 
 import h5py
 import numpy as np
 import torch
-import torch.nn.functional as F
-from PIL import Image
 
 from fact_datasets.datasets.base_dataset import BaseDataset
 from fact_datasets.datasets.dataset import register_dataset
 from fact_train.samplers.build import SAMPLERS
-from world_action_model.image_layouts import ROBOTWIN_VIEW_KEYS
 
 from .flux_cache import (
     episode_cache_path,
@@ -213,12 +209,9 @@ class RoboTwinHDF5Dataset(BaseDataset):
         action_dim: int = 14,
         max_horizon: int = 48,
         fixed_horizon: int = 0,
-        eval_horizons: tuple[int, ...] | list[int] = (12, 24, 48),
         latent_cache_size: int = 4,
         language_cache_size: int = 8,
         hdf5_cache_size: int = 4,
-        dino_online: bool = False,
-        dino_image_size: tuple[int, int] | list[int] | None = None,
         discount: float = 0.999,
         reward_non_goal: float = -1.0,
         reward_goal: float = 0.0,
@@ -239,16 +232,9 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self.action_dim = int(action_dim)
         self.max_horizon = int(max_horizon)
         self.fixed_horizon = int(fixed_horizon)
-        self.eval_horizons = tuple(int(value) for value in eval_horizons)
         self.latent_cache_size = int(latent_cache_size)
         self.language_cache_size = int(language_cache_size)
         self.hdf5_cache_size = int(hdf5_cache_size)
-        self.dino_online = bool(dino_online)
-        self.dino_image_size = (
-            None
-            if dino_image_size is None
-            else tuple(int(value) for value in dino_image_size)
-        )
         self.discount = float(discount)
         self.reward_non_goal = float(reward_non_goal)
         self.reward_goal = float(reward_goal)
@@ -266,15 +252,8 @@ class RoboTwinHDF5Dataset(BaseDataset):
             raise ValueError(f"action_dim must lie in [1, {ALOHA_DELTA_MASK.size}]")
         if self.fixed_horizon < 0 or self.fixed_horizon > self.max_horizon:
             raise ValueError("fixed_horizon must be 0 or lie in [1, max_horizon]")
-        if not self.eval_horizons or any(value < 1 or value > self.max_horizon for value in self.eval_horizons):
-            raise ValueError("eval_horizons must be non-empty and lie in [1, max_horizon]")
         if min(self.latent_cache_size, self.language_cache_size, self.hdf5_cache_size) < 1:
             raise ValueError("all cache sizes must be at least one")
-        if self.dino_image_size is not None and (
-            len(self.dino_image_size) != 2
-            or any(value <= 0 for value in self.dino_image_size)
-        ):
-            raise ValueError("dino_image_size must be (height, width) with positive values")
         if not 0.0 < self.discount <= 1.0:
             raise ValueError("discount must lie in (0, 1]")
         if self.q_target_mode != "mac_mot_v2":
@@ -451,37 +430,6 @@ class RoboTwinHDF5Dataset(BaseDataset):
             self.language_cache_size,
         )
 
-    def _future_dino_images(self, record: EpisodeRecord, future_index: int) -> dict[str, torch.Tensor]:
-        """Decode exactly one horizon-selected RGB frame from each HDF5 camera."""
-
-        camera_names = ("head_camera", "left_camera", "right_camera")
-        handle = self._handle(record.source)
-        images = {}
-        for view_key, camera_name in zip(ROBOTWIN_VIEW_KEYS, camera_names, strict=True):
-            dataset_key = f"observation/{camera_name}/rgb"
-            if dataset_key not in handle:
-                raise KeyError(f"online DINO requires {dataset_key} in {record.source}")
-            with Image.open(BytesIO(bytes(handle[dataset_key][future_index]))) as image:
-                array = np.asarray(image.convert("RGB"), dtype=np.uint8).copy()
-            images[view_key] = self._standardize_dino_image(
-                torch.from_numpy(array).permute(2, 0, 1)
-            )
-        return images
-
-    def _standardize_dino_image(self, image: torch.Tensor) -> torch.Tensor:
-        """Give mixed replay pools one collatable online-DINO image shape."""
-
-        if self.dino_image_size is None or tuple(image.shape[-2:]) == self.dino_image_size:
-            return image
-        resized = F.interpolate(
-            image.unsqueeze(0).float(),
-            size=self.dino_image_size,
-            mode="bilinear",
-            align_corners=False,
-            antialias=True,
-        )
-        return resized.squeeze(0).round().clamp_(0, 255).to(torch.uint8)
-
     def _locate(self, index: int) -> tuple[EpisodeRecord, int]:
         if index < 0 or index >= len(self):
             raise IndexError(index)
@@ -490,30 +438,6 @@ class RoboTwinHDF5Dataset(BaseDataset):
 
     def _sample_horizon(self) -> int:
         return self.action_chunk
-
-    def load_eval_future_latents(
-        self,
-        sample_index: int,
-        horizons: tuple[int, ...] | list[int] | np.ndarray,
-    ) -> torch.Tensor:
-        """Load fixed-horizon GT images only when a periodic eval requests them."""
-
-        record, frame_index = self._locate(int(sample_index))
-        horizon_indices = np.asarray(horizons, dtype=np.int64).reshape(-1)
-        if (
-            horizon_indices.size == 0
-            or np.any(horizon_indices < 1)
-            or np.any(horizon_indices > self.max_horizon)
-        ):
-            raise ValueError("eval horizons must lie in [1, max_horizon]")
-        future_indices = np.minimum(frame_index + horizon_indices, record.length - 1)
-        frame_latents = self._latents(record)
-        if frame_latents.shape[0] != record.length:
-            raise RuntimeError(
-                f"FLUX cache length {frame_latents.shape[0]} disagrees with HDF5 length "
-                f"{record.length}: {record.source}"
-            )
-        return frame_latents[torch.from_numpy(future_indices)]
 
     def _get_data(self, index: int) -> dict[str, Any]:
         record, frame_index = self._locate(int(index))
@@ -653,8 +577,6 @@ class RoboTwinHDF5Dataset(BaseDataset):
             "future_index": torch.tensor(future_index, dtype=torch.long),
             "episode_length": torch.tensor(record.length, dtype=torch.long),
         }
-        if self.dino_online:
-            sample["future_dino_images"] = self._future_dino_images(record, future_index)
         return sample
 
 

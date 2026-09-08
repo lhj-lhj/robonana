@@ -1,8 +1,6 @@
-"""Periodic FLUX.2 latent decoding for training-time W&B monitoring."""
+"""Shared FLUX.2 latent decoding for current world-model reports."""
 
 from __future__ import annotations
-
-from typing import Any
 
 import torch
 from torch import Tensor
@@ -35,73 +33,3 @@ def decode_flux2_tokens(vae, tokens: Tensor, *, grid_height: int = 12, grid_widt
     raw = unpack_flux2_tokens(tokens, vae, grid_height=grid_height, grid_width=grid_width)
     decoded = vae.decode(raw.to(dtype=next(vae.parameters()).dtype), return_dict=False)[0]
     return decoded.float().add(1.0).div(2.0).clamp(0.0, 1.0)
-
-
-def should_log_pixel_eval(step: int, interval: int) -> bool:
-    return interval > 0 and step > 0 and step % interval == 0
-
-
-def log_pixel_eval(
-    *,
-    accelerator,
-    step: int,
-    current: Tensor,
-    targets: Tensor,
-    predictions: Tensor,
-    horizons: Tensor,
-    num_inference_steps: int,
-) -> None:
-    """Upload fixed-horizon samples gathered from every distributed rank."""
-
-    if not accelerator.is_main_process:
-        return
-    try:
-        import wandb
-    except ImportError as error:
-        raise RuntimeError("Pixel eval logging requires wandb") from error
-
-    current_images = current.detach().cpu()
-    target_images = targets.detach().cpu()
-    prediction_images = predictions.detach().cpu()
-    horizon_tensor = horizons.detach().cpu()
-
-    if target_images.ndim != 5 or prediction_images.shape != target_images.shape:
-        raise ValueError("distributed targets and predictions must have shape [R, H, C, Y, X]")
-    rank_count, horizon_count = target_images.shape[:2]
-    if current_images.shape[0] != rank_count:
-        raise ValueError("current, targets, and predictions must have the same rank dimension")
-    horizon_tensor = horizon_tensor.reshape(rank_count, horizon_count)
-    horizon_rows = [[int(value) for value in row.tolist()] for row in horizon_tensor]
-
-    def build_panel(prediction_set: Tensor) -> Tensor:
-        rows = []
-        for rank in range(rank_count):
-            cells = [current_images[rank]]
-            for horizon_index in range(horizon_count):
-                cells.extend([target_images[rank, horizon_index], prediction_set[rank, horizon_index]])
-            rows.append(torch.cat(cells, dim=-1))
-        return torch.cat(rows, dim=-2)
-
-    gt_action_panel = build_panel(prediction_images)
-    gt_action_caption = (
-        "rows: one different current frame per rank; GT-action conditioning; columns: current | "
-        + " | ".join(f"GT h={value} | pred h={value}" for value in horizon_rows[0])
-    )
-
-    shared_horizons = horizon_rows[0]
-    tracker = accelerator.get_tracker("wandb", unwrap=True)
-    payload = {
-        "eval/fixed_horizon_gt_action_grid": wandb.Image(
-            gt_action_panel,
-            caption=gt_action_caption,
-        ),
-        "eval/fixed_horizons": ",".join(str(value) for value in shared_horizons),
-        "eval/num_ranks": int(current_images.shape[0]),
-        "eval/sampling": "stage2_world_flow_from_pure_noise_with_gt_action",
-        "eval/num_inference_steps": int(num_inference_steps),
-    }
-    tracker.log(
-        payload,
-        step=int(step),
-        commit=False,
-    )

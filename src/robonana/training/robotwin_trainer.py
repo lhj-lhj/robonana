@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import copy
-import gc
 import json
-import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -17,27 +15,23 @@ from torch import Tensor
 from fact_train import Trainer, build_optimizer
 from fact_train.utils import as_list
 from flux2.model import Flux2Params
-from world_action_model.image_layouts import ROBOTWIN_VIEW_KEYS
 
 # Imports register the raw HDF5 dataset and sampler with FACT.
 from robonana.data import robotwin_hdf5 as _robotwin_hdf5  # noqa: F401
-from robonana.encoding import DinoV3FeatureEncoder
 from robonana.models.pretrained import (
     configure_trainable_parameters,
     load_flux2_fact_trained_checkpoint,
 )
-from robonana.models.position_ids import dino_position_ids, image_position_ids, text_position_ids
+from robonana.models.position_ids import image_position_ids, text_position_ids
 from robonana.sampling import (
     evaluate_mac_critics,
     flow_euler_schedule,
     generate_mac_imaginary_rollout_h1,
-    sample_world_flow,
 )
 from robonana.training.checkpointing import full_deepspeed_checkpoint
 from robonana.training.continuation import rebase_loaded_scheduler
 from robonana.training.losses import (
     deterministic_return_loss,
-    joint_flow_loss,
     masked_action_mse,
     masked_bce_with_logits,
     masked_elementwise_bce_with_logits,
@@ -49,13 +43,6 @@ from robonana.training.posttraining import (
     evaluating,
     fp32_compute_context,
 )
-from robonana.training.visualization import (
-    decode_flux2_tokens,
-    log_pixel_eval,
-    should_log_pixel_eval,
-)
-
-
 def _expand_timestep(timestep: Tensor, target: Tensor) -> Tensor:
     while timestep.ndim < target.ndim:
         timestep = timestep.unsqueeze(-1)
@@ -125,38 +112,29 @@ class RoboNanaTrainer(Trainer):
             )
         if self.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(self.cuda_device_index)
-        self.pixel_eval_interval = int(self.kwargs.get("pixel_eval_interval", 200))
-        if self.pixel_eval_interval and self.pixel_eval_interval % self.log_interval:
-            raise ValueError("pixel_eval_interval must be divisible by log_interval for atomic W&B logging")
         self.grid_height = int(self.kwargs.get("latent_grid_height", 12))
         self.grid_width = int(self.kwargs.get("latent_grid_width", 24))
         self.flow_shift = float(self.kwargs.get("flow_shift", 1.0))
         self.num_inference_steps = int(self.kwargs.get("num_inference_steps", 20))
         if self.num_inference_steps <= 0:
             raise ValueError("num_inference_steps must be positive")
-        self._pending_pixel_eval: dict[str, Tensor] | None = None
         self._optimizer_step_succeeded = False
         self.vae_checkpoint_dir: str | None = None
-        self.vae_dtype = torch.float32
-        self.dino_dim: int | None = None
-        self.dino_encoder: DinoV3FeatureEncoder | None = None
-        self.dino_encoder_batch_size = 0
         self.posttrain_config = dict(self.kwargs.get("posttrain", {}))
-        self.posttrain_enabled = bool(self.posttrain_config.get("enabled", False))
+        if not self.posttrain_config.get("enabled", False):
+            raise ValueError("RoboNanaTrainer requires enabled mac_mot_v2 posttraining")
         self.posttrain_q_target_mode = str(
             self.posttrain_config.get(
                 "q_target_mode", self.kwargs.get("q_target_mode", "")
             )
         )
-        self.mac_enabled = self.posttrain_q_target_mode == "mac_mot_v2"
         self.mac_phase = str(self.posttrain_config.get("phase", "world_policy"))
         self.target_value_ema: ValueExpertEMA | None = None
         self.current_collection_round = int(
             self.posttrain_config.get("current_collection_round", 0)
         )
         self._posttrain_metrics: dict[str, Tensor] = {}
-        if self.posttrain_enabled:
-            self._validate_posttrain_config()
+        self._validate_posttrain_config()
 
     def _validate_posttrain_config(self) -> None:
         from robonana.inference_contract import sampling_contract
@@ -198,8 +176,6 @@ class RoboNanaTrainer(Trainer):
             raise ValueError("mac_mot_v2 EMA target must be value_expert_only")
 
     def set_ema_models(self) -> None:
-        if not self.mac_enabled:
-            return super().set_ema_models()
         if self.with_ema:
             raise ValueError("disable FACT EMA for mac_mot_v2")
         if self.mac_phase == "world_policy":
@@ -242,20 +218,17 @@ class RoboNanaTrainer(Trainer):
 
     def state_dict(self) -> dict[str, Any]:
         state = super().state_dict()
-        if self.posttrain_enabled:
-            state.update(
-                ema_update_count=(
-                    0 if self.target_value_ema is None else self.target_value_ema.update_count
-                ),
-                current_collection_round=self.current_collection_round,
-                posttrain_config=self.posttrain_config,
-            )
+        state.update(
+            ema_update_count=(
+                0 if self.target_value_ema is None else self.target_value_ema.update_count
+            ),
+            current_collection_round=self.current_collection_round,
+            posttrain_config=self.posttrain_config,
+        )
         return state
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         super().load_state_dict(state_dict)
-        if not self.posttrain_enabled:
-            return
         self.current_collection_round = int(
             state_dict.get("current_collection_round", self.current_collection_round)
         )
@@ -282,32 +255,13 @@ class RoboNanaTrainer(Trainer):
                 "mac_mot_v2 requires reward_head_type='binary_chunk' and reward_dim=chunk_horizon"
             )
         raw_dino_dim = _config_value(model_config, "dino_dim", None)
-        dino_dim = None if raw_dino_dim is None else int(raw_dino_dim)
+        if raw_dino_dim is not None:
+            raise ValueError("mac_mot_v2 does not support DINO targets")
         pred_action_bidirectional = _config_value(
             model_config, "pred_action_bidirectional", False
         )
         if not isinstance(pred_action_bidirectional, bool):
             raise TypeError("models.pred_action_bidirectional must be a bool")
-        self.dino_dim = dino_dim
-        if dino_dim is not None:
-            if dino_dim != 3072:
-                raise ValueError(f"online DINOv3 ViT-B/16 requires dino_dim=3072, got {dino_dim}")
-            self.dino_encoder_batch_size = int(
-                _config_value(model_config, "dino_encoder_batch_size", 96)
-            )
-            if self.dino_encoder_batch_size <= 0:
-                raise ValueError("models.dino_encoder_batch_size must be positive")
-            self.dino_encoder = DinoV3FeatureEncoder(
-                str(
-                    _config_value(
-                        model_config,
-                        "dino_encoder_model",
-                        "vit_base_patch16_dinov3.lvd1689m",
-                    )
-                ),
-                device=self.device,
-                dtype=self.dtype,
-            )
         params_config = _config_value(model_config, "params", None)
         if params_config is None:
             raise ValueError("models.params must record the complete FLUX.2 architecture")
@@ -331,7 +285,7 @@ class RoboNanaTrainer(Trainer):
             str(checkpoint), action_dim=action_dim, state_dim=state_dim,
             reward_dim=reward_dim, success_dim=success_dim, q_dim=q_dim,
             reward_head_type=reward_head_type, max_horizon=max_horizon,
-            dino_dim=dino_dim, pred_action_bidirectional=pred_action_bidirectional,
+            pred_action_bidirectional=pred_action_bidirectional,
             architecture_version=architecture_version, chunk_horizon=chunk_horizon,
             value_dim=value_dim, expert_hidden_dim=expert_hidden_dim,
             device=self.device, dtype=self.dtype, params=params,
@@ -348,24 +302,17 @@ class RoboNanaTrainer(Trainer):
         self.model_name = "transformer"
 
         self.vae_checkpoint_dir = str(_config_value(model_config, "checkpoint_dir"))
-        vae_dtype_name = str(_config_value(model_config, "vae_dtype", "float32"))
-        try:
-            self.vae_dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[vae_dtype_name]
-        except KeyError as error:
-            raise ValueError(f"unsupported VAE dtype: {vae_dtype_name}") from error
-
         if self.is_main_process:
             parameter_count = sum(parameter.numel() for parameter in model.parameters())
             trainable_count = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
             self.logger.info(
                 "Initialized FLUX.2 backbone=%s; parameters=%d; trainable_parameters=%d; "
-                "trainable_tensors=%d; gradient_checkpointing=%s; pixel_eval_interval=%d",
+                "trainable_tensors=%d; gradient_checkpointing=%s",
                 initialization_label,
                 parameter_count,
                 trainable_count,
                 len(trainable_names),
                 model.gradient_checkpointing,
-                self.pixel_eval_interval,
             )
             self.logger.info(
                 "Attention layout: architecture=%s; A=%s; clean_action=%s",
@@ -373,12 +320,6 @@ class RoboNanaTrainer(Trainer):
                 "bidirectional" if model.pred_action_bidirectional else "causal",
                 "full-48" if architecture_version == "mac_mot_v2" else "causal-prefix",
             )
-            if self.dino_encoder is not None:
-                self.logger.info(
-                    "Frozen online DINO encoder=%s; inference_batch_size=%d; checkpoint_excluded=true",
-                    self.dino_encoder.model_name,
-                    self.dino_encoder_batch_size,
-                )
         return model
 
     def get_optimizers(self, optimizers):
@@ -566,10 +507,6 @@ class RoboNanaTrainer(Trainer):
             )
 
     def print_step(self) -> None:
-        pending_eval = self._pending_pixel_eval
-        self._pending_pixel_eval = None
-        if self._optimizer_step_succeeded and pending_eval is not None:
-            self._run_fixed_horizon_eval(pending_eval)
         if (
             self.target_value_ema is not None
             and self.cur_step % self.log_interval == 0
@@ -626,239 +563,6 @@ class RoboNanaTrainer(Trainer):
                     self.memory_limit_gib,
                 )
         super().print_after_train()
-
-    def _stage_fixed_horizon_eval(
-        self,
-        *,
-        batch_dict: dict[str, Any],
-        context: Tensor,
-        context_mask: Tensor,
-        current: Tensor,
-        state: Tensor,
-        action: Tensor,
-    ) -> None:
-        self._pending_pixel_eval = {
-            "sample_index": batch_dict["sample_index"][0].detach().cpu(),
-            "pool_id": batch_dict.get(
-                "pool_id", torch.zeros_like(batch_dict["sample_index"])
-            )[0].detach().cpu(),
-            "context": context[:1].detach(),
-            "context_mask": context_mask[:1].detach(),
-            "current": current[:1].detach(),
-            "state": state[:1].detach(),
-            "action": action[:1].detach(),
-        }
-
-    def _pixel_eval_dataset(self, pool_id: int):
-        dataset = self.dataloader.dataset
-        while hasattr(dataset, "dataset"):
-            dataset = dataset.dataset
-        children = getattr(dataset, "datasets", None)
-        if children is not None:
-            if not 0 <= int(pool_id) < len(children):
-                raise IndexError(f"pixel-eval pool_id {pool_id} is outside {len(children)} pools")
-            dataset = children[int(pool_id)]
-        while not hasattr(dataset, "load_eval_future_latents") and hasattr(dataset, "dataset"):
-            dataset = dataset.dataset
-        if not hasattr(dataset, "load_eval_future_latents") or not hasattr(dataset, "eval_horizons"):
-            raise TypeError("pixel eval requires RoboTwinHDF5Dataset eval accessors")
-        return dataset
-
-    def _run_fixed_horizon_eval(self, payload: dict[str, Tensor]) -> None:
-        dataset = self._pixel_eval_dataset(int(payload.get("pool_id", torch.tensor(0)).item()))
-        horizons = torch.tensor(dataset.eval_horizons, device=self.device, dtype=torch.long)
-        count = horizons.numel()
-        if self.is_main_process:
-            self.logger.info(
-                "Start post-optimizer pixel eval: ranks=%d, horizons=%s, inference_steps=%d",
-                self.accelerator.num_processes,
-                horizons.detach().cpu().tolist(),
-                self.num_inference_steps,
-            )
-
-        def repeat_first(value: Tensor) -> Tensor:
-            return value[:1].expand(count, *value.shape[1:])
-
-        eval_context = repeat_first(payload["context"])
-        eval_context_mask = repeat_first(payload["context_mask"])
-        eval_current = repeat_first(payload["current"])
-        eval_state = repeat_first(payload["state"])
-        action = payload["action"]
-        future_template = eval_current
-        future_state_template = eval_state
-        reward_template = torch.empty(count, 1, 1, device=self.device, dtype=self.dtype)
-        q_template = torch.empty(count, 1, 1, device=self.device, dtype=self.dtype)
-        context_ids = text_position_ids(count, eval_context.shape[1], self.device)
-        current_ids = image_position_ids(
-            count,
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-            time_coord=torch.zeros_like(horizons),
-            device=self.device,
-        )
-        future_ids = image_position_ids(
-            count,
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-            time_coord=horizons,
-            device=self.device,
-        )
-        schedule = flow_euler_schedule(
-            self.num_inference_steps,
-            flow_shift=self.flow_shift,
-            device=self.device,
-        )
-
-        model_was_training = self.model.training
-        self.model.eval()
-        try:
-            with torch.inference_mode():
-                # Training-time pixel monitoring evaluates only Stage 2 under
-                # the batch's full-clean GT action teacher-forcing track.
-                future_noise = torch.randn_like(future_template)
-                future_state_noise = torch.randn_like(future_state_template)
-                reward_query = torch.zeros_like(reward_template)
-                q_noise = torch.randn_like(q_template)
-                clean_action_time = torch.zeros(count, device=self.device, dtype=torch.float32)
-
-                def predict_world(
-                    sampled_future: Tensor,
-                    sampled_future_state: Tensor,
-                    reward_query_: Tensor,
-                    sampled_q: Tensor,
-                    sampled_action: Tensor,
-                    sigma: Tensor,
-                ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-                    clean_action_cond = sampled_action.expand(count, -1, -1)
-                    pred_action_dummy = torch.zeros_like(clean_action_cond)
-                    wm_time = sigma.expand(count)
-                    world_output = self.model(
-                        context=eval_context,
-                        context_ids=context_ids,
-                        current_latents=eval_current,
-                        current_ids=current_ids,
-                        noisy_future_latents=sampled_future,
-                        future_ids=future_ids,
-                        state=eval_state,
-                        noisy_pred_action=pred_action_dummy,
-                        gt_action_cond=clean_action_cond,
-                        chunk_horizon=horizons,
-                        noisy_future_state=sampled_future_state,
-                        noisy_reward=reward_query_,
-                        noisy_q=sampled_q,
-                        action_timestep=clean_action_time,
-                        wm_timestep=wm_time,
-                        context_mask=eval_context_mask,
-                    )
-                    return (
-                        world_output.image,
-                        world_output.future_state,
-                        world_output.reward,
-                        world_output.success,
-                        world_output.q,
-                    )
-
-                samples = sample_world_flow(
-                    clean_action=action[:1].expand(count, -1, -1),
-                    future_noise=future_noise,
-                    future_state_noise=future_state_noise,
-                    reward_template=reward_query,
-                    q_noise=q_noise,
-                    schedule=schedule,
-                    predict_world=predict_world,
-                )
-        finally:
-            if model_was_training:
-                self.model.train()
-
-        # Ground-truth future images are visualization-only. They are loaded
-        # after pure-noise inference and only on periodic eval steps.
-        eval_future = dataset.load_eval_future_latents(
-            int(payload["sample_index"].item()),
-            horizons.detach().cpu().tolist(),
-        ).to(device=self.device, dtype=self.dtype)
-        if self.is_main_process:
-            self.logger.info("Lazily loaded GT future latents after pure-noise sampling")
-
-        if self.vae_checkpoint_dir is None:
-            raise RuntimeError("VAE checkpoint directory was not configured")
-        from diffusers.models import AutoencoderKLFlux2
-
-        if self.is_main_process:
-            self.logger.info("Load FP32 FLUX.2 VAE on every rank for local pixel eval decode")
-        vae = AutoencoderKLFlux2.from_pretrained(
-            self.vae_checkpoint_dir,
-            subfolder="vae",
-            torch_dtype=self.vae_dtype,
-            local_files_only=True,
-        ).eval()
-        vae.requires_grad_(False)
-        vae.to(self.device)
-        try:
-            with torch.inference_mode():
-                local_current = decode_flux2_tokens(
-                    vae,
-                    payload["current"],
-                    grid_height=self.grid_height,
-                    grid_width=self.grid_width,
-                )
-                local_targets = decode_flux2_tokens(
-                    vae,
-                    eval_future,
-                    grid_height=self.grid_height,
-                    grid_width=self.grid_width,
-                )
-                local_predictions = decode_flux2_tokens(
-                    vae,
-                    samples.future,
-                    grid_height=self.grid_height,
-                    grid_width=self.grid_width,
-                )
-                def to_uint8(images: Tensor) -> Tensor:
-                    return images.mul(255).round().to(torch.uint8)
-
-                local_current = to_uint8(local_current)
-                local_targets = to_uint8(local_targets)
-                local_predictions = to_uint8(local_predictions)
-        finally:
-            vae.to("cpu")
-            del vae
-            gc.collect()
-            if self.device.type == "cuda":
-                torch.cuda.empty_cache()
-
-        gathered_current = self.accelerator.gather(local_current)
-        gathered_targets = self.accelerator.gather(local_targets).reshape(
-            self.accelerator.num_processes, count, *local_targets.shape[1:]
-        )
-        gathered_predictions = self.accelerator.gather(local_predictions).reshape(
-            self.accelerator.num_processes, count, *local_predictions.shape[1:]
-        )
-        gathered_horizons = self.accelerator.gather(horizons.unsqueeze(0))
-
-        try:
-            if self.is_main_process:
-                decoded_current = gathered_current.float().div(255).cpu()
-                decoded_targets = gathered_targets.float().div(255).cpu()
-                decoded_predictions = gathered_predictions.float().div(255).cpu()
-                log_pixel_eval(
-                    accelerator=self.accelerator,
-                    step=self.cur_step,
-                    current=decoded_current,
-                    targets=decoded_targets,
-                    predictions=decoded_predictions,
-                    horizons=gathered_horizons,
-                    num_inference_steps=self.num_inference_steps,
-                )
-                self.logger.info(
-                    "Gathered %d locally decoded pixel rows on rank 0 for W&B",
-                    self.accelerator.num_processes,
-                )
-        finally:
-            self.accelerator.wait_for_everyone()
-        if self.is_main_process:
-            self.logger.info("Removed FLUX.2 VAE from every rank GPU after pixel eval")
-
 
     def _mac_real_batch(self, batch_dict: dict[str, Any]) -> dict[str, Tensor]:
         """Move and validate the fixed-48 fields shared by both MAC phases."""
@@ -1059,148 +763,11 @@ class RoboNanaTrainer(Trainer):
         return losses
 
     def forward_step(self, batch_dict: dict[str, Any]):
-        if getattr(self, "mac_enabled", False):
-            if self.mac_phase == "world_policy":
-                return self._forward_step_mac_world_policy(batch_dict)
+        if self.mac_phase == "world_policy":
+            return self._forward_step_mac_world_policy(batch_dict)
+        if self.mac_phase == "critic":
             return self._forward_step_mac_critic(batch_dict)
-        context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
-        current = batch_dict["current_latents"].to(device=self.device, dtype=self.dtype)
-        future = batch_dict["future_latents"].to(device=self.device, dtype=self.dtype)
-        future_dino = None
-        if self.dino_dim is not None:
-            if self.dino_encoder is None:
-                raise RuntimeError("DINO-enabled model is missing its frozen online encoder")
-            if "future_dino_images" not in batch_dict:
-                raise KeyError(
-                    "DINO-enabled training requires future_dino_images from the horizon-selected frame"
-                )
-            future_dino = self.dino_encoder.encode_views(
-                batch_dict["future_dino_images"],
-                view_keys=ROBOTWIN_VIEW_KEYS,
-                inference_batch_size=self.dino_encoder_batch_size,
-            ).to(dtype=self.dtype)
-        state = batch_dict["state"].to(device=self.device, dtype=self.dtype).unsqueeze(1)
-        behavior_action = batch_dict.get("behavior_action", batch_dict["action"]).to(
-            device=self.device, dtype=self.dtype
-        )
-        future_state = batch_dict["future_state"].to(device=self.device, dtype=self.dtype).unsqueeze(1)
-        reward = batch_dict["reward"].to(device=self.device, dtype=self.dtype).reshape(
-            context.shape[0], 1, 1
-        )
-        success = batch_dict["success"].to(device=self.device, dtype=self.dtype).reshape(
-            context.shape[0], 1, 1
-        )
-        accumulated_reward = batch_dict["reward_h"].to(
-            device=self.device, dtype=self.dtype
-        ).reshape(context.shape[0], 1, 1)
-        q = batch_dict["q"].to(device=self.device, dtype=self.dtype).reshape(
-            context.shape[0], 1, 1
-        )
-        horizon = batch_dict["chunk_horizon"].to(device=self.device, dtype=torch.long).reshape(-1)
-        context_mask = batch_dict["context_mask"].to(device=self.device, dtype=torch.bool)
-        action_loss_mask = batch_dict["action_loss_mask"].to(device=self.device)
-        q_loss_mask = batch_dict.get("q_loss_mask")
-        if q_loss_mask is not None:
-            q_loss_mask = q_loss_mask.to(device=self.device)
-
-        pred_action_target = behavior_action
-
-        batch_size = context.shape[0]
-        expected_tokens = self.grid_height * self.grid_width
-        if current.shape[1] != expected_tokens or future.shape[1] != expected_tokens:
-            raise ValueError(
-                f"cached FLUX image tokens must use {self.grid_height}x{self.grid_width}={expected_tokens} tokens"
-            )
-        action_timestep = self._sample_timestep(batch_size)
-        wm_timestep = self._sample_timestep(batch_size)
-        noisy_action, action_target = flow_noise(pred_action_target, action_timestep)
-        noisy_future, image_target = flow_noise(future, wm_timestep)
-        noisy_future_state, future_state_target = flow_noise(future_state, wm_timestep)
-        reward_query = torch.zeros_like(reward)
-        # The direct reward head is a Bernoulli classifier: class 1 means the
-        # selected future state is a successful terminal (reward 0), while
-        # class 0 means the per-step reward is -1.
-        reward_target = success
-        noisy_q, q_target = flow_noise(q, wm_timestep)
-        noisy_future_dino = None
-        dino_target = None
-        if future_dino is not None:
-            noisy_future_dino, dino_target = flow_noise(future_dino, wm_timestep)
-
-        context_ids = text_position_ids(batch_size, context.shape[1], self.device)
-        current_ids = image_position_ids(
-            batch_size,
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-            time_coord=torch.zeros_like(horizon),
-            device=self.device,
-        )
-        future_ids = image_position_ids(
-            batch_size,
-            grid_height=self.grid_height,
-            grid_width=self.grid_width,
-            time_coord=horizon,
-            device=self.device,
-        )
-        dino_ids = None
-        if future_dino is not None:
-            if tuple(future_dino.shape[1:]) != (147, self.dino_dim):
-                raise ValueError(
-                    f"online DINO target must be [B, 147, {self.dino_dim}], "
-                    f"got {tuple(future_dino.shape)}"
-                )
-            dino_ids = dino_position_ids(
-                batch_size,
-                num_cameras=3,
-                grid_height=7,
-                grid_width=7,
-                time_coord=horizon,
-                device=self.device,
-            )
-
-        output = self.model(
-            context=context,
-            context_ids=context_ids,
-            current_latents=current,
-            current_ids=current_ids,
-            noisy_future_latents=noisy_future,
-            future_ids=future_ids,
-            state=state,
-            noisy_pred_action=noisy_action,
-            gt_action_cond=behavior_action,
-            chunk_horizon=horizon,
-            noisy_future_state=noisy_future_state,
-            noisy_reward=reward_query,
-            noisy_q=noisy_q,
-            action_timestep=action_timestep,
-            wm_timestep=wm_timestep,
-            noisy_future_dino=noisy_future_dino,
-            dino_ids=dino_ids,
-            context_mask=context_mask,
-        )
-
-        if should_log_pixel_eval(self.cur_step, self.pixel_eval_interval):
-            self._stage_fixed_horizon_eval(
-                batch_dict=batch_dict,
-                context=context,
-                context_mask=context_mask,
-                current=current,
-                state=state,
-                action=behavior_action,
-            )
-        losses = joint_flow_loss(
-            output,
-            image_target=image_target,
-            action_target=action_target,
-            future_state_target=future_state_target,
-            reward_target=reward_target,
-            success_target=success,
-            q_target=q_target,
-            dino_target=dino_target,
-            action_loss_mask=action_loss_mask,
-            q_loss_mask=q_loss_mask,
-        )
-        return losses
+        raise ValueError("MAC phase must be world_policy or critic")
 
     def parse_losses(self, losses: dict[str, Tensor] | Tensor) -> Tensor:
         if not isinstance(losses, dict):
@@ -1225,6 +792,5 @@ class RoboNanaTrainer(Trainer):
                 self._outputs[key] = {"sum": 0.0, "num": 0}
             self._outputs[key]["sum"] += float(value.detach().item())
             self._outputs[key]["num"] += 1
-        if self.posttrain_enabled:
-            self._record_posttrain_metrics()
+        self._record_posttrain_metrics()
         return loss

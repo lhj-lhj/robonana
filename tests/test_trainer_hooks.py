@@ -15,33 +15,18 @@ def test_cuda_device_without_index_uses_current_device(monkeypatch):
     assert resolve_cuda_device_index(torch.device("cpu")) is None
 
 
-def test_pixel_eval_runs_only_after_backward_and_optimizer(monkeypatch):
-    events = []
+@pytest.mark.parametrize("phase", ["world_policy", "critic", "legacy"])
+def test_forward_routes_only_to_current_mac_phases(phase):
     trainer = object.__new__(RoboNanaTrainer)
-    trainer.accelerator = SimpleNamespace(
-        sync_gradients=True,
-        is_main_process=False,
-        unwrap_model=lambda model, **kwargs: model,
-    )
-    trainer._models = [torch.nn.Linear(1, 1)]
-    trainer._optimizers = []
-    trainer.target_value_ema = None
-    trainer._pending_pixel_eval = {"sample": torch.tensor(1)}
-    trainer._optimizer_step_succeeded = False
-
-    monkeypatch.setattr(Trainer, "backward_step", lambda self, loss: events.append("optimizer"))
-    monkeypatch.setattr(Trainer, "print_step", lambda self: events.append("log"))
-    monkeypatch.setattr(
-        RoboNanaTrainer,
-        "_run_fixed_horizon_eval",
-        lambda self, payload: events.append("eval"),
-    )
-
-    trainer.backward_step(torch.tensor(1.0))
-    assert events == ["optimizer"]
-    trainer.print_step()
-    assert events == ["optimizer", "eval", "log"]
-    assert trainer._pending_pixel_eval is None
+    trainer.mac_phase = phase
+    batch = {"sentinel": object()}
+    trainer._forward_step_mac_world_policy = lambda value: ("world_policy", value)
+    trainer._forward_step_mac_critic = lambda value: ("critic", value)
+    if phase == "legacy":
+        with pytest.raises(ValueError, match="MAC phase"):
+            trainer.forward_step(batch)
+    else:
+        assert trainer.forward_step(batch) == (phase, batch)
 
 
 def test_early_checkpoint_reuses_fact_save_path(monkeypatch):
@@ -144,7 +129,6 @@ def test_fresh_critic_target_exact_copies_inherited_online_value():
         online_value.weight.copy_(torch.tensor([[1.0, -2.0, 3.0]]))
     trainer._models = [SimpleNamespace(value_expert=online_value)]
     trainer.accelerator = SimpleNamespace(device=torch.device("cpu"))
-    trainer.mac_enabled = True
     trainer.mac_phase = "critic"
     trainer.with_ema = False
     trainer.posttrain_config = {
@@ -179,24 +163,3 @@ def test_critic_resume_rejects_missing_value_ema_files(monkeypatch, tmp_path):
 
     with pytest.raises(FileNotFoundError, match="critic resume checkpoint is incomplete"):
         trainer.load_model_hook([], str(tmp_path))
-
-
-def test_posttrain_pixel_eval_resolves_the_sample_owning_pool():
-    children = [
-        SimpleNamespace(
-            pool_name=name,
-            eval_horizons=(12, 24, 48),
-            load_eval_future_latents=lambda *args: None,
-        )
-        for name in (
-            "original_success",
-            "collected_success_replay",
-            "historical_failure_replay",
-            "latest_failure",
-        )
-    ]
-    trainer = object.__new__(RoboNanaTrainer)
-    trainer._dataloaders = [SimpleNamespace(dataset=SimpleNamespace(datasets=children))]
-
-    assert trainer._pixel_eval_dataset(0) is children[0]
-    assert trainer._pixel_eval_dataset(3) is children[3]

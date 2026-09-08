@@ -4,6 +4,11 @@ This repository maintains one RoboTwin training and inference path: a fixed acti
 
 The old `idx_h`/variable-horizon, 800M, full-FLUX-EMA, TD/MC, and 120k runtime-loading paths are removed. The original 120k checkpoint is an external archived artifact and is not deleted; it is no longer a valid runtime input. Every new run starts from the current 1,000-step MAC checkpoint unless `ROBONANA_MAC_PRETRAIN_CHECKPOINT` explicitly points to another complete `mac_mot_v2` checkpoint.
 
+The trainer has only two forward paths: `world_policy` and `critic`. Legacy
+flow-Q sampling, non-MAC/DINO training, and periodic multi-horizon pixel eval
+are removed. Current world reconstruction reports use `sample_mac_world` and
+the shared VAE decoder. See [code map](docs/CURRENT_CODE_MAP.md) for cleanup boundaries.
+
 ## Source version and deployment
 
 Maintain one code version through [GitHub main](https://github.com/lhj-lhj/robonana).

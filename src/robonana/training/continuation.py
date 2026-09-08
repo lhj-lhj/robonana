@@ -44,6 +44,12 @@ def build_critic_continuation(source, *, checkpoint, source_config, project_dir,
         # User-approved correction, not exact reproduction of the old run.
         # Only this new config is changed; the saved source config is untouched.
         pool["stats_path"] = str(A_STATS_PATH)
+        # Normalize saved configuration metadata into the maintained schema;
+        # removed DINO/pixel-eval implementations are not runtime alternatives.
+        for removed in ("dino_online", "dino_image_size", "eval_horizons"):
+            pool.pop(removed, None)
+    config["train"].pop("pixel_eval_interval", None)
+    config["train"].get("loss_weights", {}).pop("dino_loss", None)
     config["train"].update(
         max_steps=max_steps, gradient_accumulation_steps=1, mixed_precision="no",
         resume=True, resume_from=str(checkpoint), rebase_scheduler_on_resume=True,

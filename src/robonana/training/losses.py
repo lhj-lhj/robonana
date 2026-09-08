@@ -6,8 +6,6 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from robonana.models.flux2_fact import Flux2FACTOutput
-
 
 def masked_mse(prediction: Tensor, target: Tensor, sample_mask: Tensor | None = None) -> Tensor:
     per_sample = (prediction.float() - target.float()).square().flatten(1).mean(dim=1)
@@ -77,31 +75,3 @@ def deterministic_return_loss(
         raise ValueError("return_scale must be positive")
     normalized_target = target.float() / return_scale
     return masked_mse(prediction, normalized_target, sample_mask)
-
-
-def joint_flow_loss(
-    output: Flux2FACTOutput,
-    *,
-    image_target: Tensor,
-    action_target: Tensor,
-    future_state_target: Tensor,
-    reward_target: Tensor,
-    success_target: Tensor,
-    q_target: Tensor,
-    dino_target: Tensor | None = None,
-    action_loss_mask: Tensor | None = None,
-    q_loss_mask: Tensor | None = None,
-) -> dict[str, Tensor]:
-    losses = {
-        "image_loss": masked_mse(output.image, image_target),
-        "action_loss": masked_mse(output.action, action_target, action_loss_mask),
-        "future_state_loss": masked_mse(output.future_state, future_state_target),
-        "reward_loss": masked_bce_with_logits(output.reward, reward_target),
-        "success_loss": masked_bce_with_logits(output.success, success_target),
-        "q_loss": masked_mse(output.q, q_target, q_loss_mask),
-    }
-    if dino_target is not None:
-        if output.dino is None:
-            raise ValueError("dino_target was provided but the model produced no DINO output")
-        losses["dino_loss"] = masked_mse(output.dino, dino_target)
-    return losses

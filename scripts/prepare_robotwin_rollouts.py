@@ -166,7 +166,6 @@ def main() -> int:
             task_glob=args.task_glob,
             index_path=str(index_path),
             fixed_horizon=48,
-            eval_horizons=(48,),
             q_target_mode="mac_mot_v2",
             episode_filter="all",
             pool_name="latest_failure",
