@@ -36,7 +36,14 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8194)
     parser.add_argument("--timeout-seconds", type=int, default=2400)
+    parser.add_argument("--inference-batch-size", type=int, default=1)
+    parser.add_argument("--batch-wait-ms", type=float, default=0)
+    parser.add_argument("--candidate-batch-size", type=int, default=16)
     opts = parser.parse_args()
+    if not 1 <= opts.inference_batch_size <= 8 or not 1 <= opts.candidate_batch_size <= 32:
+        parser.error("request batch must be 1..8 and candidate batch 1..32")
+    if not 0 <= opts.batch_wait_ms <= 1000 or (opts.inference_batch_size > 1 and opts.batch_wait_ms == 0):
+        parser.error("use a positive bounded wait (<=1000 ms) for dynamic multi-request batching")
     if any(gpu < 0 for gpu in opts.sim_gpus):
         parser.error("GPU ids must be nonnegative; repeat an id for multiple isolated workers")
     jobs, signatures = [], set()
@@ -63,7 +70,7 @@ def main():
     common.update(ROBONANA_SELECTED_WORLD_ROOT="", ROBONANA_EVAL_INSTRUCTION="",
                   ROBONANA_OVERLAY_CHUNK_RETURN="0", ROBONANA_Q_DIAGNOSTICS_PATH="")
     server_env = dict(common, CUDA_VISIBLE_DEVICES=str(opts.server_gpu),
-                      ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE="16")
+                      ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE=str(opts.candidate_batch_size))
     server_cmd = [sys.executable, str(ROOT / "scripts/inference_server_robotwin_batched.py"),
         "--checkpoint", str(opts.checkpoint.resolve()), "--model-config", str(opts.model_config.resolve()),
         "--flux-checkpoint-dir", str(ROOT / "checkpoints/FLUX.2-klein-base-4B"),
@@ -72,9 +79,10 @@ def main():
         "--action-chunk", "48", "--horizon", "48", "--num-inference-steps", "20",
         "--inference-mode", "action_q_rejection", "--rejection-candidate-count", "32",
         "--q-return-scale", "1000", "--port", str(opts.port),
-        # Accept concurrent clients but preserve SINGLE-request inference batches.
-        # Dynamic fusion would introduce an additional numerical/performance variable.
-        "--max-batch-size", "1", "--max-batch-wait-ms", "0", "--max-clients", "8"]
+        # Scheduling knobs only: M=32, precision and all model math stay unchanged.
+        "--max-batch-size", str(opts.inference_batch_size),
+        "--max-batch-wait-ms", str(opts.batch_wait_ms), "--max-clients", "8",
+        "--batch-metrics-path", str(output / "batch_metrics.jsonl")]
     configuration = {k: str(v) if isinstance(v, Path) else v for k, v in vars(opts).items()}
     configuration["source_episodes"] = [str(p) for p in opts.source_episodes]
     configuration["commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -149,7 +157,8 @@ def main():
             raise RuntimeError("queue has unfinished claims")
         summary = {"episodes": rows, "wall_seconds_including_startup": elapsed,
                    "episodes_per_hour": len(rows) * 3600 / elapsed,
-                   "dataset_validated": True, "inference_batch_size": 1,
+                   "dataset_validated": True, "inference_batch_size": opts.inference_batch_size,
+                   "candidate_batch_size": opts.candidate_batch_size,
                    "queue_counts": queue.counts(), "workers": len(workers)}
         (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         print(json.dumps(summary), flush=True)

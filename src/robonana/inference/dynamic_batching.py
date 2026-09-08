@@ -3,11 +3,40 @@
 from __future__ import annotations
 
 import queue
+import json
+from pathlib import Path
 import threading
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any
+
+
+class BatchMetricsPolicy:
+    """Opt-in transport instrumentation; delegate inference without changing it.
+
+    The dynamic batcher is the single caller. Record actual batch membership,
+    not configured maximums; do not serialize images, language or tensors.
+    """
+
+    def __init__(self, policy, path):
+        self.policy = policy
+        self.path = Path(path)
+        self.path.touch(exist_ok=False)
+
+    def __getattr__(self, name):
+        return getattr(self.policy, name)
+
+    def inference_batch(self, observations):
+        started = time.perf_counter()
+        results = self.policy.inference_batch(observations)
+        row = {"batch_size": len(observations),
+               "wall_ms": (time.perf_counter() - started) * 1000,
+               "sampling_seeds": [item.get("sampling_seed") for item in observations],
+               "policy_timing_ms": results[0].get("_policy_timing_ms", {}) if results else {}}
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row) + "\n")
+        return results
 
 
 @dataclass(frozen=True)

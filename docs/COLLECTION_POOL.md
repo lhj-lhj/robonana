@@ -22,8 +22,9 @@ labels still come exclusively from the existing writer/training data pipeline.
   imported by file; `envs.*` resolve to the CURRENT deployed RoboTwin task code.
 - VectorEnv task/config construction is bypassed to inject the already-configured
   current task. No switch of robot, planner, assets, image quality or task branch.
-- Fixed 48 actions, 20 denoising steps, M=32 argmax, candidate batch=16, FP32:
-  unchanged. Server inference batch stays one even with multiple clients.
+- Fixed 48 actions, 20 denoising steps, M=32 argmax and FP32: unchanged.
+  Candidate batch defaults to 16 and request batch to one; explicit batching
+  probes may change grouping, not the candidate count or sampling algorithm.
 - Every control-step observation is recorded. Publish final observation before
   reset. Failed episodes remain real failures, not short successful fragments.
 - Use prevalidated source seeds from the same task/config/assets and their exact
@@ -60,6 +61,19 @@ The actual current policy chooses fresh actions using its existing stable seed.
 - Serial control: `--sim-gpus 7 --server-gpu 6`.
 - Parallel probe: `--sim-gpus 6 7 --server-gpu 6`.
 - Four-environment probe: `--sim-gpus 6 7 6 7 --server-gpu 6`.
+- Two-request / 32-candidate grouping: add `--inference-batch-size 2
+  --candidate-batch-size 32 --batch-wait-ms 10`. Incomplete batches flush after
+  the bounded wait; `batch_metrics.jsonl` records actual batch sizes and timings.
+  Four workers can feed this two-request service without requiring a global
+  environment step barrier. Production defaults remain unchanged.
+
+Before a changed grouping is used for collection, the offline
+`scripts/benchmark_robotwin_inference_batch.py` probe compares warmed 1x16,
+1x32 and 2x32 inference on identical recorded images/state/instructions and
+fixed probe noise seeds. It reports all-candidate action/Q differences, argmax
+indices and CUDA allocated/reserved peaks, and refuses a silent argmax change.
+This does not guarantee bitwise equality on all future inputs: batched kernels
+can differ numerically even in FP32, including the unchanged frozen encoders.
 
 Workers now claim the next pending episode from `episode_queue.sqlite` whenever
 their current episode finishes. The same prevalidated seed list is visible to all

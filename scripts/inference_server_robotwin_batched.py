@@ -25,6 +25,7 @@ import torch
 from robonana.inference.batched_policy import BatchedRoboNanaRobotWinPolicy
 from robonana.inference.robotwin_policy import InferenceMode
 from robonana.inference.dynamic_batch_server import DynamicBatchRobotInferenceServer
+from robonana.inference.dynamic_batching import BatchMetricsPolicy
 from world_action_model import apply_runtime_compat
 
 
@@ -53,6 +54,7 @@ def main() -> int:
     parser.add_argument("--max-batch-size", type=int, default=2)
     parser.add_argument("--max-batch-wait-ms", type=float, default=100.0)
     parser.add_argument("--max-clients", type=int, default=16)
+    parser.add_argument("--batch-metrics-path", type=Path, default=None)
     args = parser.parse_args()
     policy = BatchedRoboNanaRobotWinPolicy(
         checkpoint=args.checkpoint,
@@ -78,6 +80,8 @@ def main() -> int:
         f"{resolved.params.depth_single_blocks} blocks; source={resolved.source}",
         flush=True,
     )
+    if args.batch_metrics_path is not None:
+        policy = BatchMetricsPolicy(policy, args.batch_metrics_path)
     server = DynamicBatchRobotInferenceServer(
         policy,
         host=args.host,
