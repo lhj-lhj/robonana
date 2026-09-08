@@ -65,6 +65,53 @@ directories. Keep failed episodes in the comparison. Report episode wall time,
 startup-inclusive total time, GPU memory, per-seed outcomes and frame counts.
 Persistent scenes require real multi-episode stress testing before deployment.
 
+## Measured result on 190 (2026-09-08)
+
+Validated implementation commit: `7d2a1b0`. Runtime used the existing
+`/data3/hongjia/venvs/robotwin-sapien303/bin/python`, invoked through its venv
+path, NOT its resolved symlink target. The first attempt with the wrong resolved
+interpreter was stopped, excluded from comparisons, and left separate on disk.
+
+Final output:
+`/data3/hongjia/robonana/outputs/collection_pool_parallel4_venv_20260908`.
+Checkpoint: the existing critic step11000 under
+`experiments/hanging_mug_critic_7k_to_17k_bs16_20260908`.
+
+| Seed | GPU | Result | Actions | This worker's episode seconds |
+|---|---:|---|---:|---:|
+| 100000 | 6 | success | 328 | 207.738 |
+| 100003 | 6 | success | 329 | 165.807 |
+| 100001 | 7 | success | 326 | 200.168 |
+| 100004 | 7 | failure | 900 | 374.529 |
+
+Both workers reused the same process/task/client for two episodes. Total wall
+time, including server/client startup and worker completion: **590.720 seconds**
+(9m51s), 24.377 episodes/hour. Final server teardown is outside that timer.
+The previous original-collector run of these same four seeds took **929.724
+seconds** between its `.started` and `summary.txt` markers (15m30s).
+Observed combined throughput ratio: **1.574x**, wall time reduction **36.5%**.
+These are separate measurements of the combined infrastructure change, not a
+fresh randomized A/B isolating parallelism alone. New seed-discovery costs are
+not included in the new path, and timing markers are not identical instrumentation.
+
+Peak sampled total GPU memory: GPU6 **41,577 MiB**, GPU7 **7,037 MiB**.
+This is a small 75%-success sample with unequal worker loads; do not advertise
+its linear 100-episode extrapolation as a validated production collection time.
+
+All four output HDF5s were compared against the original collection by seed:
+
+- 1,887 observations, all three JPEG streams byte-identical (5,661 images).
+- All `joint_action/vector` and `policy_action/vector` arrays exactly equal.
+- All candidate Q arrays, selected Q/index, Q margins and candidate counts equal.
+- All `transition_valid` arrays equal; true terminal observation retained.
+- Success/failure and trajectory lengths identical, including the 900-step fail.
+- Supervisor's unique-seed, frame-count and final-observation checks passed.
+
+Eight unit tests passed locally and on 190. No models, losses, inference server,
+sampling, dataset writer or training files changed. This verifies two resets per
+worker, not a 50/100-episode stability run or real eight-reset cache-clear cycle.
+Production collection defaults remain unchanged until a longer stress test.
+
 The old render-sync probe and its test/report were removed at the user's request;
 their historical results remain recoverable in Git. Its ~1% simulated-step gain
 did not justify enabling it. Remote raw benchmark artifacts were not removed.
