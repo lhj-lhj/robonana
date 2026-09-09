@@ -402,3 +402,60 @@ W&B：[3ca5f86f](https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/3ca
 实际config.json再次核对：GPU0–7、每卡32、累积1、FP32、stride2，目标20k。
 190完整回归196项通过（122.70秒，27条已有Pillow弃用警告）。W&B官方API已确认
 run为running，收到_step150、total_loss=0.5543、samples_per_sec=63.79，非仅本地打印URL。
+
+### 9.4 当前 BF16 仓库配置重启与全关 checkpoint 实测（2026-09-09）
+
+中文：本次只调整实验启动参数，复用 `world_policy_resume` 和 FACT 恢复路径，
+没有修改算法、训练器或新增精度兼容分支。启动源码为 `81d7633`。
+English: Runtime-only restart using the maintained resume adapter; no algorithm
+or trainer changes. Full activation-checkpoint disabling was tested, not assumed safe.
+
+原 FP32/partial-GC 进程最终停在 step3179，最新完整保存点为 step3000；
+3001–3179 未保存，需要重跑。原 checkpoint、日志和数据全部保留。
+用户明确确认后停止占用 GPU0–5 的另一组 ImageWAM 训练，仅发送中断信号，
+未删除其产物；随后确认八卡空闲再启动本实验。
+
+恢复源：
+`experiments/hanging_mug_fixed100_round0_stage1_20k_bs32x8_partialgc_20260909/models/checkpoint_epoch_10_step_3000`。
+旧 FP32 DeepSpeed 优化器文件名为 `zero_pp_rank_*_mp_rank_00_optim_states.pt`，
+BF16 恢复要求 `bf16_zero_pp_rank_*_mp_rank_00_optim_states.pt`。先核对全部八片
+ZeRO-2 状态：partition_count=8、Adam step=3000、主权重及两个动量为 FP32。
+再创建独立硬链接视图
+`experiments/checkpoint_views/partialgc_step3000_bf16_names_20260909`，保留所有原文件，
+仅增加 BF16 文件名别名，不改内容、不覆盖源 checkpoint。该视图只用于读取恢复，
+不得原地写入文件。真实八卡恢复日志确认模型、Adam、scheduler、sampler 和 RNG 加载成功。
+这是同拓扑的 FP32→BF16 续训，不是数值完全等价的历史重现，也不是八卡转两卡的重分片。
+
+全关试跑 `..._bs32x8_bf16_nogc_r2_20260909`：
+`gradient_checkpointing=False`，每卡32、累积1、global256、BF16，首个前向即 OOM。
+报错时每卡进程约178.07GiB，PyTorch allocated=172.52GiB、reserved但未分配=3.62GiB，
+仅余约253.56MiB，再申请1.96GiB失败。没有完成新 optimizer step。
+日志：`outputs/hanging_mug_fixed100_20260909/stage1_bf16_nogc_r2.launch.log`。
+此前无文件名别名的首次 BF16 启动仅在恢复时报 missing optimizer filename，
+不能把该次失败算作显存测试。
+
+正式回退到部分 checkpoint：5个double全部保留，20个single中偶数编号保留。
+batch、数据、学习率及终点不变：GPU0–7，每卡32，累积1，global256；
+100条回放+50条原始Clean、A统计；lr=2e-5、原warmup/cosine，终点20000。
+NVLS仍关闭，NVLink P2P保留。使用与9.1相同的正式入口，覆盖如下环境参数：
+
+```bash
+export ROBONANA_PROJECT_DIR=/data3/hongjia/robonana/experiments/hanging_mug_fixed100_round0_stage1_20k_bs32x8_bf16_partialgc_20260909
+export ROBONANA_RESUME_CONFIG=/data3/hongjia/robonana/experiments/hanging_mug_fixed100_round0_stage1_20k_bs32x8_partialgc_20260909/config.json
+export ROBONANA_RESUME_CHECKPOINT=/data3/hongjia/robonana/experiments/checkpoint_views/partialgc_step3000_bf16_names_20260909
+export ROBONANA_GRADIENT_CHECKPOINTING=1
+export ROBONANA_GRADIENT_CHECKPOINTING_SINGLE_STRIDE=2
+export ROBONANA_PYTHON=/data3/hongjia/conda/envs/robonana/bin/python
+export NCCL_NVLS_ENABLE=0 NCCL_IB_DISABLE=1
+bash scripts/run_robotwin_train.sh --config robonana.configs.world_policy_resume.config
+```
+
+已完成真实更新至step3037；最近30步单步中位数2.1055秒，约121.6 samples/s。
+相较重启前FP32约4.0秒/step，吞吐约1.9倍；这是短窗口先后比较，不是严格A/B。
+八卡显存快照均101877MiB（99.49GiB），总183359MiB，余量79.57GiB；
+这是nvidia-smi进程/驱动快照，不是逐算子allocated峰值。全关OOM已实测，不能
+由部分checkpoint的显存余量推断全关一定可行。按当前速度剩余约10小时，不含保存开销。
+W&B服务端确认running，已收到step3032、total_loss=0.335209、samples_per_sec=121.276。
+W&B：[ob7ztgvt](https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/ob7ztgvt)。
+日志：`outputs/hanging_mug_fixed100_20260909/stage1_bf16_partialgc.launch.log`。
+启动主管PID232441；训练保持运行。
