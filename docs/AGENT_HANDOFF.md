@@ -73,6 +73,9 @@ RoboNana follows FACT BF16: FLUX training, action/world rollout, online Q/V,
 Value EMA and environment inference use BF16. FACT Trainer/Accelerate owns
 mixed precision; the FP32-only guards and forced-autocast-off wrapper are removed.
 EMA inherits online dtype and uses one lerp; return/loss math stays FP32.
+Stage 1 constructs noise/noisy inputs/velocity targets in FP32 before casting
+model inputs to BF16, following FACT. Do not cast clean targets or sigma early.
+Stage 2 still generates model-facing inference noise directly in BF16.
 Qwen weights/precision/language caches remain
 unchanged. The 2026-09-08 image-consistency request supersedes the earlier
 freeze on VAE preprocessing: one FACT resize + single-image FP32 VAE + BF16

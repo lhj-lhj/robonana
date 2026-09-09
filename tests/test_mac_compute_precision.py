@@ -10,10 +10,26 @@ from robonana.sampling import generate_mac_imaginary_rollout_h1, evaluate_mac_cr
 from robonana.training.posttraining import ValueExpertEMA
 
 
+def test_flow_noise_preserves_sigma_and_unrounded_velocity_target():
+    from robonana.training.robotwin_trainer import flow_noise
+    clean = torch.tensor([[[1., 1.003]]], dtype=torch.float32)
+    sigma = torch.tensor([.999], dtype=torch.float32)
+    with torch.autocast("cpu", dtype=torch.bfloat16), patch(
+            "torch.randn_like", side_effect=torch.zeros_like) as noise:
+        noisy, target = flow_noise(clean, sigma)
+    assert noise.call_args.args[0].dtype == torch.float32
+    assert noisy.dtype == target.dtype == torch.float32
+    assert torch.equal(noisy, clean * (1 - sigma.reshape(1, 1, 1)))
+    assert noisy.bfloat16()[0, 0, 0].item() == .00099945068359375
+    assert torch.equal(target, -clean)
+    assert not torch.equal(target, target.bfloat16().float())
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_bf16_stage1_full_world_policy_backward(device):
     from types import SimpleNamespace
-    from robonana.training.robotwin_trainer import RoboNanaTrainer
+    import robonana.training.robotwin_trainer as training
+    RoboNanaTrainer = training.RoboNanaTrainer
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA integration requires a GPU")
     model, inputs = model_and_inputs()
@@ -31,8 +47,34 @@ def test_bf16_stage1_full_world_policy_backward(device):
                  action_loss_mask=torch.tensor([1., 0.]), action_valid_mask=torch.ones(2, 48),
                  reward_chunk=torch.zeros(2, 48), reward_chunk_mask=torch.ones(2, 48),
                  success=torch.tensor([1., 0.]))
-    with torch.autocast(device, dtype=torch.bfloat16):
+    sigma = torch.tensor([.999, .37], device=device)
+    trainer._sample_timestep = lambda batch_size: sigma
+    constructed = []
+    def record_noise(clean, timestep):
+        result = training_flow_noise(clean, timestep)
+        constructed.append((clean, *result))
+        return result
+    training_flow_noise = training.flow_noise
+    with torch.autocast(device, dtype=torch.bfloat16), \
+            patch.object(training, "flow_noise", side_effect=record_noise), \
+            patch.object(model, "forward", wraps=model.forward) as forward, \
+            patch.object(training, "masked_mse", wraps=training.masked_mse) as world_loss, \
+            patch.object(training, "masked_action_mse", wraps=training.masked_action_mse) as action_loss:
         losses = trainer._forward_step_mac_world_policy(batch)
+    model_inputs = forward.call_args.kwargs
+    for (clean, noisy, target), source, field in zip(
+            constructed, (batch["action"], batch["future_latents"], batch["future_state"][:, None]),
+            ("noisy_pred_action", "noisy_future_latents", "noisy_future_state"), strict=True):
+        assert torch.equal(clean.cpu(), source)
+        assert noisy.dtype == target.dtype == torch.float32
+        assert torch.equal(model_inputs[field], noisy.bfloat16())
+    assert torch.equal(model_inputs["gt_action_cond"], batch["action"].to(device).bfloat16())
+    assert torch.equal(model_inputs["action_timestep"], sigma)
+    assert torch.equal(model_inputs["wm_timestep"], sigma)
+    # Verify actual loss inputs, not only the helper's intermediate tensors.
+    assert torch.equal(action_loss.call_args.args[1], constructed[0][2])
+    assert torch.equal(world_loss.call_args_list[0].args[1], constructed[1][2])
+    assert torch.equal(world_loss.call_args_list[1].args[1], constructed[2][2])
     assert all(loss.dtype == torch.float32 and torch.isfinite(loss) for loss in losses.values())
     sum(losses.values()).backward()
     for name in ("action_out.weight", "state_out.weight", "reward_out.weight", "success_out.weight"):

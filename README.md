@@ -404,6 +404,10 @@ round away; there is no hidden FP32 master copy. New phases copy online Value;
 same-phase resume restores the saved target. FP32 checkpoint tensors load into
 the current BF16 modules through PyTorch's normal copy/cast behavior.
 Loss/return reductions stay FP32, as do normalization and reporting boundaries.
+Stage-1 noise follows FACT's ordering: keep clean action/future state/latents,
+sample noise, broadcast sigma and form noisy inputs and velocity targets in
+FP32; only the inputs passed to the model are cast to BF16. Targets remain FP32
+through loss evaluation. Stage-2 inference noise is generated directly in BF16.
 FACT/DeepSpeed owns optimizer/master-state precision. FACT's TF32 default is
 retained; model construction no longer changes global BF16 reduction flags.
 Inference entrypoints have no separate precision selector.

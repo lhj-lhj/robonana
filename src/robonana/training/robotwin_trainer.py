@@ -45,10 +45,19 @@ from robonana.training.posttraining import (
 def _expand_timestep(timestep: Tensor, target: Tensor) -> Tensor:
     while timestep.ndim < target.ndim:
         timestep = timestep.unsqueeze(-1)
-    return timestep.to(device=target.device, dtype=target.dtype)
+    return timestep.to(device=target.device, dtype=torch.float32)
 
 
 def flow_noise(clean: Tensor, timestep: Tensor) -> tuple[Tensor, Tensor]:
+    """中文：先构造加噪输入和监督目标，进入模型时才降为 BF16。
+
+    English: Follow FACT's noise/target-before-input-cast ordering:
+    https://github.com/Bariona/FACT/blob/9427ea451e806220742148049ef0576e43ef7382/world_action_model/trainer/wa_casual_trainer.py#L702-L717
+    and #L780-L786. Our cache/VAE contract and robot data provide FP32 clean
+    values (cache storage is BF16-rounded). Keep sigma, sampled noise and
+    velocity targets FP32; rounding sigma=.999 to BF16 first would make it 1.
+    """
+    clean = clean.float()
     noise = torch.randn_like(clean)
     sigma = _expand_timestep(timestep, clean)
     return clean * (1.0 - sigma) + noise * sigma, noise - clean
@@ -575,13 +584,14 @@ class RoboNanaTrainer(Trainer):
 
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
         current = batch_dict["current_latents"].to(device=self.device, dtype=self.dtype)
-        future = batch_dict["future_latents"].to(device=self.device, dtype=self.dtype)
+        # Preserve clean training data until flow_noise constructs its target.
+        future = batch_dict["future_latents"].to(device=self.device)
         state = batch_dict["state"].to(device=self.device, dtype=self.dtype).unsqueeze(1)
         future_state = batch_dict["future_state"].to(
-            device=self.device, dtype=self.dtype
+            device=self.device
         ).unsqueeze(1)
         action = batch_dict.get("behavior_action", batch_dict["action"]).to(
-            device=self.device, dtype=self.dtype
+            device=self.device
         )
         horizon = batch_dict["chunk_horizon"].to(
             device=self.device, dtype=torch.long
@@ -632,19 +642,19 @@ class RoboNanaTrainer(Trainer):
             time_coord=values["horizon"],
             device=self.device,
         )
-        empty = values["action"].new_empty(batch, 0, 1)
+        empty = values["action"].new_empty(batch, 0, 1, dtype=self.dtype)
         output = self.model(
             context=context,
             context_ids=context_ids,
             current_latents=values["current"],
             current_ids=current_ids,
-            noisy_future_latents=noisy_future,
+            noisy_future_latents=noisy_future.to(dtype=self.dtype),
             future_ids=future_ids,
             state=values["state"],
-            noisy_pred_action=noisy_action,
-            gt_action_cond=values["action"],
+            noisy_pred_action=noisy_action.to(dtype=self.dtype),
+            gt_action_cond=values["action"].to(dtype=self.dtype),
             chunk_horizon=values["horizon"],
-            noisy_future_state=noisy_state,
+            noisy_future_state=noisy_state.to(dtype=self.dtype),
             noisy_reward=empty,
             noisy_q=empty,
             action_timestep=action_timestep,
@@ -721,8 +731,8 @@ class RoboNanaTrainer(Trainer):
                     device=self.device,
                     dtype=self.dtype,
                 ),
-                future_noise=torch.randn_like(values["future"]),
-                future_state_noise=torch.randn_like(values["future_state"]),
+                future_noise=torch.randn_like(values["future"], dtype=self.dtype),
+                future_state_noise=torch.randn_like(values["future_state"], dtype=self.dtype),
                 schedule=schedule,
                 discount=float(self.posttrain_config["discount"]),
                 reward_non_goal=float(self.posttrain_config["reward_non_goal"]),
