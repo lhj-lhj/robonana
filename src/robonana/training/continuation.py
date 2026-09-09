@@ -26,11 +26,17 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
     critic continuation's schedule extension or two-GPU defaults here.
     """
     config = restore_config_tuples(copy.deepcopy(source))
-    if config["models"]["train_mode"] != "world_policy" or config["train"]["posttrain"]["phase"] != "world_policy":
+    if (
+        config["models"]["train_mode"] != "world_policy"
+        or config["train"]["posttrain"]["phase"] != "world_policy"
+    ):
         raise ValueError("resume requires a world_policy checkpoint")
     if config["train"]["mixed_precision"] != "no":
         raise ValueError("resume requires FP32 execution")
-    if project_dir.resolve() == source_config.parent.resolve() or checkpoint.resolve().is_relative_to(project_dir.resolve()):
+    if (
+        project_dir.resolve() == source_config.parent.resolve()
+        or checkpoint.resolve().is_relative_to(project_dir.resolve())
+    ):
         raise ValueError("use a separate project directory; preserve the source experiment")
     config["project_dir"] = str(project_dir)
     config["models"].update(

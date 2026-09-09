@@ -287,3 +287,77 @@ max_steps=20000、resume=false。模型源码commit为`4db0a12`。
 有效训练日志：`outputs/hanging_mug_fixed100_20260909/stage1_train_retry2.launch.log`。
 启动主管PID3778762；首轮/重试1仅初始化失败、无optimizer更新，日志独立保留。
 本次不更新系统驱动/Fabric服务，不关闭NVLink P2P，不自动启动Stage2。
+
+### 9.1 关闭梯度检查点试跑：OOM，当前暂停（2026-09-09）
+
+用户要求关闭梯度检查点，保持每卡32、八卡、累积1、FP32不变。
+原训练在step558中断，最后完整checkpoint仍为step100；没有即时保存接口，
+101–558步未保存，不能声称从558续训。原目录、日志及step100的模型/Adam/
+scheduler/RNG文件均保留，不覆盖。总目标仍20,000步，不另加20k。
+
+复用FACT恢复、现有模型`disable_gradient_checkpointing()`及配置复制工具，
+增加`world_policy_resume.config`配置适配器；未修改forward、mask、loss、
+模型结构或Stage2算法。与critic延长训练不同，此入口不改变卡数、batch、
+数据、精度、学习率曲线或预算，也不重置expert。只对新配置设置
+`gradient_checkpointing=False`，指定恢复路径及新的W&B运行。
+
+实际入口（以下是已执行记录，**不要自动重复启动**）：
+
+```bash
+export ROBONANA_PROJECT_DIR=/data3/hongjia/robonana/experiments/hanging_mug_fixed100_round0_stage1_20k_bs32x8_nogc_20260909
+export ROBONANA_RESUME_CONFIG=/data3/hongjia/robonana/experiments/hanging_mug_fixed100_round0_stage1_20k_bs32x8_20260909/config.json
+export ROBONANA_RESUME_CHECKPOINT=/data3/hongjia/robonana/experiments/hanging_mug_fixed100_round0_stage1_20k_bs32x8_20260909/models/checkpoint_epoch_1_step_100
+export ROBONANA_PYTHON=/data3/hongjia/conda/envs/robonana/bin/python
+export NCCL_NVLS_ENABLE=0 NCCL_IB_DISABLE=1 NCCL_DEBUG=INFO
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+bash scripts/run_robotwin_train.sh --config robonana.configs.world_policy_resume.config
+```
+
+W&B继续使用服务器已有netrc凭据注入环境，不写入Git；新run为
+[a924f45f](https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/a924f45f)。
+完整日志：`outputs/hanging_mug_fixed100_20260909/stage1_nogc.launch.log`。
+运行代码commit：`85adbe3`。Windows配置测试3项通过，190配置/恢复测试6项通过。
+
+实测结果：八卡NCCL初始化通过，模型日志确认`gradient_checkpointing=False`，
+DeepSpeed模型与优化器恢复成功；首个训练batch尚在前向single block/RoPE处即OOM，
+未完成新的optimizer step。报错显示每卡进程占用约178.17GiB，PyTorch实际分配
+173.95GiB、空闲仅157.56MiB，新增446MiB分配失败。不能把这次失败归为NVLS，
+也不能仅用关闭前64–67GiB的快照判断关闭后的峰值足够。未降低batch/精度，
+未自动重启或恢复梯度检查点；当前训练暂停，等待选择部分block重计算等方案。
+
+### 9.2 NVLS进一步定位：Fabric Manager组播状态错误
+
+在原训练已停止、新训练未启动的间隙，用同一Python/PyTorch/NCCL环境做有界
+最小复现，只初始化进程组并AllReduce一个FP32张量，不加载RoboNana。
+每组最多45秒，超时只终止该组诊断子进程，不重置GPU、不改系统服务。
+
+| 测试 | 结果 | 实际NVLS路径 |
+|---|---|---|
+| GPU6/7，两卡，NVLS_ENABLE=1 | 通过，AllReduce=2 | **0 nvls channels**，实际跳过NVLS |
+| GPU0–7，八卡，NVLS_ENABLE=1 | 45秒内未完成初始化，终止 | 创建组播组后停留在共享句柄导入附近 |
+| GPU0–7，八卡，NVLS_ENABLE=0 | 通过，AllReduce=8 | P2P/CUMEM，NVLink P2P保留 |
+
+两卡通过不能称为“NVLS通过”：匹配版本NCCL 2.27.3的
+[`src/transport/nvls.cc::ncclNvlsInit`](https://github.com/NVIDIA/nccl/blob/v2.27.3-1/src/transport/nvls.cc)
+明确在`gpuCount <= 2`时返回，不创建NVLS通道。因此此前两卡训练正常并不矛盾。
+旧120k八卡训练日志缺少对应NCCL初始化证据，不能推定它实际启用了NVLS。
+
+服务器`/var/log/fabricmanager.log`在2026-09-09 05:10:02 UTC（本次最小复现）
+以及04:11:49、04:21:38（两次正式启动失败）均有同类错误：
+
+```text
+requesting GPU handle 0x0 is different from exporter GPU handle ...
+cannot find exporter GPU in partition Id 57082 gpuHandle 0x0 ...
+All GPUs in the partition need to be reset to recover
+failed to add multicast team ...
+```
+
+同类错误至少在本次开机后的9月1日、4日、6日已出现；不是本次改batch或模型后
+才产生。Fabric服务显示active，nvidia-smi Fabric显示Completed/Success/Healthy，
+但这些摘要不足以证明NVLS组播分配正常。已定位到Fabric组播请求的GPU句柄/
+分区状态错误；尚未证明最初由哪次驱动/服务事件造成，不等于确定某个NCCL补丁可修复。
+系统日志建议分区GPU reset；这属于影响整机GPU作业的维护操作，本次没有执行。
+
+诊断原始日志：`outputs/hanging_mug_fixed100_20260909/nvls_probe_20260909/`。
+后续恢复NVLS需先协调停掉整个分区GPU任务，再由管理员按平台维护流程处理，
+随后重跑最小通信测试与性能对照；不要在正式训练中直接开启或重启Fabric服务。
