@@ -23,7 +23,7 @@
 
 `round r` 表示采集轮次。Round 0 没有新 RL 训练，由原始 120k actor 初始化。
 消费 round 0 数据的两阶段更新产生下一次采集策略。20k/10k 是每个新阶段的
-新增 optimizer steps，不是终身 checkpoint 步数。Round 0已完成；Stage1已提交启动验证，Stage2未启动。
+新增 optimizer steps，不是终身 checkpoint 步数。Round0已完成；Stage1八卡训练已正常更新并上传W&B，Stage2未启动。
 
 `SR_r = 本轮成功 episode 数 / 100`。这是固定**训练场景**上的成功率，不是独立
 未见场景泛化指标。每个 seed 每轮恰好执行一次，失败也保存；不重试到成功。
@@ -69,7 +69,7 @@ GPU batching浮点误差可能影响闭环，固定seed不等于bitwise复现。
 actor使用的segment 0/1/2/3；丢弃旧horizon/value/DINO分支，不恢复legacy运行时。
 153个同名张量复制，segment另行映射。新reward/success/Q/V头没有训练，契约
 只允许action_only（每次采样1个action chunk），禁止Q排序；保存的Q候选预算32在此模式不执行。当前执行契约**不认证旧120k的历史训练输入**。
-未来Stage 1需显式适配未认证预训练权重，不能绕过Stage 2/恢复的契约检查。
+本次Stage1显式适配未认证预训练权重（见第9节），不绕过Stage2/恢复的契约检查。
 
 采样参考配置来自`experiments/hanging_mug_critic_7k_to_17k_bs16_20260908/config.json`；
 只读取采样参数，没有加载该实验的FLUX或Q/V权重。旧配置的20步/shift1与参考值一致。
@@ -96,10 +96,10 @@ Round 0必须传`--inference-mode action_only`，不是把Q候选数设为1。
 
 **现有`run_hanging_mug_mac_round.sh`尚不是本固定100场景协议的一键入口。**
 它有额外action-only eval，并默认随round改变seed_group，尚未接入锁定的seed/
-instruction清单。不得直接用默认调用冒充本协议。启动后续训练前需接入清单，并
-验证首次Stage-1的显式未认证actor适配路径；本次没有自动启动这些阶段。
+instruction清单。不得直接用默认调用冒充本协议。当前Stage1由独立训练入口显式
+启动（见第9节）；整轮自动化仍需接入固定清单，本次不自动启动Stage2或下一轮采集。
 
-## 5. 后续训练参数（计划，未运行）
+## 5. 两阶段训练参数（Stage1已运行，Stage2为计划）
 
 | 参数 | Stage 1 | Stage 2 |
 |---|---|---|
@@ -112,8 +112,8 @@ instruction清单。不得直接用默认调用冒充本协议。启动后续训
 | imagination | 不做critic bootstrap | 每batch一次48步on-policy imaginary transition |
 | 候选数 | — | imagination=8；环境Q选择=32 |
 | gamma / reward | 0.999；非目标-1、目标0 | 相同，按逐步折扣计算chunk return |
-| 执行默认值 | 每卡batch8、累积1 | 每卡batch8、累积1 |
-| GPU/global batch/LR | 启动前确认并保存实际config | 启动前确认；critic默认LR=1e-4 |
+| 本实验执行配置 | 每卡batch32、累积1 | 默认每卡batch8、累积1；尚未启动 |
+| GPU/global batch/LR | GPU0–7；global256；LR=2e-5 | 启动前确认；critic默认LR=1e-4 |
 
 池权重默认：原始成功、采集成功、历史失败、当轮失败各0.25；空池按配置重分配。
 Round 0没有历史失败，不能误读成四个非空池各25%。成功尾段吸收态padding，失败
@@ -134,7 +134,7 @@ Value复制；同一阶段断点恢复才恢复原EMA/optimizer。
 | seed-preflight-6 | GPU6；200000起，接受50个seed | `outputs/hanging_mug_fixed100_20260909/seed_preflight_gpu6`；已完成，最后接受seed200062 |
 | seed-preflight-7 | GPU7；210000起，接受50个seed | `outputs/hanging_mug_fixed100_20260909/seed_preflight_gpu7`；已完成，最后接受seed210063 |
 | round-0 | 固定100训练seed；120k actor；无Q；GPU4/5/6/7各一个环境，GPU4服务batch2/wait10ms | `outputs/hanging_mug_fixed100_20260909/round0`；已完成100条，41成功/59失败，SR_0=41%；5309.017秒（1小时28分29秒），67.809条/小时；完整性校验通过 |
-| Stage 1 | 20k；GPU0–7；每卡32、累积1、global256；100回放+50Clean | `experiments/hanging_mug_fixed100_round0_stage1_20k_bs32x8_20260909`；启动验证中，尚未确认首批optimizer更新 |
+| Stage 1 | 20k；GPU0–7；每卡32、累积1、global256；100回放+50Clean | `experiments/hanging_mug_fixed100_round0_stage1_20k_bs32x8_20260909`；已正常运行；W&B确认收到_step33指标，total_loss=1.083（启动快照） |
 | Stage 2 | 10k | 未启动；不自动串联 |
 
 实现提交：`cb62a66`（actor导出/能力保护）、`cac3793`（seed清单/预检）。
@@ -248,7 +248,7 @@ batch256、20,000步。复用`run_robotwin_train.sh`及`robotwin_flux2_4b_mac.co
 | 数据worker | 每进程4；OMP/MKL线程各1 |
 | loss权重 | action10，image1，future_state0.4，reward0.1，success0.1 |
 | checkpoint | 第100步早期保存，之后每1000步；保留数量1，保存optimizer |
-| W&B | online；name=`hanging_mug_fixed100_round0_stage1_20k_bs32x8_20260909`；URL待成功初始化后补充 |
+| W&B | online；name=`hanging_mug_fixed100_round0_stage1_20k_bs32x8_20260909`；[run pkkg5pyx](https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/pkkg5pyx) |
 
 输入检查已完成：四池轨迹数`[50,41,0,59]`，统一A统计。回放65,931帧的当前VAE/
 语言缓存校验通过，原始50条Clean也已生成当前缓存；旧`latents`未删除、不重标。
@@ -271,5 +271,19 @@ batch256、20,000步。复用`run_robotwin_train.sh`及`robotwin_flux2_4b_mac.co
 重试1设置`NCCL_IB_DISABLE=1`并开启INFO日志，仍未完成初始化；重试2额外关闭
 可选NVLS聚合（`NCCL_NVLS_ENABLE=0`），保留NVLink P2P。未改batch、精度或数据。
 各次日志为`outputs/hanging_mug_fixed100_20260909/stage1_train*.launch.log`，全部保留。
-W&B现有凭据通过官方HTTP API验证；SDK public API仍报告relogin required，正在确认
-训练侧是否同样受影响；尚不声称已有在线run。只读临时诊断工具未安装进训练环境。
+W&B现有凭据通过官方HTTP API验证；SDK public API曾报告relogin required。
+训练重试显式从服务器已有netrc读取密钥到进程环境，不输出密钥、不写入配置或Git。
+训练run已创建；官方API返回state=running并收到_step33、total_loss=1.083，确认在线
+上传成功，不是仅打印了本地run地址。只读临时诊断工具未安装进训练环境。
+
+### 启动验证结果
+
+重试2关闭NVLS后NCCL完成初始化，进入实际forward/backward/optimizer更新。
+前10步loss均有限，无OOM；稳定单步约4.3–4.4秒、吞吐约59个窗口/秒。
+八卡显存快照76,081–78,755MiB（约74.3–76.9GiB/卡）；20k预计约24小时，另加
+checkpoint保存与后续运行波动，不是完工保证。未通过降低batch或精度实现启动。
+实际配置JSON已核对：gpu_ids=0–7、batch_size_per_gpu=32、accumulation=1、
+max_steps=20000、resume=false。模型源码commit为`4db0a12`。
+有效训练日志：`outputs/hanging_mug_fixed100_20260909/stage1_train_retry2.launch.log`。
+启动主管PID3778762；首轮/重试1仅初始化失败、无optimizer更新，日志独立保留。
+本次不更新系统驱动/Fabric服务，不关闭NVLink P2P，不自动启动Stage2。
