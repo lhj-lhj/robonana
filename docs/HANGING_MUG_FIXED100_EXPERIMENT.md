@@ -459,3 +459,72 @@ W&B服务端确认running，已收到step3032、total_loss=0.335209、samples_pe
 W&B：[ob7ztgvt](https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/ob7ztgvt)。
 日志：`outputs/hanging_mug_fixed100_20260909/stage1_bf16_partialgc.launch.log`。
 启动主管PID232441；训练保持运行。
+
+### 9.5 从 step3000 权重新开 Stage 1 10k → Stage 2 10k（2026-09-09）
+
+本节是用户最新实验指令，替代9.4的续训：step3000作为预训练模型初始化，
+不恢复原Adam、scheduler、RNG、sampler或训练步数。每阶段均从step0开始。
+English: Weight initialization from step3000, followed by two fresh 10k phases.
+This is not optimizer-state continuation or a lifetime step13000 endpoint.
+
+9.4旧任务正常完成step4000后在保存时遇到`/data3`空间耗尽而退出。
+按用户要求，旧experiments已清理，完整step3000、step100及120k导出权重保留；
+不完整step4000已删除。本次启动前`/data3`可用约3.1TiB。
+
+| 参数 | Stage 1 | Stage 2 |
+|---|---|---|
+| 初始化 | 完整step3000的transformer权重 | 本次Stage 1最终step10000的transformer权重 |
+| 更新参数 | world-policy FLUX | 冻结FLUX，仅online Q/V |
+| optimizer / scheduler / step | 全新，step0 | 全新，step0 |
+| 预算 / cosine终点 | 10000 / 10000 | 10000 / 10000 |
+| warmup / 峰值LR | 500步 / 2e-5 | 500步 / 1e-4 |
+| batch | 每卡32 × 8卡 × 累积1 = 256 | 每卡32 × 8卡 × 累积1 = 256 |
+| 精度 | FACT BF16，loss/加噪FP32 | online Q/V BF16，Value EMA FP32存储/更新、BF16 autocast前向 |
+| 数据 | 固定100条round0回放 + 原始50条Clean | 同左 |
+| 采样 | 原有成功/失败池加权采样，A统计 | 同左；H=1，8个候选，20步去噪，argmax Q |
+
+Stage 1保留全部5个double和偶数single block的梯度checkpoint（stride2）。
+Stage 2使用现有冻结FLUX路径；新Value EMA从该阶段online Value初始化，不加载旧target。
+两阶段各在step100早期保存，此后每1000步保存，保留最近两份完整checkpoint。
+NCCL_NVLS_ENABLE=0、NCCL_IB_DISABLE=1，NVLink P2P保留。两阶段均上传W&B。
+
+正式入口仍为`scripts/run_hanging_mug_mac_round.sh`，新增`ROBONANA_MAC_TRAIN_ONLY=1`
+后只串联训练，不启动评测/采集，也不依赖仿真解释器。前一阶段成功退出并有完整最终
+checkpoint后才触发下一阶段；检查模型容器、Adam分片、scheduler、RNG、契约等，
+避免把磁盘写坏的最终.bin当成完成。每阶段启动前检查输出盘至少150GiB可用空间。
+这不是持续磁盘预留，也不能保证其他进程不会在训练期间消耗空间。
+
+```bash
+export ROBONANA_PROJECT_DIR=/data3/hongjia/robonana/experiments/hanging_mug_fixed100_round0_fresh3000_s1_10k_s2_10k_20260909
+export ROBONANA_MAC_RUN_ROOT=/data3/hongjia/robonana/outputs/hanging_mug_fixed100_20260909/fresh3000_s1_10k_s2_10k
+export ROBONANA_MAC_SOURCE_RUN=/data3/hongjia/robonana/experiments/hanging_mug_fixed100_round0_stage1_20k_bs32x8_partialgc_20260909
+export ROBONANA_MAC_SOURCE_CHECKPOINT=${ROBONANA_MAC_SOURCE_RUN}/models/checkpoint_epoch_10_step_3000/transformer/diffusion_pytorch_model.bin
+export ROBONANA_MAC_SOURCE_CONFIG=${ROBONANA_MAC_SOURCE_RUN}/config.json
+export ROBONANA_INITIAL_DATASET_ROOT=/workspace/datasets/fact-robotwin-v2/RoboTwin
+export ROBONANA_REPLAY_ROOT=/data3/hongjia/robonana/outputs/hanging_mug_fixed100_20260909/round0/dataset
+export ROBONANA_POSTTRAIN_ORIGINAL_TASK_GLOBS=Clean/hanging_mug
+export ROBONANA_MODEL_PYTHON=/data3/hongjia/conda/envs/robonana/bin/python
+export ROBONANA_COLLECTION_ROUND=0 ROBONANA_RESUME=0 ROBONANA_MAC_TRAIN_ONLY=1
+export ROBONANA_MAC_WORLD_POLICY_STEPS=10000 ROBONANA_MAC_CRITIC_STEPS=10000
+export ROBONANA_GPU_IDS=0,1,2,3,4,5,6,7 ROBONANA_MAC_BATCH_SIZE=32 ROBONANA_GRADIENT_ACCUMULATION_STEPS=1
+export ROBONANA_GRADIENT_CHECKPOINTING=1 ROBONANA_GRADIENT_CHECKPOINTING_SINGLE_STRIDE=2
+export ROBONANA_MAC_TRAIN_CANDIDATES=8 ROBONANA_MAC_EVAL_CANDIDATES=32
+export ROBONANA_CHECKPOINT_INTERVAL=1000 ROBONANA_EARLY_CHECKPOINT_STEPS=100 ROBONANA_CHECKPOINT_TOTAL_LIMIT=2
+export ROBONANA_LOG_INTERVAL=10 ROBONANA_NUM_WORKERS=4
+export NCCL_NVLS_ENABLE=0 NCCL_IB_DISABLE=1 WANDB_MODE=online
+bash scripts/run_hanging_mug_mac_round.sh
+```
+
+启动源码commit `260f886`，持久化串联主管PID559169；阶段标记在
+`outputs/hanging_mug_fixed100_20260909/fresh3000_s1_10k_s2_10k/state`。
+总日志：`outputs/hanging_mug_fixed100_20260909/fresh3000_s1_10k_s2_10k.launch.log`。
+Stage 1 W&B：[3amz56sn](https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/3amz56sn)。
+Stage 2届时由同一脚本创建独立W&B run，其链接写入总日志。
+
+验证：190针对性37项通过（49.25秒），覆盖真实配置新阶段预算、初始化和batch，
+以及执行真实round shell的串联测试：正常两阶段、Stage 1非零退出、Stage 1/2最终文件截断。
+Windows无PyTorch，依赖该库的配置测试仅在190运行通过。正式启动前另做真实八卡
+Stage 2每卡32的两步预检：退出0，V/Q loss有限，EMA update_count从1到2；
+首步17.17秒、第二步11.47秒，allocated峰值77.506GiB、reserved峰值110.814GiB。
+预检使用step3000模型，仅证明执行/显存可行，不评价RL效果；未保存checkpoint。
+预检日志：`outputs/hanging_mug_fixed100_20260909/fresh10k_stage2_bs32_smoke.log`。
