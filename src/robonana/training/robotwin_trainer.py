@@ -269,18 +269,18 @@ class RoboNanaTrainer(Trainer):
         checkpoint = _config_value(model_config, "checkpoint", None)
         if checkpoint is None:
             raise ValueError("trained MAC initialization requires models.checkpoint")
-        from robonana.inference_contract import build_contract, read_contract, check_contract, CONTRACT_FILE
+        from robonana.inference_contract import build_contract, validate_training_initialization
         self.inference_contract = build_contract(
             self.posttrain_config, str(_config_value(model_config, "checkpoint_dir"))
         )
         # Missing metadata is never silently promoted to a certified checkpoint.
         # Only a deliberate new Stage-1 adaptation may start from old weights;
         # Stage 2 freezes FLUX and cannot certify a changed input representation.
-        contract_path = Path(checkpoint).parent / CONTRACT_FILE
-        if not contract_path.is_file() and self.mac_phase == "world_policy" and self.kwargs.get("allow_uncertified_pretrain", False):
-            self.logger.warning("Explicit uncertified Stage-1 initialization: %s; old weights remain uncertified", checkpoint)
-        else:
-            check_contract(read_contract(checkpoint), self.inference_contract)
+        converted_actor = validate_training_initialization(
+            checkpoint, self.inference_contract, phase=self.mac_phase,
+            allow_uncertified=self.kwargs.get('allow_uncertified_pretrain', False),
+            resume=self.kwargs.get('resume', False),
+        )
         model, report = load_flux2_fact_trained_checkpoint(
             str(checkpoint), action_dim=action_dim, state_dim=state_dim,
             reward_dim=reward_dim, success_dim=success_dim, q_dim=q_dim,
@@ -291,6 +291,13 @@ class RoboNanaTrainer(Trainer):
             device=self.device, dtype=self.dtype, params=params,
             config_path=_config_value(model_config, "checkpoint_config", None),
         )
+        if converted_actor:
+            # One-time Stage-1 warm start: reuse the ImageWAM transfer helper.
+            # Preserve actor weights and freshly initialized scalar queries/heads.
+            from robonana.models.flux2_scalar_expert import initialize_scalar_expert_from_flux
+            for name in ('value_expert', 'q_expert'):
+                copied, resized = initialize_scalar_expert_from_flux(getattr(model, name), model)
+                self.logger.info('Converted actor %s initialization: copied=%s resized=%s', name, copied, resized)
         initialization_label = f"trained MAC checkpoint parameters={report.checkpoint_parameters}"
         train_mode = str(_config_value(model_config, "train_mode", "full"))
         trainable_names = configure_trainable_parameters(model, train_mode)

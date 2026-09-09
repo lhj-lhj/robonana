@@ -92,6 +92,25 @@ def check_contract(actual, expected):
             raise ValueError(f"Checkpoint inference contract mismatch: {key}")
 
 
+def validate_training_initialization(weights, expected, *, phase, allow_uncertified=False, resume=False):
+    """Explicit new Stage-1 adaptation only; never a resume/critic bypass.
+
+    中文：复用已有指纹校验；返回True仅表示需初始化转换actor的expert主体。
+    English: reuse fingerprint validation; True requests converted-actor expert initialization.
+    """
+    adapting = phase == 'world_policy' and allow_uncertified and not resume
+    if not (Path(weights).parent / CONTRACT_FILE).is_file() and adapting:
+        return False  # Existing opt-in missing-metadata pretraining path.
+    actual = read_contract(weights)  # Always check an existing weight fingerprint.
+    if actual.get('phase') == 'converted_action_only' and adapting:
+        if actual.get('capabilities') != ['action_only'] or actual.get('historical_training_inputs_certified') is not False:
+            raise ValueError('Invalid converted actor adaptation metadata')
+        check_contract(dict(actual, phase='explicit_stage1_initialization'), expected)
+        return True
+    check_contract(actual, expected)
+    return False
+
+
 def resolve_online_contract(weights, vae_checkpoint, overrides, *, inference_mode=None):
     from robonana.image_pipeline import image_contract
     from robonana.normalization import require_a_stats_path

@@ -65,6 +65,25 @@ def test_converted_actor_is_not_a_certified_training_checkpoint(tmp_path):
         contracts.resolve_online_contract(weights, tmp_path, {}, inference_mode='action_q_rejection')
 
 
+def test_explicit_converted_actor_stage1_adaptation_keeps_all_guards(tmp_path):
+    weights, expected = _saved(tmp_path)
+    contracts.write_contract(weights, dict(expected, capabilities=['action_only'],
+        historical_training_inputs_certified=False), phase='converted_action_only', step=120000)
+    assert contracts.validate_training_initialization(weights, expected,
+        phase='world_policy', allow_uncertified=True, resume=False)
+    for phase, allow, resume in (('critic', True, False), ('world_policy', False, False),
+                                  ('world_policy', True, True)):
+        with pytest.raises(ValueError):
+            contracts.validate_training_initialization(weights, expected,
+                phase=phase, allow_uncertified=allow, resume=resume)
+    with pytest.raises(ValueError, match='normalization_sha256'):
+        contracts.validate_training_initialization(weights, dict(expected, normalization_sha256='B'),
+            phase='world_policy', allow_uncertified=True)
+    weights.write_bytes(b'changed weights')
+    with pytest.raises(ValueError, match='fingerprint'):
+        contracts.validate_training_initialization(weights, expected, phase='world_policy', allow_uncertified=True)
+
+
 def test_old_checkpoint_never_infers_certificate_from_run_config(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"train": {"num_inference_steps": 20}}))
     with pytest.raises(FileNotFoundError, match="Uncertified checkpoint"):
