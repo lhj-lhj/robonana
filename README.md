@@ -171,19 +171,17 @@ It imports the common FACT/FLUX dimensions and applies the MAC overlay:
 | imagined chunks per critic batch | 1 |
 | Value EMA decay | 0.995 |
 | flow sampling steps | 20 |
-| default training dtype | FP32 FLUX/Q/V; FP32 Value EMA storage/update |
+| default training dtype | FACT BF16 FLUX/Q/V and Value EMA; FP32 loss/return arithmetic |
 | new trajectories per collection round | 100 total, successes and failures |
 | stage 1 world/policy budget per round | 20,000 optimizer steps |
 | stage 2 Value/Q budget per round | 10,000 optimizer steps |
 | training GPUs / batch per GPU / accumulation | 6,7 / 8 / 1 (effective batch 16) |
 
 These are defaults for new runs, not overrides of saved continuation configs.
-RoboNana FLUX, imagination, Q/V and environment policy inference are FP32-only.
-There is no alternate precision switch; stale mixed-precision overrides fail
-early. Frozen Qwen is unchanged; image preprocessing follows the unified
-contract documented below.
-The already-running critic-only continuation retains its old mixed-precision
-behavior until explicitly restarted; see [the precision boundary](docs/WORLD_PREFIX_CACHE.md#sharing-with-critics-and-precision).
+RoboNana uses FACT's `mixed_precision="bf16"`: FLUX, online Q/V and Value EMA
+use BF16 parameters in training and evaluation. Saved runs/processes retain
+their original execution until explicitly resumed/restarted. Frozen Qwen and
+the unified VAE/cache preprocessing contract below are unchanged.
 
 The standard round is: collect 100 new trajectories with the current Q-selected
 policy, prepare/cache them and mix with existing replay, train stage 1 for 20k
@@ -245,7 +243,7 @@ At the beginning of a new critic phase:
 ```text
 online Value  <- exact Value expert from loaded checkpoint
 online Q      <- exact Q expert from loaded checkpoint
-target Value  <- deepcopy(online Value), converted to FP32
+target Value  <- deepcopy(online Value), retaining BF16
 ```
 
 When resuming the same critic phase, the saved target Value and EMA metadata
@@ -381,18 +379,38 @@ saved model config agree with `mac_mot_v2`.
 If resume reports missing frozen FLUX keys, it is an incomplete pre-fix
 checkpoint and must not be force-loaded. Start from the nearest complete MAC
 checkpoint. If only target Value is missing at a new critic phase, copy the
-loaded online Value expert into a fresh FP32 target; do not copy an unrelated
+loaded online Value expert into a fresh BF16 target; do not copy an unrelated
 target from another run.
 
 ## Numerical policy
 
-FP32 is the only supported precision for RoboNana FLUX, imagination, online/
-target critics and policy inference. Value EMA storage/updates and return/loss
-reductions remain FP32. Inference entrypoints have no dtype selector.
+中文：训练和推理统一使用 FACT 官方默认的 BF16；删去 FP32-only 限制及
+手工禁用 autocast 的包装。loss、折扣回报、归一化的 FP32 运算仍保留。
+
+Training reuses [FACT's BF16 configuration](https://github.com/Bariona/FACT/blob/9427ea451e806220742148049ef0576e43ef7382/world_action_model/configs/robotwin.py)
+and Trainer/Accelerate lifecycle. The loader receives `self.dtype`, and the
+three inference services use BF16, matching [FACT's default server](https://github.com/Bariona/FACT/blob/9427ea451e806220742148049ef0576e43ef7382/scripts/inference_server.py).
+FACT has no MAC Q/V implementation; our existing experts inherit the same dtype.
+
+| Component | Stage 1 | Stage 2 | Environment inference |
+|---|---|---|---|
+| world-policy / FLUX | BF16, trainable | BF16, frozen/eval | BF16, eval |
+| online Q / V | BF16, frozen | BF16, trainable | Q BF16 for argmax; V normally unused |
+| Value EMA | absent | BF16, frozen/eval target | unused; BF16 if explicitly evaluated |
+
+Value EMA inherits online Value's dtype, updates with a single `lerp_`, and
+saves that dtype. Like any BF16-stored EMA, updates below BF16 resolution can
+round away; there is no hidden FP32 master copy. New phases copy online Value;
+same-phase resume restores the saved target. FP32 checkpoint tensors load into
+the current BF16 modules through PyTorch's normal copy/cast behavior.
+Loss/return reductions stay FP32, as do normalization and reporting boundaries.
+FACT/DeepSpeed owns optimizer/master-state precision. FACT's TF32 default is
+retained; model construction no longer changes global BF16 reduction flags.
+Inference entrypoints have no separate precision selector.
 Frozen Qwen and its language cache are unchanged. Image encoding now uses the
 single FACT/FLUX contract below; historical image caches are not silently reused.
-Inference sanitizes decoded actions with a
-finite fallback and clips to normalization bounds. When diagnosing instability,
+Inference sanitizes nonfinite decoded actions with a
+finite fallback; action clipping remains disabled. When diagnosing instability,
 first lower critic learning rate or candidate count; do not silently add a
 second EMA or target Q.
 
@@ -409,8 +427,9 @@ Original LeRobot video, collected HDF5 RGB and live observations all call
 3. Frozen eval FP32 VAE, posterior **mode**, native batch **one image** even
    when cache I/O or environment requests are batched; scoped TF32 off,
    deterministic cuDNN, benchmark off and autocast off.
-4. FLUX packing/BN normalization, BF16 storage rounding, then FP32 model input.
-   Online encoding performs the same BF16 roundtrip; FLUX/Q/V remain FP32.
+4. FLUX packing/BN normalization and BF16 storage rounding. The existing encoder
+   returns the same FP32 representation of these rounded values; the shared
+   training/inference input boundary casts it to BF16 for FLUX/Q/V.
 
 Image caches now live only in `flux_cache/latents_v2`. The task contract records
 VAE weights/config hashes, FACT helper hash and runtime versions; episode

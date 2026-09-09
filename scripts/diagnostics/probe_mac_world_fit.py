@@ -73,7 +73,7 @@ def main():
                       action_dim=config["models"]["action_dim"],
                       state_dim=config["models"]["state_dim"],
                       expert_hidden_dim=config["models"]["expert_hidden_dim"],
-                      device=args.device, dtype=torch.float32)
+                      device=args.device, dtype=torch.bfloat16)
     model.eval().requires_grad_(False)
     rows = []
     for pool in config["dataloaders"]["train"]["data_or_config"]:
@@ -84,7 +84,7 @@ def main():
             # Reset noise by pool/index, independent of checkpoint load RNG use.
             torch.manual_seed(args.seed + int(item["pool_id"]) * 100000 + index)
             def batch(key):
-                return item[key].unsqueeze(0).to(args.device, dtype=torch.float32)
+                return item[key].unsqueeze(0).to(args.device, dtype=torch.bfloat16)
             current, state = batch("current_latents"), batch("state").unsqueeze(1)
             sampled = sample_mac_world(
                 model=model, context=batch("context"), current_latents=current,

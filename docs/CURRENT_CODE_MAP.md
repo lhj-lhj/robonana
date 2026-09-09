@@ -5,6 +5,9 @@ historical behavior; do not reconstruct legacy branches from those reports.
 
 ## Single runtime contract
 
+- Precision (2026-09-09): FACT BF16 for FLUX/Q/V/Value EMA in train and eval.
+  Loss/return math stays FP32; Qwen and the VAE/cache pipeline are unchanged.
+  No FP32-only execution wrapper or global BF16 reduction override remains.
 - Architecture: `models/mac_flux2_fact.py` implements the fixed-48 MAC model; FACT
   and FLUX supply upstream blocks. Keep deterministic MoT Q/V and Value-only
   EMA; no architecture/attention/loss changes were made by this cleanup.

@@ -81,7 +81,7 @@ def main() -> int:
         model_device=args.model_device,
         vae_device=args.vae_device,
         text_encoder_device=args.text_encoder_device,
-        dtype=torch.float32,
+        dtype=torch.bfloat16,
         action_chunk=args.action_chunk,
         horizon=args.horizon,
         num_inference_steps=args.num_inference_steps,

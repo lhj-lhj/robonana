@@ -280,7 +280,7 @@ class DeterministicFlux2ScalarExpert(nn.Module):
         if query_pe.shape[0] != batch or query_pe.shape[2] != 1:
             raise ValueError("expert query_pe must contain exactly one query per batch item")
         dtype = self.query.weight.dtype
-        query = self.query.weight[None].expand(batch, 1, -1).to(dtype=dtype)
+        query = self.query.weight[None].expand(batch, 1, -1)
         zeros = torch.zeros(batch, device=query.device, dtype=torch.float32)
         vec = self.time_in(timestep_embedding(zeros, 256).to(dtype=dtype))
         double_mod = self.double_stream_modulation_img(vec)
@@ -292,8 +292,8 @@ class DeterministicFlux2ScalarExpert(nn.Module):
 
         for block, layer_cache in zip(self.double_blocks, cache.layers("double"), strict=True):
             state = block.prepare_qkv(query, query_pe, double_mod)
-            k = torch.cat([layer_cache["k"].to(dtype=state["k"].dtype), state["k"]], dim=1)
-            v = torch.cat([layer_cache["v"].to(dtype=state["v"].dtype), state["v"]], dim=1)
+            k = torch.cat([layer_cache["k"], state["k"]], dim=1)
+            v = torch.cat([layer_cache["v"], state["v"]], dim=1)
             mixed = _mixed_query_attention(
                 state["q"], k, v,
                 num_heads=self.num_heads,
@@ -304,8 +304,8 @@ class DeterministicFlux2ScalarExpert(nn.Module):
 
         for block, layer_cache in zip(self.single_blocks, cache.layers("single"), strict=True):
             state = block.prepare_qkv(query, query_pe, single_mod)
-            k = torch.cat([layer_cache["k"].to(dtype=state["k"].dtype), state["k"]], dim=1)
-            v = torch.cat([layer_cache["v"].to(dtype=state["v"].dtype), state["v"]], dim=1)
+            k = torch.cat([layer_cache["k"], state["k"]], dim=1)
+            v = torch.cat([layer_cache["v"], state["v"]], dim=1)
             mixed = _mixed_query_attention(
                 state["q"], k, v,
                 num_heads=self.num_heads,

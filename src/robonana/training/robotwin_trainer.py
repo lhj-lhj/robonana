@@ -41,7 +41,6 @@ from robonana.training.optimizer import build_optimizer_param_groups
 from robonana.training.posttraining import (
     ValueExpertEMA,
     evaluating,
-    fp32_compute_context,
 )
 def _expand_timestep(timestep: Tensor, target: Tensor) -> Tensor:
     while timestep.ndim < target.ndim:
@@ -89,8 +88,6 @@ class RoboNanaTrainer(Trainer):
     """Reuse FACT's DataLoader, Accelerate, optimizer, checkpoint, and logging loop."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        if kwargs.get("mixed_precision") not in (None, "no"):
-            raise ValueError("RoboNana training is FP32-only; mixed_precision must be no")
         super().__init__(*args, **kwargs)
         initial_global_step = int(self.kwargs.get("initial_global_step", 0))
         if initial_global_step:
@@ -170,8 +167,6 @@ class RoboNanaTrainer(Trainer):
         if float(self.posttrain_config.get("return_scale", 0.0)) <= 0:
             raise ValueError("mac_mot_v2 return_scale must be positive")
         ema = dict(self.posttrain_config.get("ema", {}))
-        if ema.get("storage_dtype") != "float32":
-            raise ValueError("target Value EMA storage_dtype must be float32")
         if ema.get("target") != "value_expert_only":
             raise ValueError("mac_mot_v2 EMA target must be value_expert_only")
 
@@ -384,7 +379,7 @@ class RoboNanaTrainer(Trainer):
                 "update_every_optimizer_steps": self.target_value_ema.update_every_optimizer_steps,
                 "start_step": self.target_value_ema.start_step,
                 "update_count": self.target_value_ema.update_count,
-                "storage_dtype": "float32",
+                "storage_dtype": str(next(self.target_value_ema.model.parameters()).dtype).removeprefix("torch."),
                 "target": "value_expert_only",
                 "current_collection_round": self.current_collection_round,
             }
@@ -457,7 +452,7 @@ class RoboNanaTrainer(Trainer):
         if self.is_main_process:
             self.logger.info(
                 "CRITIC CONTINUATION VERIFIED: source=%s step=%d max_steps=%d "
-                "Value_EMA_updates=%d LR=%s trainable_tensors=%d precision=FP32",
+                "Value_EMA_updates=%d LR=%s trainable_tensors=%d",
                 checkpoint, self.cur_step, self.max_steps,
                 self.target_value_ema.update_count, rates, len(trainable),
             )
@@ -709,7 +704,7 @@ class RoboNanaTrainer(Trainer):
         rollout_model = self.accelerator.unwrap_model(
             self.model, keep_torch_compile=False
         )
-        with evaluating(rollout_model), fp32_compute_context(rollout_model):
+        with evaluating(rollout_model):
             imaginary = generate_mac_imaginary_rollout_h1(
                 online_model=rollout_model,
                 target_value_expert=self.target_value_ema.model,
@@ -736,20 +731,17 @@ class RoboNanaTrainer(Trainer):
                 grid_height=self.grid_height,
                 grid_width=self.grid_width,
             )
-        with fp32_compute_context(rollout_model):
-            value_prediction, q_prediction = evaluate_mac_critics(
-                model=self.model,
-                context=values["context"],
-                current_latents=values["current"],
-                state=values["state"],
-                context_mask=values["context_mask"],
-                clean_action=imaginary.selected_action,
-                # Both phases of this step now use the same FLUX precision.
-                # Keep the cache guard for callers outside this trainer.
-                condition_cache=imaginary.condition_cache,
-                grid_height=self.grid_height,
-                grid_width=self.grid_width,
-            )
+        value_prediction, q_prediction = evaluate_mac_critics(
+            model=self.model,
+            context=values["context"],
+            current_latents=values["current"],
+            state=values["state"],
+            context_mask=values["context_mask"],
+            clean_action=imaginary.selected_action,
+            condition_cache=imaginary.condition_cache,
+            grid_height=self.grid_height,
+            grid_width=self.grid_width,
+        )
         scale = float(self.posttrain_config["return_scale"])
         losses = {
             "value_loss": deterministic_return_loss(

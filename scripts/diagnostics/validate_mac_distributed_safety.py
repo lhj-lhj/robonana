@@ -66,10 +66,10 @@ def main():
             "train_micro_batch_size_per_gpu": 2, "gradient_accumulation_steps": 2,
         })
     accelerator = Accelerator(cpu=args.backend == "gloo", gradient_accumulation_steps=2,
-                              mixed_precision="no", deepspeed_plugin=plugin)
+                              mixed_precision="bf16", deepspeed_plugin=plugin)
     assert accelerator.num_processes == 2
     torch.manual_seed(42)
-    model = TinyCritics()
+    model = TinyCritics().bfloat16()
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-3)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10)
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)

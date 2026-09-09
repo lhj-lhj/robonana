@@ -80,14 +80,12 @@ def load_flux2_fact_trained_checkpoint(
     value_dim: int | None = None,
     expert_hidden_dim: int | None = None,
     device: str | torch.device = "cuda",
-    dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params | None = None,
     config_path: str | Path | None = None,
 ) -> tuple[MacFlux2FACTModel, PretrainedLoadReport]:
     """Strictly load a complete fixed-48 MAC checkpoint and its recorded schema."""
 
-    if dtype != torch.float32:
-        raise ValueError("RoboNana checkpoint loading supports FP32 execution only")
     path = Path(checkpoint_path).expanduser().resolve()
     state_dict = _load_state(path)
     config = resolve_checkpoint_config(

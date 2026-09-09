@@ -10,14 +10,6 @@ import torch
 from torch import Tensor, nn
 
 
-def fp32_compute_context(model: nn.Module):
-    """Enforce FP32 weights and disable ambient mixed precision for MAC."""
-    weight = model.img_in.weight
-    if weight.dtype != torch.float32:
-        raise ValueError("RoboNana requires FP32 model weights")
-    return torch.autocast(device_type=weight.device.type, enabled=False)
-
-
 @contextmanager
 def evaluating(model: nn.Module) -> Iterator[None]:
     """Temporarily switch a model to eval without changing its gradients."""
@@ -31,7 +23,7 @@ def evaluating(model: nn.Module) -> Iterator[None]:
 
 
 class ValueExpertEMA:
-    """FP32 target copy of Value only; FLUX and Q are never duplicated.
+    """Target copy with the online Value's dtype; FLUX and Q are not duplicated.
 
     This target topology follows MAC: the target/EMA network exists only for
     Value, while Q bootstraps from the online Value and action selection uses
@@ -63,7 +55,7 @@ class ValueExpertEMA:
         self.model = copy.deepcopy(online_expert)
         if device is not None:
             self.model.to(device)
-        self.model.float().eval().requires_grad_(False)
+        self.model.eval().requires_grad_(False)
 
     @torch.no_grad()
     def exact_copy_from(self, online_expert: nn.Module) -> None:
@@ -94,8 +86,11 @@ class ValueExpertEMA:
         squared = torch.zeros((), device=next(self.model.parameters()).device, dtype=torch.float64)
         count = 0
         for name, target in self.model.named_parameters():
-            source = online_parameters[name].detach().to(device=target.device, dtype=torch.float32)
-            target.mul_(self.decay).add_(source, alpha=1.0 - self.decay)
+            source = online_parameters[name].detach().to(device=target.device)
+            # 中文：一次插值，避免 BF16 分别乘/加造成两次中间舍入。
+            # English: Keep target storage BF16; lerp avoids separately rounding
+            # target * decay before the online contribution is added.
+            target.lerp_(source, 1.0 - self.decay)
             squared.add_((target.double() - source.double()).square().sum())
             count += source.numel()
         online_buffers = dict(online_expert.named_buffers())
@@ -108,7 +103,7 @@ class ValueExpertEMA:
 
     def state_dict(self) -> dict[str, Tensor]:
         return {
-            name: value.detach().cpu().float().contiguous()
+            name: value.detach().cpu().contiguous()
             for name, value in self.model.state_dict().items()
             if isinstance(value, Tensor)
         }

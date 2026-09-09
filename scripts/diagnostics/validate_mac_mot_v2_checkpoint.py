@@ -33,7 +33,7 @@ def main() -> None:
         chunk_horizon=48,
         expert_hidden_dim=args.expert_hidden_dim,
         device=args.device,
-        dtype=torch.float32,
+        dtype=torch.bfloat16,
     )
     trainable = configure_trainable_parameters(model, "critic")
     old_modules = [
@@ -73,14 +73,14 @@ def main() -> None:
             2,
             model.txt_in.in_features,
             device=device,
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
         )
         current = torch.randn(
-            batch, 12 * 24, model.in_channels, device=device, dtype=torch.float32
+            batch, 12 * 24, model.in_channels, device=device, dtype=torch.bfloat16
         )
-        state = torch.randn(batch, 1, model.state_dim, device=device, dtype=torch.float32)
+        state = torch.randn(batch, 1, model.state_dim, device=device, dtype=torch.bfloat16)
         action = torch.randn(
-            batch, model.chunk_horizon, model.action_dim, device=device, dtype=torch.float32
+            batch, model.chunk_horizon, model.action_dim, device=device, dtype=torch.bfloat16
         )
         context_ids = text_position_ids(batch, context.shape[1], device)
         current_ids = image_position_ids(
@@ -108,7 +108,7 @@ def main() -> None:
             clean_action=action,
             context_mask=torch.ones(batch, context.shape[1], device=device, dtype=torch.bool),
         )
-        # Target Value uses the same FP32 computation as the online experts.
+        # Target Value inherits the BF16 dtype of the online expert.
         target_value = ValueExpertEMA(
             model.value_expert,
             device=device,

@@ -185,10 +185,9 @@ class MacFlux2FACTModel(Flux2FACTModel):
         critic_kind: str | None = None,
         condition_cache: FrozenFluxKVCache | None = None,
     ) -> Flux2FACTOutput | Tensor:
-        self.cache_compute_dtype()  # Reject unsupported weights/autocast early.
         if critic_kind is not None:
             if critic_kind == "both":
-                # Only request-local FP32 caches may enter critic regression.
+                # Reuse only request-local caches matching the current model.
                 cache = condition_cache if self.condition_cache_compatible(condition_cache) else None
                 cache = cache if cache is not None else self.prefill_condition_cache(
                     context=context, context_ids=context_ids,
@@ -266,13 +265,6 @@ class MacFlux2FACTModel(Flux2FACTModel):
 
         dtype = self.img_in.weight.dtype
         device = context.device
-        context = context.to(dtype=dtype)
-        current_latents = current_latents.to(dtype=dtype)
-        noisy_future_latents = noisy_future_latents.to(dtype=dtype)
-        state = state.to(dtype=dtype)
-        noisy_pred_action = noisy_pred_action.to(dtype=dtype)
-        gt_action_cond = gt_action_cond.to(dtype=dtype)
-        noisy_future_state = noisy_future_state.to(dtype=dtype)
         segments = MacSegmentMap.from_lengths(
             language=context.shape[1],
             state=state.shape[1],
@@ -402,10 +394,12 @@ class MacFlux2FACTModel(Flux2FACTModel):
         return self.prefill_critic_cache(**kwargs, clean_action=None)
 
     def cache_compute_dtype(self):
+        # 中文：记录实际计算精度，不转换已经生成的 K/V。
+        # English: Track the effective dtype under FACT/Accelerate autocast.
         device_type = self.img_in.weight.device.type
-        if self.img_in.weight.dtype != torch.float32 or torch.is_autocast_enabled(device_type):
-            raise ValueError("MAC requires FP32 weights with autocast disabled")
-        return torch.float32
+        if torch.is_autocast_enabled(device_type):
+            return torch.get_autocast_dtype(device_type)
+        return self.img_in.weight.dtype
 
     def condition_cache_compatible(self, cache):
         return (cache is not None and cache.parent is None
@@ -487,7 +481,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
         bias = build_mac_attention_bias(segments, batch_size=batch,
             dtype=self.img_in.weight.dtype, device=device, context_mask=context_mask)
         embed = self.actor_world_segment_embed.weight
-        hidden = torch.cat((self.action_in(clean_action.to(self.img_in.weight.dtype)) + embed[3],
+        hidden = torch.cat((self.action_in(clean_action) + embed[3],
             self.reward_token.weight[None].expand(batch, 1, -1) + embed[4],
             self.success_token.weight[None].expand(batch, 1, -1) + embed[5]), dim=1)
         def robot(length, segment, time_ids=None):
@@ -511,9 +505,8 @@ class MacFlux2FACTModel(Flux2FACTModel):
         if (length != segments.future_state.stop - segments.future_state.start
                 or noisy_future_latents.shape[1] != segments.future_image.stop - segments.future_image.start):
             raise ValueError("world cache future shape mismatch")
-        dtype = self.img_in.weight.dtype
-        hidden = torch.cat((self.state_in(noisy_future_state.to(dtype)) + self.actor_world_segment_embed.weight[6],
-                            self.img_in(noisy_future_latents.to(dtype)) + self.actor_world_segment_embed.weight[7]), dim=1)
+        hidden = torch.cat((self.state_in(noisy_future_state) + self.actor_world_segment_embed.weight[6],
+                            self.img_in(noisy_future_latents) + self.actor_world_segment_embed.weight[7]), dim=1)
         ids = torch.cat((self._robot_ids(batch_size=batch, length=length, segment_id=7,
             device=hidden.device, dtype=future_ids.dtype), future_ids), dim=1)
         hidden, _ = self._world_suffix(cache.kv, hidden, ids, wm_timestep, cache.future_bias, capture=False)
@@ -538,14 +531,12 @@ class MacFlux2FACTModel(Flux2FACTModel):
         V before residual update, matching both the full pass and Q expert.
         Predicted A and clean G have different segment IDs; Q must re-encode G.
         """
-        self.cache_compute_dtype()
         batch = action.shape[0]
         if action.shape != (batch, self.chunk_horizon, self.action_dim):
             raise ValueError("cached action must have shape [batch,48,action_dim]")
         if cache.parent is not None or batch_indices.shape != (batch,):
             raise ValueError("action branch requires a condition-only cache and batch mapping")
         device = action.device
-        action = action.to(dtype=self.img_in.weight.dtype)
         hidden = self.action_in(action) + self.actor_world_segment_embed.weight[3 if clean else 2]
         time_ids = torch.arange(1, self.chunk_horizon + 1, device=device)[None].expand(batch, -1)
         ids = self._robot_ids(
@@ -652,20 +643,15 @@ class MacFlux2FACTModel(Flux2FACTModel):
     ) -> FrozenFluxKVCache:
         """Cache ``C`` for Value or ``[C,G]`` for Q from frozen FLUX."""
 
-        self.cache_compute_dtype()
         batch = context.shape[0]
         dtype = self.img_in.weight.dtype
         device = context.device
-        context = context.to(dtype=dtype)
-        current_latents = current_latents.to(dtype=dtype)
-        state = state.to(dtype=dtype)
         action_length = 0 if clean_action is None else clean_action.shape[1]
         if clean_action is not None:
             if clean_action.shape != (batch, self.chunk_horizon, self.action_dim):
                 raise ValueError(
                     f"Q clean_action must have shape {(batch, self.chunk_horizon, self.action_dim)}"
                 )
-            clean_action = clean_action.to(dtype=dtype)
         parts = [
             self.state_in(state) + self.actor_world_segment_embed.weight[0],
             self.img_in(current_latents) + self.actor_world_segment_embed.weight[1],

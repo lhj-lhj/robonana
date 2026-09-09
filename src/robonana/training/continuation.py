@@ -18,11 +18,11 @@ def restore_config_tuples(value):
 
 def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
                              gradient_checkpointing=False, single_checkpoint_stride=1):
-    """中文：原样续训 Stage 1，仅切换激活重计算；不重置优化器或学习率。
+    """中文：用当前 BF16 精度续训 Stage 1；不重置优化器或学习率。
 
-    English: Resume Stage 1 with an activation-recomputation override only.
+    English: Resume Stage 1 using the maintained FACT BF16 precision.
     Reuse FACT restore and the existing model toggle. Preserve data, batch,
-    precision, GPU topology and the original schedule/budget; never use the
+    GPU topology and the original schedule/budget; never use the
     critic continuation's schedule extension or two-GPU defaults here.
     """
     config = restore_config_tuples(copy.deepcopy(source))
@@ -33,8 +33,6 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
         or config["train"]["posttrain"]["phase"] != "world_policy"
     ):
         raise ValueError("resume requires a world_policy checkpoint")
-    if config["train"]["mixed_precision"] != "no":
-        raise ValueError("resume requires FP32 execution")
     if (
         project_dir.resolve() == source_config.parent.resolve()
         or checkpoint.resolve().is_relative_to(project_dir.resolve())
@@ -50,7 +48,7 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
     config["train"].update(
         resume=True, resume_from=str(checkpoint), rebase_scheduler_on_resume=False,
         allow_uncertified_pretrain=False, activation_checkpointing=False,
-        checkpoint_save_optimizer=True,
+        checkpoint_save_optimizer=True, mixed_precision="bf16",
     )
     tracker = config["train"]["tracker_init_kwargs"]["wandb"]
     tracker.pop("id", None)
@@ -61,12 +59,10 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
 
 def build_critic_continuation(source, *, checkpoint, source_config, project_dir, max_steps,
                               batch_size_per_gpu=8):
-    """Reuse replay and optimization settings, with current FP32/batch defaults.
+    """Reuse replay and optimization settings, with current FACT BF16 defaults.
 
     This is continuation of the same critic phase, so restore online Q/V,
     Value EMA, Adam moments, RNG and progress. It is NOT a new critic phase.
-    The old metadata-only autocast selector is discarded; no tensor migration
-    or BF16 execution branch is introduced.
     """
     config = restore_config_tuples(copy.deepcopy(source))
     if not isinstance(batch_size_per_gpu, int) or batch_size_per_gpu < 1:
@@ -94,7 +90,7 @@ def build_critic_continuation(source, *, checkpoint, source_config, project_dir,
     config["train"].pop("pixel_eval_interval", None)
     config["train"].get("loss_weights", {}).pop("dino_loss", None)
     config["train"].update(
-        max_steps=max_steps, gradient_accumulation_steps=1, mixed_precision="no",
+        max_steps=max_steps, gradient_accumulation_steps=1, mixed_precision="bf16",
         resume=True, resume_from=str(checkpoint), rebase_scheduler_on_resume=True,
         checkpoint_interval=1000, early_checkpoint_steps=(), checkpoint_total_limit=3,
         checkpoint_save_optimizer=True, log_interval=10, log_with="wandb",

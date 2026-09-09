@@ -35,7 +35,7 @@ def test_world_policy_resume_only_changes_execution_and_restore_paths(tmp_path):
     assert config["optimizers"] == dict(lr=2e-5, betas=(0.9, 0.95))
     assert config["train"]["max_steps"] == 20000
     assert config["train"]["gradient_accumulation_steps"] == 1
-    assert config["train"]["mixed_precision"] == "no"
+    assert config["train"]["mixed_precision"] == "bf16"
     assert config["models"]["gradient_checkpointing"] is False
     assert config["train"]["resume"] is True
     assert config["train"]["resume_from"] == str(kwargs["checkpoint"])
@@ -54,10 +54,6 @@ def test_world_policy_resume_only_changes_execution_and_restore_paths(tmp_path):
         build_world_policy_resume(source, **{**kwargs, "project_dir": tmp_path / "old"})
     source["models"]["train_mode"] = "critic"
     with pytest.raises(ValueError, match="world_policy"):
-        build_world_policy_resume(source, **kwargs)
-    source["models"]["train_mode"] = "world_policy"
-    source["train"]["mixed_precision"] = "bf16"
-    with pytest.raises(ValueError, match="FP32"):
         build_world_policy_resume(source, **kwargs)
 
 
@@ -79,7 +75,7 @@ def test_continuation_preserves_data_and_optimizer_with_current_execution():
     assert source["dataloaders"]["train"]["data_or_config"] == [{"data_path": "unchanged"}]
     assert config["dataloaders"]["train"]["batch_size_per_gpu"] == 8
     assert config["train"]["gradient_accumulation_steps"] == 1
-    assert config["train"]["mixed_precision"] == "no"
+    assert config["train"]["mixed_precision"] == "bf16"
     assert "forward_autocast_dtype" not in config["train"]["posttrain"]["ema"]
     assert "id" not in config["train"]["tracker_init_kwargs"]["wandb"]
     assert config["schedulers"] == dict(warmup_steps=250, decay_steps=10000)

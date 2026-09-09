@@ -88,7 +88,7 @@ def test_mac_batch16_defaults_and_explicit_microbatch_override(monkeypatch, phas
         assert config["launch"]["gpu_ids"] == [6, 7]
         assert (batch, accumulation) == ((4, 2) if override else (8, 1))
         assert batch * len(config["launch"]["gpu_ids"]) * accumulation == 16
-        assert config["train"]["mixed_precision"] == "no"
+        assert config["train"]["mixed_precision"] == "bf16"
     finally:
         sys.modules.pop(module_name, None)
 

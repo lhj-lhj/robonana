@@ -31,12 +31,12 @@ def test_trained_mac_checkpoint_loads_exactly(tmp_path):
         checkpoint, action_dim=6, state_dim=5, reward_dim=48, success_dim=1,
         q_dim=1, reward_head_type="binary_chunk", max_horizon=48,
         chunk_horizon=48, value_dim=1, expert_hidden_dim=32,
-        params=tiny_params(), device="cpu", dtype=torch.float32,
+        params=tiny_params(), device="cpu",
     )
     assert actual.architecture_version == "mac_mot_v2"
     assert report.initialized_robot_parameters == ()
     for name, value in expected.state_dict().items():
-        torch.testing.assert_close(actual.state_dict()[name], value)
+        torch.testing.assert_close(actual.state_dict()[name], value.bfloat16())
 
 
 def test_trainable_surfaces_are_only_world_or_critic():

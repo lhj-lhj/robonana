@@ -47,16 +47,15 @@ The cache records compute dtype. The critic forward reuses it only when
 device and compute dtype match; otherwise it recomputes C. Casting a BF16
 cache to FP32 is not equivalent to computing the prefix in FP32.
 
-The maintained trainer uses `fp32_compute_context(rollout_model)` for both
-imagination and differentiable Q/V regression. Only FP32 is supported for
-FLUX, Q/V and policy inference; alternate dtype selectors were removed and
-stale overrides raise errors. Current C is reusable from selection through
-world generation to Q/V regression. EMA Value storage, forward and updates,
-return arithmetic and loss reductions are FP32 as well.
+The maintained trainer uses FACT BF16 for both imagination and differentiable
+Q/V regression. Current C is reusable from selection through world generation
+to Q/V regression, including FACT/Accelerate autocast forwards. Value EMA keeps
+the online expert's BF16 dtype; return arithmetic and loss reductions stay FP32.
+The former `fp32_compute_context` and FP32-only rejection tests are removed.
 
 Frozen external encoders (Qwen/VAE) and their feature cache formats are
 explicitly outside this cleanup. Their precision and existing numerical
-safeguards remain unchanged. Their outputs are converted to FP32 on entry to
+safeguards remain unchanged. Their outputs are converted to BF16 on entry to
 the RoboNana model, without rewriting existing cache files or model artifacts.
 
 ### Historical execution and measurements (not current configuration)
@@ -118,7 +117,7 @@ The benchmark includes G/R/U prefill in cached timing. C prefill is excluded
 because Stage-2 action selection has already produced it. Both modes start
 from the same input and noise; order alternates between repeats. Run
 `scripts/diagnostics/benchmark_mac_world_cache.py --help` for checkpoint/data arguments
-(the script now runs FP32 only), and `--batch-size 4` to
+(the script now runs BF16), and `--batch-size 4` to
 exercise the training batch shape (repeated windows, independent noise).
 
 An optimization equivalence check is not a new success-rate evaluation and

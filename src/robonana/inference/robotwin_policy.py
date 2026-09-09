@@ -142,7 +142,7 @@ class RoboNanaRobotWinPolicy:
         model_device: str | torch.device = "cuda:0",
         vae_device: str | torch.device = "cuda:1",
         text_encoder_device: str | torch.device = "cpu",
-        dtype: torch.dtype = torch.float32,
+        dtype: torch.dtype = torch.bfloat16,
         action_chunk: int | None = None,
         action_dim: int | None = None,
         state_dim: int | None = None,
@@ -185,9 +185,9 @@ class RoboNanaRobotWinPolicy:
         self.model_device = torch.device(model_device)
         self.vae_device = torch.device(vae_device)
         self.text_encoder_device = torch.device(text_encoder_device)
-        if dtype != torch.float32:
-            raise ValueError("RoboNana inference supports FP32 only")
-        self.dtype = torch.float32
+        # FACT scripts/inference_server.py likewise loads BF16 by default.
+        # https://github.com/Bariona/FACT/blob/9427ea451e806220742148049ef0576e43ef7382/scripts/inference_server.py
+        self.dtype = dtype
         self.action_chunk = int(action_chunk)
         self.horizon = int(horizon)
         self.num_inference_steps = int(num_inference_steps)

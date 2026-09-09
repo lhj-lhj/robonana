@@ -91,7 +91,7 @@ def main():
     torch.save(model.state_dict(), weights)
     report.update(source=str(args.source.resolve()), source_sha256=sha256_file(args.source),
                   historical_training_inputs_certified=False,
-                  note='Actor-preserving weight map; current preprocessing/FP32 may differ from historical inference.')
+                  note='Actor-preserving weight map; current preprocessing may differ from historical inference.')
     (args.output / 'conversion_report.json').write_text(json.dumps(report, indent=2))
     contract = build_contract(config['train']['posttrain'], args.vae_checkpoint)
     contract['capabilities'] = ['action_only']

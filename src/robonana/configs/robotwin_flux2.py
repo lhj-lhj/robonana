@@ -32,8 +32,6 @@ GPU_IDS = [int(value) for value in os.environ.get("ROBONANA_GPU_IDS", "6,7").spl
 MAX_STEPS = int(os.environ.get("ROBONANA_MAX_STEPS", "150000"))
 BATCH_SIZE_PER_GPU = int(os.environ.get("ROBONANA_BATCH_SIZE", "8"))
 GRADIENT_ACCUMULATION_STEPS = int(os.environ.get("ROBONANA_GRADIENT_ACCUMULATION_STEPS", "1"))
-if os.environ.get("ROBONANA_MIXED_PRECISION", "no") != "no":
-    raise ValueError("RoboNana is FP32-only; remove ROBONANA_MIXED_PRECISION overrides")
 if BATCH_SIZE_PER_GPU <= 0 or GRADIENT_ACCUMULATION_STEPS <= 0:
     raise ValueError("batch size and gradient accumulation steps must be positive")
 NUM_WORKERS = int(os.environ.get("ROBONANA_NUM_WORKERS", "4"))
@@ -177,8 +175,10 @@ config = dict(
         max_steps=MAX_STEPS,
         # Default on 190: 8 samples/GPU * 2 GPUs * 1 microbatch = 16/update.
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
-        # FACT/Accelerate spelling for the sole supported FP32 execution mode.
-        mixed_precision="no",
+        # 中文：沿用 FACT 官方训练精度，由 Trainer/Accelerate 管理。
+        # English: Match FACT world_action_model/configs/robotwin.py:
+        # https://github.com/Bariona/FACT/blob/9427ea451e806220742148049ef0576e43ef7382/world_action_model/configs/robotwin.py
+        mixed_precision="bf16",
         activation_checkpointing=False,
         checkpoint_interval=1000,
         early_checkpoint_steps=EARLY_CHECKPOINT_STEPS,

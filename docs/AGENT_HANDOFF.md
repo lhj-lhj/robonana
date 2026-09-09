@@ -52,7 +52,7 @@ The single FLUX sequence is
 
 Phase 1 trains FLUX actor/world parameters. BC is success-masked; world losses
 use both success and failure windows. Phase 2 freezes FLUX and trains only the
-deterministic Value/Q MoT experts. Value has one FP32 EMA target; Q has no EMA.
+deterministic Value/Q MoT experts. Value has one BF16 EMA target; Q has no EMA.
 The Value EMA is initialized from the current online Value expert at the start
 of every new critic phase and restored only when resuming that same phase.
 
@@ -69,10 +69,11 @@ accumulation 1 (effective batch 16). Explicit environment overrides remain
 supported. Existing saved experiment configs and running processes are not
 rewritten; a historical continuation can still restore batch 4 / accumulation 2.
 
-RoboNana is FP32-only: FLUX training, action/world rollout, online/target Q/V
-and environment policy inference. No precision selector is maintained; non-FP32
-training overrides/checkpoint-load requests fail early. EMA storage/update and
-return/loss math remain FP32. Qwen weights/precision/language caches remain
+RoboNana follows FACT BF16: FLUX training, action/world rollout, online Q/V,
+Value EMA and environment inference use BF16. FACT Trainer/Accelerate owns
+mixed precision; the FP32-only guards and forced-autocast-off wrapper are removed.
+EMA inherits online dtype and uses one lerp; return/loss math stays FP32.
+Qwen weights/precision/language caches remain
 unchanged. The 2026-09-08 image-consistency request supersedes the earlier
 freeze on VAE preprocessing: one FACT resize + single-image FP32 VAE + BF16
 roundtrip pipeline now serves both cache generation and live input. Only
@@ -89,7 +90,7 @@ Set `ROBONANA_RESUME_CHECKPOINT` to the complete source checkpoint directory,
 new output directory, and `ROBONANA_MAX_STEPS=10000` for a 5k-to-10k extension.
 This restores Q/V, Value EMA, Adam and progress via FACT, and rebases the restored
 zero LR onto the extended cosine schedule without advancing its step. Replay,
-warmup and optimizer hyperparameters are preserved; execution uses FP32 and
+warmup and optimizer hyperparameters are preserved; execution uses BF16 and
 batch 8 x 2 GPUs x accumulation 1. It is not bitwise equivalent to the historical
 BF16-rollout / batch-4-accumulation-2 execution. Keep the source run untouched.
 
