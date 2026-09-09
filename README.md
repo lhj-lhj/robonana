@@ -407,6 +407,13 @@ Loss/return reductions stay FP32, as do normalization and reporting boundaries.
 FACT/DeepSpeed owns optimizer/master-state precision. FACT's TF32 default is
 retained; model construction no longer changes global BF16 reduction flags.
 Inference entrypoints have no separate precision selector.
+
+Validation on 190 for code commit `02b4b4e` (2026-09-09): full CPU regression
+191 passed / 2 CUDA-only skips; targeted CPU/B200 training, inference-cache,
+EMA, loader and config checks 36 passed, including both skipped CUDA cases.
+The two-rank BF16 DeepSpeed nonfinite-gradient diagnostic also passed (NaN
+on rank 1 during accumulation). This verifies small-model execution/lifecycle;
+the existing full-size FP32 training job was not restarted or benchmarked here.
 Frozen Qwen and its language cache are unchanged. Image encoding now uses the
 single FACT/FLUX contract below; historical image caches are not silently reused.
 Inference sanitizes nonfinite decoded actions with a
