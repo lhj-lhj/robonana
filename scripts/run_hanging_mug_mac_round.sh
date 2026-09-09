@@ -5,6 +5,14 @@
 # 导航 / Guide: scripts/README.md (public / 正式入口)
 set -Eeuo pipefail
 
+# 中文：仅训练时，Stage 1 成功保存后自动接 Stage 2，随后退出。
+# English: Training-only mode chains both phases without simulator dependencies.
+train_only=${ROBONANA_MAC_TRAIN_ONLY:-0}
+if [[ ${train_only} != 0 && ${train_only} != 1 ]]; then
+  echo "ROBONANA_MAC_TRAIN_ONLY must be 0 or 1" >&2
+  exit 2
+fi
+
 # Run the two serialized fixed-48 MAC phases, compare unranked policy versus checkpoint-configured Q rejection, and
 # append selected-policy trajectories to replay.  There is one FLUX checkpoint:
 # phase 1 updates policy/world; phase 2 freezes it and updates only V/Q experts.
@@ -46,8 +54,12 @@ source_run=${ROBONANA_MAC_SOURCE_RUN:-/data3/hongjia/robonana/experiments/hangin
 source_checkpoint=${ROBONANA_MAC_SOURCE_CHECKPOINT:-${source_run}/models/checkpoint_epoch_1_step_1000/transformer/diffusion_pytorch_model.bin}
 source_config=${ROBONANA_MAC_SOURCE_CONFIG:-${source_run}/config.json}
 
-for required in "${source_checkpoint}" "${source_config}" "${model_python}" \
-  "${robotwin_python}" "${initial_dataset_root}/robonana_norm_stats.json"; do
+required_files=("${source_checkpoint}" "${source_config}" "${model_python}" \
+  "${initial_dataset_root}/robonana_norm_stats.json")
+if [[ ${train_only} == 0 ]]; then
+  required_files+=("${robotwin_python}")
+fi
+for required in "${required_files[@]}"; do
   if [[ ! -f ${required} ]]; then
     echo "required file does not exist: ${required}" >&2
     exit 2
@@ -65,13 +77,62 @@ if [[ ! ${collection} =~ ^[A-Za-z0-9._-]+$ ]]; then
   exit 2
 fi
 mkdir -p "${state_dir}" "${run_root}"
+# Keep the dataset root consistent between training and later evaluation.
+export ROBONANA_DATASET_ROOT="${initial_dataset_root}"
+
+check_training_space() {
+  # 中文：保存失败前即拒绝启动；训练输出所在盘至少预留两份保存空间。
+  # English: Preflight the actual output filesystem after the disk-full incident.
+  mkdir -p "${project_dir}"
+  "${model_python}" - "${project_dir}" "${ROBONANA_MIN_TRAIN_FREE_GIB:-150}" <<'PY'
+import shutil
+import sys
+
+minimum = float(sys.argv[2])
+if minimum < 0:
+    raise SystemExit("ROBONANA_MIN_TRAIN_FREE_GIB must be non-negative")
+free = shutil.disk_usage(sys.argv[1]).free / 1024**3
+print(f"Training disk available: {free:.1f} GiB; required: {minimum:.1f} GiB", flush=True)
+if free < minimum:
+    raise SystemExit("Insufficient free disk space for training checkpoints")
+PY
+}
 
 find_trained_checkpoint() {
   local phase_project=$1
   local phase_steps=$2
-  find "${phase_project}/models" -path \
-    "*/checkpoint_*_step_${phase_steps}/transformer/diffusion_pytorch_model.bin" \
-    -type f -print -quit 2>/dev/null || true
+  # 中文：残缺的 step-N 文件不能触发下一阶段；验证完整保存的恢复元数据。
+  # English: A partially written final .bin must never count as phase completion.
+  "${model_python}" - "${phase_project}" "${phase_steps}" <<'PY'
+import json
+import sys
+import zipfile
+from pathlib import Path
+
+project, step = Path(sys.argv[1]), int(sys.argv[2])
+for ck in sorted((project / "models").glob(f"checkpoint_*_step_{step}")):
+    try:
+        config = json.loads((project / "config.json").read_text())
+        count = len(config["launch"]["gpu_ids"])
+        required = [ck / "scheduler.bin", ck / "custom_checkpoint_0.pkl",
+                    ck / "transformer/inference_contract.json",
+                    ck / "pytorch_model/mp_rank_00_model_states.pt"]
+        required += [ck / f"random_states_{rank}.pkl" for rank in range(count)]
+        if config["train"]["posttrain"]["phase"] == "critic":
+            required += [ck / "target_value_expert.safetensors", ck / "value_ema_state.json"]
+        if not all(p.is_file() and p.stat().st_size for p in required):
+            continue
+        metadata = json.loads((ck / "transformer/inference_contract.json").read_text())
+        if metadata["step"] != step:
+            continue
+        shards = list((ck / "pytorch_model").glob("*zero_pp_rank_*_optim_states.pt"))
+        weights = ck / "transformer/diffusion_pytorch_model.bin"
+        if len(shards) == count and all(zipfile.is_zipfile(p) for p in [weights, *shards, required[3]]):
+            print(weights)
+            break
+    except (OSError, KeyError, ValueError):
+        continue
+PY
 }
 
 world_project=${project_dir}/world_policy
@@ -79,6 +140,7 @@ critic_project=${project_dir}/critic
 world_checkpoint=$(find_trained_checkpoint "${world_project}" "${world_policy_steps}")
 if [[ ! -f ${state_dir}/world_policy.done ]]; then
   if [[ -z ${world_checkpoint} ]]; then
+    check_training_space
     env \
       ROBONANA_PYTHON="${model_python}" \
       ROBONANA_GPU_IDS="${train_gpu_ids}" \
@@ -121,6 +183,7 @@ fi
 trained_checkpoint=$(find_trained_checkpoint "${critic_project}" "${critic_steps}")
 if [[ ! -f ${state_dir}/critic.done ]]; then
   if [[ -z ${trained_checkpoint} ]]; then
+    check_training_space
     env \
       ROBONANA_PYTHON="${model_python}" \
       ROBONANA_GPU_IDS="${train_gpu_ids}" \
@@ -158,6 +221,12 @@ trained_config=${critic_project}/config.json
 if [[ ! -f ${trained_config} ]]; then
   echo "critic config is missing: ${trained_config}" >&2
   exit 1
+fi
+
+if [[ ${train_only} == 1 ]]; then
+  echo "Both training phases complete: world_policy=${world_policy_steps}, critic=${critic_steps}"
+  echo "Final checkpoint: ${trained_checkpoint}"
+  exit 0
 fi
 
 run_action_only_eval() {

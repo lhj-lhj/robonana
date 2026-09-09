@@ -124,3 +124,41 @@ def test_training_config_logically_mixes_separate_rollout_root(monkeypatch, tmp_
         assert module.config["train"]["q_target_mode"] == "mac_mot_v2"
     finally:
         sys.modules.pop(module_name, None)
+
+
+@pytest.mark.parametrize("phase,lr", [("world_policy", 2e-5), ("critic", 1e-4)])
+def test_fresh_10k_phase_keeps_weights_but_resets_training_state(monkeypatch, tmp_path, phase, lr):
+    """中文：真实配置入口覆盖权重初始化、两阶段预算和部分 checkpoint 设置。"""
+    for key in list(os.environ):
+        if key.startswith("ROBONANA_"):
+            monkeypatch.delenv(key)
+    overrides = dict(
+        ROBONANA_MAC_PHASE=phase, ROBONANA_MAX_STEPS="10000", ROBONANA_RESUME="0",
+        ROBONANA_MAC_PRETRAIN_CHECKPOINT=str(tmp_path / "step3000/transformer/diffusion_pytorch_model.bin"),
+        ROBONANA_MAC_PRETRAIN_CONFIG=str(tmp_path / "source/config.json"),
+        ROBONANA_GPU_IDS="0,1,2,3,4,5,6,7", ROBONANA_BATCH_SIZE="32",
+        ROBONANA_GRADIENT_CHECKPOINTING="1", ROBONANA_GRADIENT_CHECKPOINTING_SINGLE_STRIDE="2",
+        ROBONANA_CHECKPOINT_INTERVAL="500", ROBONANA_CHECKPOINT_TOTAL_LIMIT="2",
+    )
+    for key, value in overrides.items():
+        monkeypatch.setenv(key, value)
+    names = ("robonana.configs.robotwin_flux2_4b_mac", "robonana.configs.robotwin_flux2")
+    for name in names:
+        sys.modules.pop(name, None)
+    try:
+        config = importlib.import_module(names[0]).config
+        assert config["models"]["checkpoint"] == overrides["ROBONANA_MAC_PRETRAIN_CHECKPOINT"]
+        assert config["train"]["resume"] is False
+        assert "resume_from" not in config["train"]
+        assert config["train"].get("initial_global_step", 0) == 0
+        assert config["schedulers"] == dict(type="WarmupCosineScheduler", warmup_steps=500, decay_steps=10000)
+        assert config["train"]["max_steps"] == 10000
+        assert config["optimizers"]["lr"] == lr
+        assert config["train"]["mixed_precision"] == "bf16"
+        assert config["models"]["gradient_checkpointing_single_stride"] == 2
+        assert config["train"]["checkpoint_interval"] == 500
+        assert config["train"]["checkpoint_total_limit"] == 2
+        assert config["dataloaders"]["train"]["batch_size_per_gpu"] * len(config["launch"]["gpu_ids"]) * config["train"]["gradient_accumulation_steps"] == 256
+    finally:
+        for name in names:
+            sys.modules.pop(name, None)

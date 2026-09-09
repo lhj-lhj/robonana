@@ -28,6 +28,15 @@ Use `run_robotwin_train.sh`, not the internal Python launcher, for ordinary
 training. Config selects the phase; checkpoint contracts constrain sampling
 and model inputs. See the [project README](../README.md) for training commands.
 
+`ROBONANA_MAC_TRAIN_ONLY=1 bash scripts/run_hanging_mug_mac_round.sh` 仅运行两阶段，
+Stage 1 完整保存后自动进入 Stage 2，结束后退出。每阶段预算分别设置
+`ROBONANA_MAC_WORLD_POLICY_STEPS` / `ROBONANA_MAC_CRITIC_STEPS`。
+新 project 中设置 `ROBONANA_RESUME=0` 时，来源 checkpoint 只提供模型权重，
+两阶段均从新 optimizer、scheduler 和 step0 开始；不会继承来源的训练步数。
+Set training-only mode for automatic Stage 1 → Stage 2 without evaluation/collection.
+Use a new project and `ROBONANA_RESUME=0` for weight initialization with fresh schedules.
+默认保留每阶段最近两个 checkpoint；用 `ROBONANA_CHECKPOINT_TOTAL_LIMIT` 调整。
+
 ## 子目录 / Tool categories
 
 ### data — 数据准备 / Data preparation

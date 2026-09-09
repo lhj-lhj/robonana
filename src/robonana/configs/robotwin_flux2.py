@@ -154,7 +154,10 @@ config = dict(
         value_dim=1,
         expert_hidden_dim=1024,
         train_mode=TRAIN_MODE,
-        gradient_checkpointing=True,
+        # 中文：复用模型现有的部分重计算开关；不改变计算精度或 batch。
+        # English: Expose the existing block checkpoint policy to fresh phases.
+        gradient_checkpointing=os.environ.get("ROBONANA_GRADIENT_CHECKPOINTING", "1") == "1",
+        gradient_checkpointing_single_stride=int(os.environ.get("ROBONANA_GRADIENT_CHECKPOINTING_SINGLE_STRIDE", "1")),
         vae_dtype="float32",
     ),
     optimizers=dict(
@@ -180,9 +183,9 @@ config = dict(
         # https://github.com/Bariona/FACT/blob/9427ea451e806220742148049ef0576e43ef7382/world_action_model/configs/robotwin.py
         mixed_precision="bf16",
         activation_checkpointing=False,
-        checkpoint_interval=1000,
+        checkpoint_interval=int(os.environ.get("ROBONANA_CHECKPOINT_INTERVAL", "1000")),
         early_checkpoint_steps=EARLY_CHECKPOINT_STEPS,
-        checkpoint_total_limit=1,
+        checkpoint_total_limit=int(os.environ.get("ROBONANA_CHECKPOINT_TOTAL_LIMIT", "2")),
         checkpoint_save_optimizer=False,
         disable_checkpointing=DISABLE_CHECKPOINTING,
         resume=True,
