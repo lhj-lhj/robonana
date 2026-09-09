@@ -23,7 +23,7 @@
 
 `round r` 表示采集轮次。Round 0 没有新 RL 训练，由原始 120k actor 初始化。
 消费 round 0 数据的两阶段更新产生下一次采集策略。20k/10k 是每个新阶段的
-新增 optimizer steps，不是终身 checkpoint 步数。当前仅执行 round 0，未启动训练。
+新增 optimizer steps，不是终身 checkpoint 步数。Round 0已完成；Stage1已提交启动验证，Stage2未启动。
 
 `SR_r = 本轮成功 episode 数 / 100`。这是固定**训练场景**上的成功率，不是独立
 未见场景泛化指标。每个 seed 每轮恰好执行一次，失败也保存；不重试到成功。
@@ -133,8 +133,9 @@ Value复制；同一阶段断点恢复才恢复原EMA/optimizer。
 | speed-4env | GPU4推理；GPU4/5/6/7各一个持久环境；batch2；wait10ms；同4个seed | `outputs/round0_120k_speed_4env_20260909`；359.900秒，40.011条/小时，2成功/2失败；不计入round0 |
 | seed-preflight-6 | GPU6；200000起，接受50个seed | `outputs/hanging_mug_fixed100_20260909/seed_preflight_gpu6`；已完成，最后接受seed200062 |
 | seed-preflight-7 | GPU7；210000起，接受50个seed | `outputs/hanging_mug_fixed100_20260909/seed_preflight_gpu7`；已完成，最后接受seed210063 |
-| round-0 | 固定100训练seed；120k actor；无Q；GPU4/5/6/7各一个环境，GPU4服务batch2/wait10ms | `outputs/hanging_mug_fixed100_20260909/round0`；已启动，PID3699586；SR_0待100条完成后计算 |
-| Stage 1/2 | 20k/10k | 尚未启动 |
+| round-0 | 固定100训练seed；120k actor；无Q；GPU4/5/6/7各一个环境，GPU4服务batch2/wait10ms | `outputs/hanging_mug_fixed100_20260909/round0`；已完成100条，41成功/59失败，SR_0=41%；5309.017秒（1小时28分29秒），67.809条/小时；完整性校验通过 |
+| Stage 1 | 20k；GPU0–7；每卡32、累积1、global256；100回放+50Clean | `experiments/hanging_mug_fixed100_round0_stage1_20k_bs32x8_20260909`；启动验证中，尚未确认首批optimizer更新 |
+| Stage 2 | 10k | 未启动；不自动串联 |
 
 实现提交：`cb62a66`（actor导出/能力保护）、`cac3793`（seed清单/预检）。
 正式round0启动代码：`aed5c58`。190完整回归193项通过，27项Pillow弃用警告。
@@ -148,7 +149,7 @@ Value复制；同一阶段断点恢复才恢复原EMA/optimizer。
 
 ## 7. Round 0实际启动参数
 
-以下记录供审计，**当前进程已启动，不要重复执行**。输出目录拒绝覆盖。
+以下记录供审计，**该次采集已经完成，不要重复执行**。输出目录拒绝覆盖。
 模型Python：`/data3/hongjia/conda/envs/robonana/bin/python`。
 
 ```bash
@@ -175,3 +176,100 @@ python scripts/diagnostics/benchmark_robotwin_collection_pool.py \
 完成结果：同round0目录下`summary.json`（success_count、success_rate、逐seed结果、耗时）。
 W&B：本轮是仿真采集，当前只保存本地/服务器结构化指标；尚无训练W&B run。后续
 Stage1/2启动时记录各自W&B URL，不把历史训练run当成本实验记录。
+
+## 8. 数据选择与采样方式（按现有实现核对）
+
+本轮数据范围定为**100条round0真实回放 + 50条原始Clean示范**，共150条，
+其中成功91条（50原始+41采集），失败59条。不添加500条Randomized。
+理由：本实验首先测量固定clean场景上的RL loop；同时改变数据量与背景分布会
+引入另一个变量。100+550可以作为后续独立对照，但不能断言一定更好或更差。
+
+### 8.1 训练窗口采样：不是把150条轨迹直接等概率混在一起
+
+复用现有`src/robonana/data/robotwin_hdf5.py::RoboTwinPosttrainSampler`，
+配置来自`src/robonana/configs/posttrain_config.py`；本次没有新增或修改采样器。
+默认四池各占0.25，round0的历史失败池为空，其权重转到当轮失败池，因此：
+
+| 数据池 | 本轮轨迹数 | 实际采样占比 | sampler batch=8举例 |
+|---|---:|---:|---:|
+| 原始Clean成功示范 | 50 | 25% | 2个窗口 |
+| 累积采集成功 | 41 | 25% | 2个窗口 |
+| 历史失败（round<0） | 0 | 0% | 0 |
+| 当轮失败（round=0） | 59 | 50% | 4个窗口 |
+
+每个sampler batch先按池比例分配窗口数；不整除时向下取整，再按余数大小补齐。
+池内依次**均匀选任务 → 均匀选episode → 均匀选该episode的合法起始帧**。
+本实验只有hanging_mug一个任务。采样有放回，不要求一轮遍历每条轨迹一次；
+不会因为失败轨迹更长就按全数据帧数占据更大比例。batch内再shuffle。
+表中batch指采样器收到的batch_size，实际多卡分片以启动配置为准。
+
+成功轨迹允许末尾吸收态padding；失败轨迹只提供完整48步窗口，不padding。
+Stage1的action BC仅使用成功窗口；world loss使用所有窗口。Stage2复用同一
+数据池采样逻辑，但其训练action由当前policy生成，不是直接拿真实action做BC。
+后续历史失败池非空时恢复四池各25%；成功池为空则其权重转给原始成功池。
+
+### 8.2 Policy候选采样与Q选择
+
+对每个当前观测，独立噪声`z_i ~ N(0,I)`，用flow policy产生48步action chunk：
+`a_i = FlowPolicy(language, state, current_image, z_i)`，20步Euler、shift=1。
+
+- Round0：只采样一个chunk，直接执行；不计算Q，不做argmax，也没有softmax。
+- Stage2 imagination：当前配置采样8个候选，计算Q并取`argmax_i Q(s,a_i)`；
+  对选中chunk生成一次48步world-model转移，用于Q/V bootstrap训练。
+- 后续环境采集：采样32个候选，计算Q并取argmax，执行选中chunk；任务提前成功
+  则停止，否则执行满48步后重新观测、规划。不是一次选择整条episode。
+- request batch=2是两个环境请求并行；candidate batch是候选计算分组，均不改变
+  每个环境的总候选数。Round0未使用候选分组进行Q搜索。
+
+### 8.3 启动顺序检查
+
+Round0完成时只有action-only导出；该导出的reward/success/Q/V头未训练。
+必须先完成本实验Stage1（20k）或明确指定另一个已验证的world-policy checkpoint，
+才能启动Stage2（10k）。不能因100条数据已收集，就跳过world-model学习直接冻结
+120k转换模型做imaginary bootstrap。历史其它数据/模型的Stage1不能自动算作本实验Stage1。
+
+## 9. Stage1实际配置与启动检查（2026-09-09）
+
+用户指定：100条round0回放 + 50条原始Clean，8卡、每卡batch32、累积1、global
+batch256、20,000步。复用`run_robotwin_train.sh`及`robotwin_flux2_4b_mac.config`，
+没有另建训练框架；Stage2不自动启动。
+
+| 参数 | 实际设置 |
+|---|---|
+| GPU / batch | 0,1,2,3,4,5,6,7；32×8×1=256 |
+| optimizer / LR | AdamW；2e-5；betas=(0.9,0.95)，eps=1e-8，weight_decay=1e-4 |
+| scheduler | warmup500步，cosine decay到20,000步 |
+| phase / round | world_policy / 消费round0数据 |
+| 初始化 | `checkpoints/120k_action_only_export_20260909`，新阶段，不恢复旧optimizer/步数 |
+| 显式适配 | `ROBONANA_ALLOW_UNCERTIFIED_PRETRAIN=1`，`ROBONANA_RESUME=0` |
+| 原始任务筛选 | `ROBONANA_POSTTRAIN_ORIGINAL_TASK_GLOBS=Clean/hanging_mug` |
+| 回放根目录 | `outputs/hanging_mug_fixed100_20260909/round0/dataset` |
+| 精度/内存 | FP32；模型gradient_checkpointing开启；DeepSpeed ZeRO-2 |
+| 数据worker | 每进程4；OMP/MKL线程各1 |
+| loss权重 | action10，image1，future_state0.4，reward0.1，success0.1 |
+| checkpoint | 第100步早期保存，之后每1000步；保留数量1，保存optimizer |
+| W&B | online；name=`hanging_mug_fixed100_round0_stage1_20k_bs32x8_20260909`；URL待成功初始化后补充 |
+
+输入检查已完成：四池轨迹数`[50,41,0,59]`，统一A统计。回放65,931帧的当前VAE/
+语言缓存校验通过，原始50条Clean也已生成当前缓存；旧`latents`未删除、不重标。
+复用的准备入口：`prepare_robotwin_rollouts.py`生成/验证索引，
+`data/preprocess_robotwin_lerobot_flux.py`与`data/preprocess_robotwin_flux.py`通过
+八卡torchrun分片处理，后者开启`--per-episode-language`。未处理Randomized。
+
+代码调整（`4db0a12`）：
+
+1. 在现有inference_contract增加显式新Stage1加载校验；仍检查权重指纹、采样参数、
+   图像契约、归一化。converted actor只在allow开启且resume关闭的world_policy阶段允许。
+2. Trainer复用该校验及既有`initialize_scalar_expert_from_flux`，为转换actor的
+   Q/Value主体按ImageWAM规则从FLUX初始化；query/head保留新初始化，actor不改。
+   既有已训练MAC checkpoint不重新初始化expert。
+3. 增加Stage2拒绝、resume拒绝、未授权拒绝、统计不一致与权重篡改拒绝测试。
+   190完整回归194项通过；仅有27条已有Pillow弃用警告。
+
+启动诊断：首轮八卡进程卡在`init_process_group → eager_connect_single_device`，
+由只读Python调用栈确认，尚未进入模型前向，不能归因为batch32 OOM。
+重试1设置`NCCL_IB_DISABLE=1`并开启INFO日志，仍未完成初始化；重试2额外关闭
+可选NVLS聚合（`NCCL_NVLS_ENABLE=0`），保留NVLink P2P。未改batch、精度或数据。
+各次日志为`outputs/hanging_mug_fixed100_20260909/stage1_train*.launch.log`，全部保留。
+W&B现有凭据通过官方HTTP API验证；SDK public API仍报告relogin required，正在确认
+训练侧是否同样受影响；尚不声称已有在线run。只读临时诊断工具未安装进训练环境。
