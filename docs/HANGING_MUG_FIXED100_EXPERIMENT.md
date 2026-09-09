@@ -361,3 +361,44 @@ failed to add multicast team ...
 诊断原始日志：`outputs/hanging_mug_fixed100_20260909/nvls_probe_20260909/`。
 后续恢复NVLS需先协调停掉整个分区GPU任务，再由管理员按平台维护流程处理，
 随后重跑最小通信测试与性能对照；不要在正式训练中直接开启或重启Fabric服务。
+
+### 9.3 部分block检查点续训（2026-09-09）
+
+用户最终要求保持每卡32、8卡、累积1、global256、FP32，不采用batch16方案。
+复用9.1的Stage1恢复入口，增加single block重计算stride；没有另建训练器或
+改动attention/mask、loss、权重结构。默认stride1仍保留原先全block检查点行为。
+此实验stride2：5个double block全部checkpoint；20个single block中只对
+0、2、4、6、8、10、12、14、16、18号checkpoint，关闭另外10个的重计算。
+训练外eval不使用checkpoint；模型state_dict不增加权重或buffer键。
+
+相对9.1启动命令，替换project目录为
+`experiments/hanging_mug_fixed100_round0_stage1_20k_bs32x8_partialgc_20260909`，并设置：
+
+```bash
+export ROBONANA_GRADIENT_CHECKPOINTING=1
+export ROBONANA_GRADIENT_CHECKPOINTING_SINGLE_STRIDE=2
+```
+
+其余来源仍是原八卡实验的完整step100，目标20k（不是从558恢复，也不是另加20k）。
+保留原数据100回放+50Clean、A统计、优化器状态及原warmup/cosine计划。
+继续使用`NCCL_NVLS_ENABLE=0`，NVLink P2P保留；没有reset GPU或重启Fabric服务。
+W&B：[3ca5f86f](https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/3ca5f86f)。
+日志：`outputs/hanging_mug_fixed100_20260909/stage1_partialgc.launch.log`。
+启动源码commit：`1a3ff3b`；主管PID3829549。
+
+验证新增：同一小型MAC模型上全关/全开/部分开启的5类world-policy输出逐元素一致，
+所有有梯度参数的梯度在rtol1e-5/atol1e-6内一致；检查checkpoint调用数、eval不重计算、
+非法stride拒绝、配置复制不改batch/数据/scheduler。190针对性7项测试通过。
+
+启动实测已完成真实forward/backward/optimizer更新，截至step123未见OOM/非有限loss。
+稳定单步中位数约4.015秒（step111–123），原全检查点最后50步中位数4.3885秒：
+单步耗时约减少8.5%、吞吐约增加9.3%。这是先后运行的短窗口比较，不是硬件极限
+或严格同batch样本A/B；启动首步11.6秒不计入稳定速度。按4秒/step估计剩余约22小时，
+另加保存与运行波动。训练保持运行，没有因测试结束停止。
+
+八卡nvidia-smi显存快照均177,045MiB（172.9GiB），卡总显存183,359MiB，
+可见余量约6.2GiB；这是进程/驱动显存快照，不是逐算子allocated峰值。
+因此不继续扩大关闭范围；不能将少重计算40%的block解释为提速40%。
+实际config.json再次核对：GPU0–7、每卡32、累积1、FP32、stride2，目标20k。
+190完整回归196项通过（122.70秒，27条已有Pillow弃用警告）。W&B官方API已确认
+run为running，收到_step150、total_loss=0.5543、samples_per_sec=63.79，非仅本地打印URL。

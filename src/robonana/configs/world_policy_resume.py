@@ -6,8 +6,8 @@ configuration adapter, not another trainer. Use run_robotwin_train.sh with
 ROBONANA_RESUME_CHECKPOINT / RESUME_CONFIG / PROJECT_DIR variables as the
 existing critic continuation. Original files remain untouched.
 
-中文：部分重计算设置 GRADIENT_CHECKPOINTING=1、SINGLE_STRIDE=2（均加
-ROBONANA_ 前缀，后者完整名见下）；保留全部double和偶数single的检查点。
+中文：部分重计算设置 ROBONANA_GRADIENT_CHECKPOINTING=1 和
+ROBONANA_GRADIENT_CHECKPOINTING_SINGLE_STRIDE=2；保留全部double和偶数single的检查点。
 English: Enable checkpointing and set single stride 2 to checkpoint all double
 blocks and even single blocks; no tensor/layout/optimizer changes.
 """
