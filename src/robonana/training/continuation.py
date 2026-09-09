@@ -17,7 +17,7 @@ def restore_config_tuples(value):
 
 
 def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
-                             gradient_checkpointing=False):
+                             gradient_checkpointing=False, single_checkpoint_stride=1):
     """中文：原样续训 Stage 1，仅切换激活重计算；不重置优化器或学习率。
 
     English: Resume Stage 1 with an activation-recomputation override only.
@@ -26,6 +26,8 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
     critic continuation's schedule extension or two-GPU defaults here.
     """
     config = restore_config_tuples(copy.deepcopy(source))
+    if type(single_checkpoint_stride) is not int or single_checkpoint_stride < 1:
+        raise ValueError("single_checkpoint_stride must be a positive integer")
     if (
         config["models"]["train_mode"] != "world_policy"
         or config["train"]["posttrain"]["phase"] != "world_policy"
@@ -43,6 +45,7 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
         checkpoint=str(checkpoint / "transformer/diffusion_pytorch_model.bin"),
         checkpoint_config=str(source_config),
         gradient_checkpointing=bool(gradient_checkpointing),
+        gradient_checkpointing_single_stride=single_checkpoint_stride,
     )
     config["train"].update(
         resume=True, resume_from=str(checkpoint), rebase_scheduler_on_resume=False,

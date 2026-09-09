@@ -42,6 +42,14 @@ def test_world_policy_resume_only_changes_execution_and_restore_paths(tmp_path):
     assert config["train"]["rebase_scheduler_on_resume"] is False
     assert config["train"]["allow_uncertified_pretrain"] is False
     assert "id" not in config["train"]["tracker_init_kwargs"]["wandb"]
+    partial = build_world_policy_resume(source, **kwargs, gradient_checkpointing=True,
+                                       single_checkpoint_stride=2)
+    assert partial["models"]["gradient_checkpointing"] is True
+    assert partial["models"]["gradient_checkpointing_single_stride"] == 2
+    assert partial["dataloaders"] == source["dataloaders"]
+    assert partial["schedulers"] == source["schedulers"]
+    with pytest.raises(ValueError, match="positive integer"):
+        build_world_policy_resume(source, **kwargs, single_checkpoint_stride=0)
     with pytest.raises(ValueError, match="separate"):
         build_world_policy_resume(source, **{**kwargs, "project_dir": tmp_path / "old"})
     source["models"]["train_mode"] = "critic"

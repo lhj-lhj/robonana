@@ -305,6 +305,9 @@ class RoboNanaTrainer(Trainer):
             model.enable_gradient_checkpointing()
         else:
             model.disable_gradient_checkpointing()
+        model.set_gradient_checkpointing_single_stride(
+            _config_value(model_config, "gradient_checkpointing_single_stride", 1)
+        )
         model.train()
         self.model_name = "transformer"
 
@@ -314,12 +317,13 @@ class RoboNanaTrainer(Trainer):
             trainable_count = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
             self.logger.info(
                 "Initialized FLUX.2 backbone=%s; parameters=%d; trainable_parameters=%d; "
-                "trainable_tensors=%d; gradient_checkpointing=%s",
+                "trainable_tensors=%d; gradient_checkpointing=%s; single_checkpoint_stride=%d",
                 initialization_label,
                 parameter_count,
                 trainable_count,
                 len(trainable_names),
                 model.gradient_checkpointing,
+                model.gradient_checkpointing_single_stride,
             )
             self.logger.info(
                 "Attention layout: architecture=%s; A=%s; clean_action=%s",

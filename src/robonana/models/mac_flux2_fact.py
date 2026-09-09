@@ -119,6 +119,15 @@ class MacFlux2FACTModel(Flux2FACTModel):
         self.value_expert.reset_parameters()
         self.q_expert.reset_parameters()
         self._mac_training_phase = "world_policy"
+        # 中文：仅控制训练激活重计算，不改变权重、attention 或推理。
+        # English: Stride 1 checkpoints every single block; stride 2 keeps
+        # even-index blocks only. Double blocks retain the existing policy.
+        self.gradient_checkpointing_single_stride = 1
+
+    def set_gradient_checkpointing_single_stride(self, stride: int) -> None:
+        if type(stride) is not int or stride < 1:
+            raise ValueError("gradient_checkpointing_single_stride must be a positive integer")
+        self.gradient_checkpointing_single_stride = stride
 
     def set_training_phase(self, phase: str) -> tuple[str, ...]:
         """Select the only two supported optimizer surfaces."""
@@ -360,8 +369,9 @@ class MacFlux2FACTModel(Flux2FACTModel):
             (clean_single, clean_single, clean_single, action_single, clean_single, clean_single, clean_single, world_single, world_single),
             strict=True,
         ))
-        for block in self.single_blocks:
-            if self.gradient_checkpointing and self.training:
+        for block_index, block in enumerate(self.single_blocks):
+            if (self.gradient_checkpointing and self.training
+                    and block_index % self.gradient_checkpointing_single_stride == 0):
                 hidden = checkpoint(
                     lambda hidden_, block_=block: self._single_block_forward(
                         block_, hidden_, pe, single_mod, bias
