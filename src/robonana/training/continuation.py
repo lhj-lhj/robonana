@@ -1,4 +1,4 @@
-"""Explicit critic continuation configuration; FACT still owns state restoration."""
+"""Saved-phase execution adapters; FACT still owns state restoration."""
 
 import copy
 import math
@@ -14,6 +14,40 @@ def restore_config_tuples(value):
             return tuple(restore_config_tuples(item) for item in value[1:])
         return [restore_config_tuples(item) for item in value]
     return value
+
+
+def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
+                             gradient_checkpointing=False):
+    """中文：原样续训 Stage 1，仅切换激活重计算；不重置优化器或学习率。
+
+    English: Resume Stage 1 with an activation-recomputation override only.
+    Reuse FACT restore and the existing model toggle. Preserve data, batch,
+    precision, GPU topology and the original schedule/budget; never use the
+    critic continuation's schedule extension or two-GPU defaults here.
+    """
+    config = restore_config_tuples(copy.deepcopy(source))
+    if config["models"]["train_mode"] != "world_policy" or config["train"]["posttrain"]["phase"] != "world_policy":
+        raise ValueError("resume requires a world_policy checkpoint")
+    if config["train"]["mixed_precision"] != "no":
+        raise ValueError("resume requires FP32 execution")
+    if project_dir.resolve() == source_config.parent.resolve() or checkpoint.resolve().is_relative_to(project_dir.resolve()):
+        raise ValueError("use a separate project directory; preserve the source experiment")
+    config["project_dir"] = str(project_dir)
+    config["models"].update(
+        checkpoint=str(checkpoint / "transformer/diffusion_pytorch_model.bin"),
+        checkpoint_config=str(source_config),
+        gradient_checkpointing=bool(gradient_checkpointing),
+    )
+    config["train"].update(
+        resume=True, resume_from=str(checkpoint), rebase_scheduler_on_resume=False,
+        allow_uncertified_pretrain=False, activation_checkpointing=False,
+        checkpoint_save_optimizer=True,
+    )
+    tracker = config["train"]["tracker_init_kwargs"]["wandb"]
+    tracker.pop("id", None)
+    tracker.pop("resume", None)
+    tracker["name"] = project_dir.name
+    return config
 
 
 def build_critic_continuation(source, *, checkpoint, source_config, project_dir, max_steps,

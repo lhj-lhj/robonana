@@ -9,6 +9,48 @@ import pytest
 _module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "src/robonana/training/continuation.py"))
 build_critic_continuation = _module["build_critic_continuation"]
 rebase_loaded_scheduler = _module["rebase_loaded_scheduler"]
+build_world_policy_resume = _module["build_world_policy_resume"]
+
+
+def test_world_policy_resume_only_changes_execution_and_restore_paths(tmp_path):
+    import copy
+    source = dict(
+        project_dir=str(tmp_path / "old"),
+        models=dict(train_mode="world_policy", gradient_checkpointing=True),
+        launch=dict(gpu_ids=list(range(8))),
+        dataloaders=dict(train=dict(batch_size_per_gpu=32, data_or_config=[{"data_path": "original"}])),
+        optimizers=dict(lr=2e-5, betas=["__tuple__", 0.9, 0.95]),
+        schedulers=dict(warmup_steps=500, decay_steps=20000),
+        train=dict(max_steps=20000, mixed_precision="no", gradient_accumulation_steps=1,
+                   posttrain=dict(phase="world_policy"),
+                   tracker_init_kwargs=dict(wandb=dict(id="old", resume="must"))),
+    )
+    original = copy.deepcopy(source)
+    kwargs = dict(checkpoint=tmp_path / "old/models/checkpoint_epoch_1_step_100",
+                  source_config=tmp_path / "old/config.json", project_dir=tmp_path / "new")
+    config = build_world_policy_resume(source, **kwargs)
+    assert source == original
+    for key in ("launch", "dataloaders", "schedulers"):
+        assert config[key] == source[key]
+    assert config["optimizers"] == dict(lr=2e-5, betas=(0.9, 0.95))
+    assert config["train"]["max_steps"] == 20000
+    assert config["train"]["gradient_accumulation_steps"] == 1
+    assert config["train"]["mixed_precision"] == "no"
+    assert config["models"]["gradient_checkpointing"] is False
+    assert config["train"]["resume"] is True
+    assert config["train"]["resume_from"] == str(kwargs["checkpoint"])
+    assert config["train"]["rebase_scheduler_on_resume"] is False
+    assert config["train"]["allow_uncertified_pretrain"] is False
+    assert "id" not in config["train"]["tracker_init_kwargs"]["wandb"]
+    with pytest.raises(ValueError, match="separate"):
+        build_world_policy_resume(source, **{**kwargs, "project_dir": tmp_path / "old"})
+    source["models"]["train_mode"] = "critic"
+    with pytest.raises(ValueError, match="world_policy"):
+        build_world_policy_resume(source, **kwargs)
+    source["models"]["train_mode"] = "world_policy"
+    source["train"]["mixed_precision"] = "bf16"
+    with pytest.raises(ValueError, match="FP32"):
+        build_world_policy_resume(source, **kwargs)
 
 
 def test_continuation_preserves_data_and_optimizer_with_current_execution():
