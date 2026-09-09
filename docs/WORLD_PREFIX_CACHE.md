@@ -49,8 +49,10 @@ cache to FP32 is not equivalent to computing the prefix in FP32.
 
 The maintained trainer uses FACT BF16 for both imagination and differentiable
 Q/V regression. Current C is reusable from selection through world generation
-to Q/V regression, including FACT/Accelerate autocast forwards. Value EMA keeps
-the online expert's BF16 dtype; return arithmetic and loss reductions stay FP32.
+to Q/V regression, including FACT/Accelerate autocast forwards. Value EMA stores
+and accumulates FP32 weights, with BF16 autocast target evaluation on the same
+BF16 cache. No extra FP32 FLUX prefill or cache cast is introduced.
+Return arithmetic and loss reductions stay FP32.
 The former `fp32_compute_context` and FP32-only rejection tests are removed.
 
 Frozen external encoders (Qwen/VAE) and their feature cache formats are

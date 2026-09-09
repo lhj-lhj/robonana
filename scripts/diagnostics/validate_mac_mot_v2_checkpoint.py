@@ -108,7 +108,7 @@ def main() -> None:
             clean_action=action,
             context_mask=torch.ones(batch, context.shape[1], device=device, dtype=torch.bool),
         )
-        # Target Value inherits the BF16 dtype of the online expert.
+        # Target Value stores FP32 weights; predict_value uses BF16 autocast.
         target_value = ValueExpertEMA(
             model.value_expert,
             device=device,

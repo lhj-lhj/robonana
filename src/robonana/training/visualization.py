@@ -19,8 +19,12 @@ def unpack_flux2_tokens(tokens: Tensor, vae, *, grid_height: int = 12, grid_widt
 
     packed = tokens.transpose(1, 2).reshape(batch, packed_channels, grid_height, grid_width)
     eps = float(getattr(getattr(vae, "config", None), "batch_norm_eps", 1e-4))
-    mean = vae.bn.running_mean.view(1, -1, 1, 1).to(device=packed.device, dtype=packed.dtype)
-    std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1).to(device=packed.device, dtype=packed.dtype) + eps)
+    # 中文：保留 BN buffer 的 FP32 精度，再做反归一化；不能先跟随 token 降精度。
+    # English: Match official FLUX inv_normalize; FP32 buffers promote BF16
+    # tokens before unpatchifying/decoding. Move devices without casting dtype.
+    # https://github.com/black-forest-labs/flux2/blob/main/src/flux2/autoencoder.py#L308-L313
+    mean = vae.bn.running_mean.view(1, -1, 1, 1).to(device=packed.device)
+    std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1).to(device=packed.device) + eps)
     packed = packed * std + mean
 
     channels = packed_channels // 4

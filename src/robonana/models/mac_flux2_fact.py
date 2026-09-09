@@ -746,6 +746,13 @@ class MacFlux2FACTModel(Flux2FACTModel):
         query_pe = self._expert_query_pe(
             batch=context.shape[0], device=context.device, dtype=current_ids.dtype, segment_id=10
         )
+        if expert is not None:
+            # 中文：EMA 权重保持 FP32，读取同一 BF16 FLUX cache 做混合精度前向。
+            # English: Autocast only target evaluation. Do not cast persistent
+            # EMA weights or cached K/V; no FP32 FLUX recomputation is needed.
+            with torch.autocast(device_type=context.device.type, dtype=torch.bfloat16,
+                                enabled=cache.compute_dtype == torch.bfloat16):
+                return selected(cache, query_pe=query_pe)
         return selected(cache, query_pe=query_pe)
 
     def predict_q(

@@ -23,7 +23,10 @@ def evaluating(model: nn.Module) -> Iterator[None]:
 
 
 class ValueExpertEMA:
-    """Target copy with the online Value's dtype; FLUX and Q are not duplicated.
+    """FP32 Value target storage/updates; FLUX and Q are not duplicated.
+
+    Target evaluation uses BF16 autocast in MacFlux2FACTModel.predict_value.
+    It never casts this persistent copy to BF16, so small updates accumulate.
 
     This target topology follows MAC: the target/EMA network exists only for
     Value, while Q bootstraps from the online Value and action selection uses
@@ -52,7 +55,7 @@ class ValueExpertEMA:
         self.start_step = int(start_step)
         self.update_count = 0
         self.last_online_l2 = 0.0
-        self.model = copy.deepcopy(online_expert)
+        self.model = copy.deepcopy(online_expert).float()
         if device is not None:
             self.model.to(device)
         self.model.eval().requires_grad_(False)
@@ -83,15 +86,15 @@ class ValueExpertEMA:
         if (optimizer_step - self.start_step) % self.update_every_optimizer_steps:
             return False
         online_parameters = dict(online_expert.named_parameters())
-        squared = torch.zeros((), device=next(self.model.parameters()).device, dtype=torch.float64)
+        squared = torch.zeros((), device=next(self.model.parameters()).device, dtype=torch.float32)
         count = 0
         for name, target in self.model.named_parameters():
-            source = online_parameters[name].detach().to(device=target.device)
-            # 中文：一次插值，避免 BF16 分别乘/加造成两次中间舍入。
-            # English: Keep target storage BF16; lerp avoids separately rounding
-            # target * decay before the online contribution is added.
+            source = online_parameters[name].detach().to(target)
+            # 中文：FP32 累积小更新；前向 autocast 不改变这些持久权重。
+            # English: FP32 accumulation avoids BF16 storage rounding away
+            # each small Polyak update, even when using a single lerp.
             target.lerp_(source, 1.0 - self.decay)
-            squared.add_((target.double() - source.double()).square().sum())
+            squared.add_((target - source).square().sum())
             count += source.numel()
         online_buffers = dict(online_expert.named_buffers())
         for name, target in self.model.named_buffers():

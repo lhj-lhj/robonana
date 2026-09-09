@@ -22,7 +22,8 @@ The world cascade is `R -> success -> S' -> I'`. The action track is not
 visible to world targets except the clean action conditioning track `G`.
 Value reads only `[L,S,I]`; Q reads `[L,S,I,G]`. Both are deterministic,
 one-query experts. FLUX is frozen during critic training. Q has no target
-network; only Value is Polyak-averaged, with BF16 storage matching online Value.
+network; only Value is Polyak-averaged, stored/updated in FP32 with BF16
+autocast target forward on the shared BF16 FLUX cache.
 
 ## Checkpoint boundary
 

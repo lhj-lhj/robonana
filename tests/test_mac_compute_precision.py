@@ -93,6 +93,18 @@ def test_bf16_imagination_regression_and_target_restore(device):
     inputs = {key: value.to(device=device, dtype=torch.bfloat16 if value.is_floating_point() else value.dtype)
               for key, value in inputs.items()}
     target = ValueExpertEMA(model.value_expert)
+    saved_target = {name: value.clone() for name, value in target.model.state_dict().items()}
+    target_calls = []
+    def check_target_forward(module, args, output):
+        cache = args[0]
+        assert torch.is_autocast_enabled(device)
+        assert cache.compute_dtype == torch.bfloat16
+        assert all(layer[key].dtype == torch.bfloat16
+                   for layer in (*cache.double, *cache.single) for key in ("k", "v"))
+        assert output.dtype == torch.bfloat16 and torch.isfinite(output).all()
+        assert all(p.dtype == torch.float32 and not p.requires_grad for p in module.parameters())
+        target_calls.append(output)
+    hook = target.model.register_forward_hook(check_target_forward)
     with patch.object(model, "prefill_condition_cache", wraps=model.prefill_condition_cache) as prefill:
         rollout = generate_mac_imaginary_rollout_h1(
             online_model=model, target_value_expert=target.model,
@@ -104,6 +116,10 @@ def test_bf16_imagination_regression_and_target_restore(device):
             reward_non_goal=-1., reward_goal=0., return_scale=1000.,
             grid_height=1, grid_width=2)
         assert prefill.call_count == 2
+    hook.remove()
+    assert len(target_calls) == 1
+    for name, value in target.model.state_dict().items():
+        assert torch.equal(value, saved_target[name])  # Autocast must not round storage.
     assert rollout.condition_cache.compute_dtype == torch.bfloat16
     assert rollout.reward_logits.dtype == torch.bfloat16
     assert rollout.value_target_return.dtype == torch.float32  # Stable target arithmetic.
@@ -123,24 +139,38 @@ def test_bf16_imagination_regression_and_target_restore(device):
             assert parameter.grad is None
     target.update(model.value_expert, optimizer_step=1, optimizer_step_succeeded=True)
     saved = target.state_dict()
-    assert all(p.dtype == torch.bfloat16 and not p.requires_grad for p in target.model.parameters())
+    assert all(p.dtype == torch.float32 and not p.requires_grad for p in target.model.parameters())
+    assert all(value.dtype == torch.float32 for value in saved.values())
     target.load_state_dict(saved)
     for name, parameter in target.model.state_dict().items():
         assert torch.equal(parameter.cpu(), saved[name])
 
 
-def test_bf16_ema_single_interpolation_and_fp32_checkpoint_load():
+def test_fp32_ema_accumulates_small_updates_and_resumes(tmp_path):
+    from safetensors.torch import load_file, save_file
     online = torch.nn.Linear(2, 1, bias=False).bfloat16()
     online.weight.data.fill_(1)
     target = ValueExpertEMA(online, decay=.995)
-    for step in range(3):
+    online.weight.data.fill_(1.0078125)
+    stuck_bf16 = torch.ones_like(online.weight)
+    for step in range(500):
         target.update(online, optimizer_step=step, optimizer_step_succeeded=True)
-    assert torch.equal(target.model.weight, online.weight)
-    online.weight.data.fill_(2)
-    expected = torch.lerp(target.model.weight, online.weight, .005)
-    target.update(online, optimizer_step=4, optimizer_step_succeeded=True)
-    assert torch.equal(target.model.weight, expected)
-    assert not torch.equal(target.model.weight, torch.ones_like(expected))
+        stuck_bf16.lerp_(online.weight.detach(), .005)
+    path = str(tmp_path / "target.safetensors")
+    save_file(target.state_dict(), path)
+    resumed = ValueExpertEMA(online, decay=.995)
+    resumed.load_state_dict(load_file(path))
+    for step in range(500, 1000):
+        target.update(online, optimizer_step=step, optimizer_step_succeeded=True)
+        resumed.update(online, optimizer_step=step, optimizer_step_succeeded=True)
+        stuck_bf16.lerp_(online.weight.detach(), .005)
+    assert torch.equal(stuck_bf16, torch.ones_like(stuck_bf16))
+    expected = torch.full_like(target.model.weight, 1.0078125 - .0078125 * .995 ** 1000)
+    torch.testing.assert_close(target.model.weight, expected, atol=2e-6, rtol=0)
+    assert torch.equal(target.model.weight, resumed.model.weight)
     target.load_state_dict({"weight": torch.full((1, 2), 3., dtype=torch.float32)})
-    assert target.model.weight.dtype == torch.bfloat16
+    assert target.model.weight.dtype == torch.float32
     assert torch.equal(target.model.weight, torch.full_like(expected, 3))
+    target.load_state_dict({"weight": torch.full((1, 2), 2., dtype=torch.bfloat16)})
+    assert target.model.weight.dtype == torch.float32
+    assert torch.equal(target.model.weight, torch.full_like(expected, 2))

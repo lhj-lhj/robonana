@@ -171,15 +171,16 @@ It imports the common FACT/FLUX dimensions and applies the MAC overlay:
 | imagined chunks per critic batch | 1 |
 | Value EMA decay | 0.995 |
 | flow sampling steps | 20 |
-| default training dtype | FACT BF16 FLUX/Q/V and Value EMA; FP32 loss/return arithmetic |
+| default training dtype | BF16 FLUX/Q/V; FP32 Value EMA storage/update with BF16 autocast forward; FP32 loss/returns |
 | new trajectories per collection round | 100 total, successes and failures |
 | stage 1 world/policy budget per round | 20,000 optimizer steps |
 | stage 2 Value/Q budget per round | 10,000 optimizer steps |
 | training GPUs / batch per GPU / accumulation | 6,7 / 8 / 1 (effective batch 16) |
 
 These are defaults for new runs, not overrides of saved continuation configs.
-RoboNana uses FACT's `mixed_precision="bf16"`: FLUX, online Q/V and Value EMA
-use BF16 parameters in training and evaluation. Saved runs/processes retain
+RoboNana uses FACT's `mixed_precision="bf16"`: FLUX and online Q/V use BF16
+parameters. Value EMA stores/updates FP32 weights and evaluates with BF16
+autocast on the shared BF16 FLUX cache. Saved runs/processes retain
 their original execution until explicitly resumed/restarted. Frozen Qwen and
 the unified VAE/cache preprocessing contract below are unchanged.
 
@@ -243,7 +244,7 @@ At the beginning of a new critic phase:
 ```text
 online Value  <- exact Value expert from loaded checkpoint
 online Q      <- exact Q expert from loaded checkpoint
-target Value  <- deepcopy(online Value), retaining BF16
+target Value  <- deepcopy(online Value), converted to FP32 for EMA accumulation
 ```
 
 When resuming the same critic phase, the saved target Value and EMA metadata
@@ -379,7 +380,7 @@ saved model config agree with `mac_mot_v2`.
 If resume reports missing frozen FLUX keys, it is an incomplete pre-fix
 checkpoint and must not be force-loaded. Start from the nearest complete MAC
 checkpoint. If only target Value is missing at a new critic phase, copy the
-loaded online Value expert into a fresh BF16 target; do not copy an unrelated
+loaded online Value expert into a fresh FP32 target; do not copy an unrelated
 target from another run.
 
 ## Numerical policy
@@ -396,13 +397,19 @@ FACT has no MAC Q/V implementation; our existing experts inherit the same dtype.
 |---|---|---|---|
 | world-policy / FLUX | BF16, trainable | BF16, frozen/eval | BF16, eval |
 | online Q / V | BF16, frozen | BF16, trainable | Q BF16 for argmax; V normally unused |
-| Value EMA | absent | BF16, frozen/eval target | unused; BF16 if explicitly evaluated |
+| Value EMA | absent | FP32 storage/update, BF16 autocast forward, frozen/eval | unused; same mixed-precision forward if evaluated |
 
-Value EMA inherits online Value's dtype, updates with a single `lerp_`, and
-saves that dtype. Like any BF16-stored EMA, updates below BF16 resolution can
-round away; there is no hidden FP32 master copy. New phases copy online Value;
-same-phase resume restores the saved target. FP32 checkpoint tensors load into
-the current BF16 modules through PyTorch's normal copy/cast behavior.
+中文：Value EMA 只保留一份 FP32 权重，更新和保存均为 FP32；通过 BF16
+autocast 读取已有 BF16 FLUX cache 做混合精度前向，不把 EMA 本体转成 BF16。
+
+Value EMA has one persistent FP32 copy, updated with FP32 `lerp_` and saved
+as FP32. Its target forward uses BF16 autocast; it neither recomputes FLUX in
+FP32 nor casts cached K/V. This is mixed-precision forward, not pure BF16.
+New phases copy online Value into FP32; same-phase resume restores the target.
+Legacy BF16 target checkpoints are upcast on load; already-lost increments
+cannot be recovered. Online model checkpoint loading still uses BF16.
+VAE decoding preserves BN buffer precision (FP32) for sqrt(var+eps) and inverse
+normalization before unpatchifying and decoding, matching official FLUX.
 Loss/return reductions stay FP32, as do normalization and reporting boundaries.
 Stage-1 noise follows FACT's ordering: keep clean action/future state/latents,
 sample noise, broadcast sigma and form noisy inputs and velocity targets in

@@ -52,7 +52,7 @@ The single FLUX sequence is
 
 Phase 1 trains FLUX actor/world parameters. BC is success-masked; world losses
 use both success and failure windows. Phase 2 freezes FLUX and trains only the
-deterministic Value/Q MoT experts. Value has one BF16 EMA target; Q has no EMA.
+deterministic Value/Q MoT experts. Value has one FP32 EMA target; Q has no EMA.
 The Value EMA is initialized from the current online Value expert at the start
 of every new critic phase and restored only when resuming that same phase.
 
@@ -69,10 +69,12 @@ accumulation 1 (effective batch 16). Explicit environment overrides remain
 supported. Existing saved experiment configs and running processes are not
 rewritten; a historical continuation can still restore batch 4 / accumulation 2.
 
-RoboNana follows FACT BF16: FLUX training, action/world rollout, online Q/V,
-Value EMA and environment inference use BF16. FACT Trainer/Accelerate owns
+RoboNana follows FACT BF16: FLUX training, action/world rollout, online Q/V
+and environment inference use BF16. FACT Trainer/Accelerate owns
 mixed precision; the FP32-only guards and forced-autocast-off wrapper are removed.
-EMA inherits online dtype and uses one lerp; return/loss math stays FP32.
+Value EMA storage/update/save is FP32 with one persistent copy. Its forward
+uses BF16 autocast on the BF16 FLUX cache, without recasting weights or K/V.
+Return/loss math and VAE BN inverse normalization stay FP32.
 Stage 1 constructs noise/noisy inputs/velocity targets in FP32 before casting
 model inputs to BF16, following FACT. Do not cast clean targets or sigma early.
 Stage 2 still generates model-facing inference noise directly in BF16.
