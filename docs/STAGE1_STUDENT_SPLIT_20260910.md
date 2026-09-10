@@ -40,7 +40,7 @@ Action-only 的 Q 为 null，而不是伪造为0或重新计算无关 Q。
 ## 一步学生 / One-step student
 
 入口 `scripts/diagnostics/train_action_student.py`，当前正式实验显式设置20000步、
-batch112/card、accumulation1、global224、LR1e-4、warmup100、cosine20000；
+batch104/card、accumulation1、global208、LR1e-4、warmup100、cosine20000；
 每100步固定验证、每1000步保存。未将batch112设成适用于所有GPU的默认值。
 从旧pilot的完整step1500保存点恢复学生和Adam，终点为总step20000（余18500步），
 延长cosine预算并重算当前位置LR，不重置Adam、不沿用2000步末尾接近零的LR。
@@ -87,11 +87,14 @@ FP32 student/Adam masters，BF16 autocast；教师BF16且冻结；MSE为FP32。
   不重启当前Stage1采集，接着跑独立20场景。两个120k任务均未开始。
   报告分别在`fixed100_stage1/selected_world/index.html`、
   `heldout20_stage1/selected_world/index.html`，每组完成后生成；图片/JSON边跑边保存。
-- 当前20k学生：`experiments/hanging_mug_action_student_bs112_20k_20260910`；
-  日志`outputs/hanging_mug_fixed100_20260909/student_bs112_20k.launch.log`。
+- 当前20k学生：`experiments/hanging_mug_action_student_bs104_20k_20260910`；
+  日志`outputs/hanging_mug_fixed100_20260909/student_bs104_20k.launch.log`。
   支持同两卡学生/Adam恢复，旧pilot scheduler按原公式重建，新checkpoint保存scheduler。
   变更batch后不是逐位相同的数据和随机噪声轨迹。
 - 两卡完整前向/反向/Adam三步实测：batch48峰值allocated83.52GiB/reserved84.04GiB；
   batch112峰值allocated169.70GiB/reserved172.20GiB。不是只测教师推理。
+  但正式恢复Adam、执行验证后，112首个训练反向OOM（进程178.28GiB，碎片/空闲
+  reserved7.50GiB，再申请558MiB失败），未产生新更新。因此短测112不是稳定上限，
+  正式改为104/card以留出验证切换和allocator余量，不改精度或模型。
 - Universal只用于加载转换目录；后续从新保存的原生四卡checkpoint恢复时，要使用
   原生DeepSpeed配置，不要对原生checkpoint继续开启Universal标志。
