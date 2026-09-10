@@ -68,3 +68,31 @@ def test_episode_split_is_stable_for_all_windows():
         records=[SimpleNamespace(source=Path('same_source'),episode_index=episode,window=t)
                  for t in range(10)]
         assert len({scope['heldout_episode'](r) for r in records})==1
+
+
+def test_student_extended_schedule_preserves_adam_state():
+    import ast
+    import math
+    from pathlib import Path
+    path=Path(__file__).resolve().parents[1]/'scripts/diagnostics/train_action_student.py'
+    nodes=[n for n in ast.parse(path.read_text(encoding='utf-8')).body
+           if isinstance(n,ast.FunctionDef) and n.name in
+           ('student_lr_multiplier','restore_student_schedule')]
+    scope={'math':math}
+    exec(compile(ast.Module(body=nodes,type_ignores=[]),str(path),'exec'),scope)
+    parameter=torch.nn.Parameter(torch.ones(2))
+    opt=torch.optim.AdamW([parameter],lr=1e-4)
+    scheduler=torch.optim.lr_scheduler.LambdaLR(opt,
+        lambda step:scope['student_lr_multiplier'](step,20000))
+    parameter.sum().backward();opt.step()
+    moments=opt.state[parameter]['exp_avg'].clone()
+    adam_step=opt.state[parameter]['step'].clone()
+    opt.param_groups[0]['lr']=6.8e-7
+    scope['restore_student_schedule'](scheduler,opt,1500,2000,20000)
+    assert 9.8e-5 < opt.param_groups[0]['lr'] < 1e-4
+    assert torch.equal(moments,opt.state[parameter]['exp_avg'])
+    assert torch.equal(adam_step,opt.state[parameter]['step'])
+    assert scope['student_lr_multiplier'](20000,20000)==0
+    opt.param_groups[0]['lr']=3e-5
+    scope['restore_student_schedule'](scheduler,opt,1500,20000,20000)
+    assert opt.param_groups[0]['lr']==3e-5

@@ -30,7 +30,7 @@ from robonana.data.robotwin_lerobot import RoboTwinLeRobotDataset
 from robonana.models.flux2_action_student import build_action_student
 from robonana.models.pretrained import load_flux2_fact_trained_checkpoint
 from robonana.sampling import prefill_mac_condition, sample_action_flow, flow_euler_schedule
-from robonana.training.continuation import restore_config_tuples
+from robonana.training.continuation import restore_config_tuples, validate_universal_adam
 from robonana.inference_contract import sha256_file
 
 
@@ -39,6 +39,25 @@ def heldout_episode(record):
     # English: Stable episode split; validation noise uses a separate generator.
     identity = f"{record.source.resolve()}:{record.episode_index}"
     return int(hashlib.sha256(identity.encode()).hexdigest()[:8], 16) % 10 == 0
+
+
+def student_lr_multiplier(step, total_steps):
+    """中文：单一warmup/cosine公式。English: Shared fresh/extended-run schedule."""
+    warmup = min(100, max(1, total_steps // 10))
+    progress = min(1., max(0, step-warmup) / max(1,total_steps-warmup))
+    return min((step+1)/warmup, 1.) * .5 * (1 + math.cos(math.pi*progress))
+
+
+def restore_student_schedule(scheduler, optimizer, step, old_budget, new_budget):
+    """中文：延长预算只重算LR，不重置Adam。English: Rebase LR, retain moments."""
+    if new_budget < old_budget:
+        raise ValueError('student continuation cannot shorten the saved training budget')
+    scheduler.last_epoch = step
+    scheduler._step_count = step + 1
+    if new_budget > old_budget:
+        for group, base_lr in zip(optimizer.param_groups, scheduler.base_lrs):
+            group['lr'] = base_lr * student_lr_multiplier(step,new_budget)
+    scheduler._last_lr = [group['lr'] for group in optimizer.param_groups]
 
 
 def student_pe(teacher, batch, device):
@@ -53,12 +72,12 @@ def main():
     p.add_argument('--teacher', type=Path, required=True)
     p.add_argument('--config', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--steps', type=int, default=2000)
+    p.add_argument('--steps', type=int, default=20000)
     p.add_argument('--batch-size', type=int, default=8)
     p.add_argument('--hidden-dim', type=int, default=1024)
     p.add_argument('--lr', type=float, default=1e-4)
     p.add_argument('--eval-every', type=int, default=100)
-    p.add_argument('--save-every', type=int, default=500)
+    p.add_argument('--save-every', type=int, default=1000)
     p.add_argument('--seed', type=int, default=20260910)
     p.add_argument('--offline', action='store_true')
     p.add_argument('--resume',type=Path,help='Resume this student Accelerate checkpoint; never reload teacher from it')
@@ -113,9 +132,8 @@ def main():
     student = build_action_student(teacher, args.hidden_dim).to(acc.device)
     optimizer = torch.optim.AdamW(student.parameters(), lr=args.lr, betas=(.9, .95),
                                  weight_decay=1e-4, fused=True)
-    warmup = min(100, max(1, args.steps // 10))
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step:
-        min((step + 1) / warmup, 1.) * .5 * (1 + math.cos(math.pi * max(0, step-warmup) / max(1,args.steps-warmup))))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer,
+        lambda step: student_lr_multiplier(step,args.steps))
     classes = {c.__name__: c for c in (RoboTwinHDF5Dataset, RoboTwinLeRobotDataset)}
     children, validation, manifest = [], [], []
     for pool in cfg['dataloaders']['train']['data_or_config']:
@@ -144,7 +162,7 @@ def main():
     start_step = 0
     if args.resume:
         saved = json.loads((args.resume.parent/'config.json').read_text())
-        for key in ('teacher','config','hidden_dim','lr','seed','steps'):
+        for key in ('teacher','config','hidden_dim','lr','seed'):
             if str(saved[key]) != str(getattr(args,key)):
                 raise ValueError(f'student resume contract mismatch: {key}')
         if saved['world_size'] != acc.num_processes:
@@ -157,9 +175,12 @@ def main():
         acc.load_state(str(args.resume))
         # 中文：旧pilot未保存scheduler，按相同预算重建其确定性计数，不重置Adam。
         # English: Reconstruct the original LambdaLR counter; preserve loaded Adam moments.
-        scheduler.last_epoch = start_step
-        scheduler._step_count = start_step + 1
-        scheduler._last_lr = [group['lr'] for group in optimizer.param_groups]
+        restore_student_schedule(scheduler,optimizer,start_step,saved['steps'],args.steps)
+        # Reuse the existing fused-Adam state audit/device fix, not a second loader.
+        validate_universal_adam(optimizer,start_step)
+        print(json.dumps(dict(rank=acc.process_index,resume_step=start_step,
+            adam_verified=True,old_budget=saved['steps'],new_budget=args.steps,
+            lr=scheduler.get_last_lr()[0])),flush=True)
     if not args.resume or not (args.resume/'custom_checkpoint_0.pkl').exists():
         acc.register_for_checkpointing(scheduler)
     # Keep scheduler local: one step per optimizer update, never multiply by ranks.
@@ -237,7 +258,9 @@ def main():
             raise RuntimeError('teacher gradient leakage')
         if step%10==0:
             metrics=dict(distill_loss=acc.reduce(loss.detach(),reduction='mean').item(),
-                         lr=scheduler.get_last_lr()[0],seconds_per_step=(time.perf_counter()-tic)/10)
+                         lr=scheduler.get_last_lr()[0],seconds_per_step=(time.perf_counter()-tic)/10,
+                         peak_allocated_gib=torch.cuda.max_memory_allocated(acc.device)/2**30,
+                         peak_reserved_gib=torch.cuda.max_memory_reserved(acc.device)/2**30)
             acc.log(metrics,step=step)
             if acc.is_main_process:print(json.dumps(dict(step=step,**metrics)),flush=True)
             tic=time.perf_counter()
