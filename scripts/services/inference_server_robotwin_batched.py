@@ -61,8 +61,17 @@ def main() -> int:
     parser.add_argument("--max-batch-wait-ms", type=float, default=100.0)
     parser.add_argument("--max-clients", type=int, default=16)
     parser.add_argument("--batch-metrics-path", type=Path, default=None)
+    parser.add_argument("--action-student", type=Path, default=None,
+                        help="Explicit isolated student evaluation; never enabled by MAC training")
     args = parser.parse_args()
-    policy = BatchedRoboNanaRobotWinPolicy(
+    policy_class = BatchedRoboNanaRobotWinPolicy
+    extra = {}
+    if args.action_student:
+        from robonana.inference.student_policy import StudentRobotWinPolicy
+        policy_class = StudentRobotWinPolicy
+        extra['student_checkpoint'] = args.action_student
+    policy = policy_class(
+        **extra,
         checkpoint=args.checkpoint,
         model_config=args.model_config,
         flux_checkpoint_dir=args.flux_checkpoint_dir,

@@ -52,6 +52,8 @@ def main():
     parser.add_argument('--collection-round', type=int, default=0)
     parser.add_argument('--selected-world', action='store_true',
                         help='Save predictions for executed chunks; needs a trained world-capable checkpoint')
+    parser.add_argument('--action-student', type=Path,
+                        help='Optional isolated student weights, action-only evaluation')
     opts = parser.parse_args()
     if not 1 <= opts.inference_batch_size <= 8 or not 1 <= opts.candidate_batch_size <= 32:
         parser.error("request batch must be 1..8 and candidate batch 1..32")
@@ -111,6 +113,8 @@ def main():
         "--max-batch-wait-ms", str(opts.batch_wait_ms), "--max-clients", "8",
         "--batch-metrics-path", str(output / "batch_metrics.jsonl")]
     configuration = {k: str(v) if isinstance(v, Path) else v for k, v in vars(opts).items()}
+    if opts.action_student:
+        server_cmd += ['--action-student',str(opts.action_student.resolve())]
     configuration["source_episodes"] = [str(p) for p in opts.source_episodes]
     configuration["commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     (output / "config.json").write_text(json.dumps(configuration, indent=2), encoding="utf-8")
