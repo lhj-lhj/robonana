@@ -92,6 +92,13 @@ def test_continuation_preserves_data_and_optimizer_with_current_execution():
     assert larger["dataloaders"]["train"]["data_or_config"] == config["dataloaders"]["train"]["data_or_config"]
     assert "eval_horizons" in source["dataloaders"]["train"]["data_or_config"][0]
     assert larger["schedulers"]["decay_steps"] == 17000
+    same = build_critic_continuation(source, checkpoint=Path("source/ckpt"),
+        source_config=Path("source/config.json"), project_dir=Path("four"),
+        max_steps=5000, batch_size_per_gpu=32, gpu_ids=(0, 1, 2, 3), accumulation_steps=2)
+    assert same["launch"]["gpu_ids"] == [0, 1, 2, 3]
+    assert same["train"]["gradient_accumulation_steps"] == 2
+    assert same["train"]["rebase_scheduler_on_resume"] is False
+    assert same["schedulers"]["decay_steps"] == 5000
     with pytest.raises(ValueError, match="positive integer"):
         build_critic_continuation(source, checkpoint=Path("source/ckpt"),
                                   source_config=Path("source/config.json"),

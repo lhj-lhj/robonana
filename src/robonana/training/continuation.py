@@ -128,3 +128,34 @@ def rebase_loaded_scheduler(wrapped, step):
         group["lr"] = rate
     scheduler._last_lr = rates
     return rates
+
+
+def validate_universal_adam(optimizer, expected_step):
+    """中文：官方 UC 已恢复 moments；只修正 fused Adam step 的设备。
+    English: DeepSpeed UC restores scalar step on CPU; PyTorch fused AdamW
+    needs it on the parameter device. Never reset/reconstruct optimizer state.
+    """
+    import torch
+    seen = set()
+    while not isinstance(optimizer, torch.optim.Optimizer):
+        if id(optimizer) in seen or not hasattr(optimizer, "optimizer"):
+            raise TypeError("cannot locate restored torch optimizer")
+        seen.add(id(optimizer))
+        optimizer = optimizer.optimizer
+    counts = 0
+    for group in optimizer.param_groups:
+        for parameter in group["params"]:
+            state = optimizer.state[parameter]
+            if not {"step", "exp_avg", "exp_avg_sq"} <= state.keys():
+                raise ValueError("Universal checkpoint did not restore Adam moments")
+            if int(state["step"]) != expected_step:
+                raise ValueError("Universal Adam/global step mismatch")
+            for key in ("exp_avg", "exp_avg_sq"):
+                if state[key].shape != parameter.shape or not torch.isfinite(state[key]).all():
+                    raise ValueError("invalid restored Adam moment shape/values")
+            if group.get("fused") or group.get("capturable"):
+                state["step"] = torch.as_tensor(state["step"], device=parameter.device)
+            counts += 1
+    if not counts:
+        raise ValueError("Universal optimizer is empty")
+    return counts

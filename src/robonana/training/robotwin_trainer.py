@@ -447,6 +447,14 @@ class RoboNanaTrainer(Trainer):
         # first launch falls back to the explicitly selected source checkpoint.
         checkpoint = checkpoint or self.get_checkpoint() or self.kwargs.get("resume_from")
         super().resume(checkpoint)
+        if self._get_deepspeed_config().get("checkpoint", {}).get("load_universal", False):
+            from robonana.training.continuation import validate_universal_adam
+            counts = [validate_universal_adam(opt, self.cur_step) for opt in self.optimizers]
+            if self.target_value_ema is None or self.target_value_ema.update_count != self.cur_step:
+                raise ValueError("Universal resume requires matching Value EMA step")
+            self.logger.info("UNIVERSAL ADAM VERIFIED: step=%d groups=%s EMA=%d LR=%s",
+                             self.cur_step, counts, self.target_value_ema.update_count,
+                             self._get_logged_lrs())
         if not self.kwargs.get("rebase_scheduler_on_resume", False):
             return
         if checkpoint is None or not 0 < self.cur_step < self.max_steps:
