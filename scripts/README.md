@@ -92,6 +92,14 @@ algorithms or sampling defaults.
 
 ### internal — 内部辅助 / Internal helpers
 
+Stage 2 分段短测 / Stage-2 timing: `diagnostics/benchmark_mac_world_cache.py`
+增加 `--stage2-breakdown --batch-size 1 --repeats 5`，并传入完整模型权重、
+模型配置及 Stage-2 数据配置；可用 `--target-value` 加载对应 EMA。
+复用生产采样、target、loss 和 EMA；仅更新临时模型，不保存权重。
+Uses synchronized timings after two warmups. Shared-GPU results are contended;
+local BF16 AdamW is a proxy, not eight-rank DeepSpeed timing. Loading and data
+I/O are excluded. Do not extrapolate these percentages to full-batch training.
+
 - `train_robotwin.py`: Shell 训练入口调用的 FACT launcher 适配 / FACT launcher adapter called by the training shell entry.
 - `eval_robotwin_task_isolated.py`: 并行评测调用的单任务隔离执行器 / Isolated task runner called by parallel evaluation.
 - `collect_robotwin_pool_worker.py`: 并行采集管理器启动的 worker / Worker spawned by the collection supervisor.
