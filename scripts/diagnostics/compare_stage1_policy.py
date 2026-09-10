@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # 中文：隔离的 Stage1/预训练配对评测；结果不自动进入 replay。
 # English: Paired evaluation orchestrator using existing collector and report.
+# 调用 / Invocation: python script --help；创建独立评测目录 / creates isolated eval output.
 import argparse
 import json
 import os
@@ -39,11 +40,15 @@ def main():
             subprocess.run(cmd,cwd=root,env=dict(env,**(extra or {})),stdout=f,stderr=subprocess.STDOUT,check=True)
     # Prepare disjoint, expert-feasible held-out scenes. No policy-success filtering.
     held=args.output/'heldout_preflight'
+    runtime=args.output/'seed_runtime'
+    runtime.mkdir(mode=0o700)
     run([str(args.sim_python),str(root/'scripts/internal/collect_robotwin_pool_worker.py'),
          '--prepare-seeds','20','--seed-start','300000','--robotwin',str(args.robotwin),
          '--output',str(held),'--port',str(args.port),'--worker-id','heldout',
          '--vector-env-checkout',str(root/'third_party/RoboTwin_RLinf')],args.output/'heldout_prepare.log',
-         dict(CUDA_VISIBLE_DEVICES=str(args.sim_gpu)))
+         dict(CUDA_VISIBLE_DEVICES=str(args.sim_gpu),ROBONANA_SAPIEN_RENDER_DEVICE='cuda:0',
+              OIDN_DEFAULT_DEVICE='cuda',ROBONANA_ROBOTWIN_STATIC_CAMERAS='head_camera',
+              XDG_RUNTIME_DIR=str(runtime)))
     manifests={'fixed100':args.seeds,'heldout20':held/'accepted_seeds.json'}
     a=json.loads(args.seeds.read_text());b=json.loads(manifests['heldout20'].read_text())
     assert not ({j['seed'] for j in a['jobs']} & {j['seed'] for j in b['jobs']})

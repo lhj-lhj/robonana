@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # 中文：离线调用 DeepSpeed 官方转换；原始 checkpoint 只读，目标必须新建。
 # English: Official offline conversion; never overwrite the source checkpoint.
+# 调用 / Invocation: python script --help；只写新目录 / writes a new directory only.
 """Prepare an Accelerate checkpoint for an explicitly changed DP world size.
 
 Reference: DeepSpeed checkpoint/ds_to_universal.py (installed version owns

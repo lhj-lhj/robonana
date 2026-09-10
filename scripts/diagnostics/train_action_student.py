@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # 中文：独立蒸馏实验入口；不修改/保存教师，不接入 Stage 2。
 # English: Isolated two-GPU student experiment, not a new MAC training phase.
+# 调用 / Invocation: torchrun --nproc_per_node=2 script，或 --launch / or --launch.
 """Distill final actions from the frozen production 20-step teacher.
 
 MAC agents/mac.py::bc_actor_loss supplies the same-noise supervised objective:
@@ -15,6 +16,9 @@ import json
 import math
 from pathlib import Path
 import time
+import os
+import subprocess
+import sys
 
 import torch
 from accelerate import Accelerator
@@ -57,9 +61,37 @@ def main():
     p.add_argument('--save-every', type=int, default=500)
     p.add_argument('--seed', type=int, default=20260910)
     p.add_argument('--offline', action='store_true')
+    p.add_argument('--launch', action='store_true',help='Launch two ranks, then evaluate saved student after both exit')
+    p.add_argument('--eval-jobs',type=Path)
+    p.add_argument('--heldout-jobs',type=Path)
+    p.add_argument('--sim-python',default='/data3/hongjia/venvs/robotwin-sapien303/bin/python')
+    p.add_argument('--robotwin',default='/workspace/hongjia/RoboTwin')
+    p.add_argument('--initial-dataset',default='/workspace/datasets/fact-robotwin-v2/RoboTwin')
     args = p.parse_args()
     if min(args.steps, args.batch_size, args.eval_every, args.save_every) < 1:
         p.error('positive step/batch/intervals required')
+    if args.launch:
+        if not args.eval_jobs:p.error('--launch requires --eval-jobs for post-training environment validation')
+        root=Path(__file__).resolve().parents[2]
+        command=[sys.executable,'-m','torch.distributed.run','--nproc_per_node=2','--master_port=29617',
+                 str(Path(__file__).resolve()),*[x for x in sys.argv[1:] if x!='--launch']]
+        subprocess.run(command,cwd=root,check=True)
+        complete=json.loads((args.output/'complete.json').read_text())
+        if complete['step']!=args.steps:raise RuntimeError('student did not finish expected budget')
+        checkpoint=args.output/f'step_{args.steps:06d}'/'model.safetensors'
+        for split,jobs in [('fixed100',args.eval_jobs),('heldout20',args.heldout_jobs)]:
+            if jobs is None:continue
+            cmd=[sys.executable,str(root/'scripts/diagnostics/benchmark_robotwin_collection_pool.py'),
+                 '--jobs-json',str(jobs),'--sim-gpus','7','7','--server-gpu','6',
+                 '--sim-python',args.sim_python,'--robotwin',args.robotwin,
+                 '--checkpoint',str(args.teacher),'--model-config',str(args.config),
+                 '--initial-dataset',args.initial_dataset,'--output',str(args.output/f'eval_{split}'),
+                 '--inference-mode','action_only','--action-student',str(checkpoint),
+                 '--inference-batch-size','2','--batch-wait-ms','10','--port','8494',
+                 '--timeout-seconds','43200']
+            with (args.output/f'eval_{split}.log').open('x') as f:
+                subprocess.run(cmd,cwd=root,stdout=f,stderr=subprocess.STDOUT,check=True)
+        return
     acc = Accelerator(mixed_precision='bf16', log_with=None if args.offline else 'wandb')
     set_seed(args.seed)
     if acc.is_main_process:
