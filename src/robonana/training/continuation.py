@@ -58,7 +58,7 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
 
 
 def build_critic_continuation(source, *, checkpoint, source_config, project_dir, max_steps,
-                              batch_size_per_gpu=8):
+                              batch_size_per_gpu=8, gpu_ids=(6, 7), accumulation_steps=1):
     """Reuse replay and optimization settings, with current FACT BF16 defaults.
 
     This is continuation of the same critic phase, so restore online Q/V,
@@ -69,11 +69,16 @@ def build_critic_continuation(source, *, checkpoint, source_config, project_dir,
         raise ValueError("batch_size_per_gpu must be a positive integer")
     if config["models"]["train_mode"] != "critic":
         raise ValueError("continuation requires a critic checkpoint")
-    if max_steps <= config["train"]["max_steps"]:
-        raise ValueError("max_steps must extend the source training budget")
+    if max_steps < config["train"]["max_steps"]:
+        raise ValueError("max_steps must not shorten the source training budget")
+    if not gpu_ids or len(set(gpu_ids)) != len(gpu_ids) or any(type(g) is not int or g < 0 for g in gpu_ids):
+        raise ValueError("gpu_ids must be distinct nonnegative integers")
+    if type(accumulation_steps) is not int or accumulation_steps < 1:
+        raise ValueError("accumulation_steps must be a positive integer")
+    extend_schedule = max_steps > config["train"]["max_steps"]
     config["project_dir"] = str(project_dir)
     config["runners"] = ["robonana.training.robotwin_trainer.RoboNanaTrainer"]
-    config["launch"]["gpu_ids"] = [6, 7]
+    config["launch"]["gpu_ids"] = list(gpu_ids)
     config["launch"]["until_completion"] = False
     config["models"]["checkpoint"] = str(checkpoint / "transformer/diffusion_pytorch_model.bin")
     config["models"]["checkpoint_config"] = str(source_config)
@@ -90,8 +95,8 @@ def build_critic_continuation(source, *, checkpoint, source_config, project_dir,
     config["train"].pop("pixel_eval_interval", None)
     config["train"].get("loss_weights", {}).pop("dino_loss", None)
     config["train"].update(
-        max_steps=max_steps, gradient_accumulation_steps=1, mixed_precision="bf16",
-        resume=True, resume_from=str(checkpoint), rebase_scheduler_on_resume=True,
+        max_steps=max_steps, gradient_accumulation_steps=accumulation_steps, mixed_precision="bf16",
+        resume=True, resume_from=str(checkpoint), rebase_scheduler_on_resume=extend_schedule,
         checkpoint_interval=1000, early_checkpoint_steps=(), checkpoint_total_limit=3,
         checkpoint_save_optimizer=True, log_interval=10, log_with="wandb",
     )

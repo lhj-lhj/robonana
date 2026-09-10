@@ -17,4 +17,13 @@ config = build_critic_continuation(
     source_config=source_config, project_dir=project,
     max_steps=int(os.environ.get("ROBONANA_MAX_STEPS", "10000")),
     batch_size_per_gpu=int(os.environ.get("ROBONANA_BATCH_SIZE_PER_GPU", "8")),
+    gpu_ids=tuple(int(x) for x in os.environ.get("ROBONANA_GPU_IDS", "6,7").split(",")),
+    accumulation_steps=int(os.environ.get("ROBONANA_GRADIENT_ACCUMULATION_STEPS", "1")),
 )
+# 中文：官方 Universal 恢复是显式选项；不改变常规续训的分片格式。
+# English: Opt in only for a separately converted official Universal checkpoint.
+if os.environ.get("ROBONANA_UNIVERSAL_CHECKPOINT") == "1":
+    ds_config = checkpoint / "deepspeed_universal.json"
+    if not ds_config.is_file():
+        raise FileNotFoundError(ds_config)
+    config["launch"]["deepspeed_config"] = {"deepspeed_config_file": str(ds_config)}
