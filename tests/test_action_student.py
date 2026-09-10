@@ -36,3 +36,35 @@ def test_universal_adam_audit_rejects_reset_step():
     assert torch.equal(opt.state[parameter]['exp_avg'],state)
     with pytest.raises(ValueError,match='step mismatch'):
         validate_universal_adam(opt,4000)
+
+
+def test_stage1_only_excludes_both_pretrain_splits():
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+    path = Path(__file__).resolve().parents[1]/'scripts/diagnostics/compare_stage1_policy.py'
+    spec = importlib.util.spec_from_file_location('stage1_comparison',path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    args = SimpleNamespace(stage1_only=True,stage1='teacher',stage1_config='config',
+                           pretrain='baseline',pretrain_config='baseline_config')
+    assert module.evaluation_policies(args) == [('stage1','teacher','config')]
+    args.stage1_only = False
+    assert len(module.evaluation_policies(args)) == 2
+
+
+def test_episode_split_is_stable_for_all_windows():
+    # Execute only the pure split helper: no training or heavy imports.
+    import ast
+    import hashlib
+    from pathlib import Path
+    from types import SimpleNamespace
+    path=Path(__file__).resolve().parents[1]/'scripts/diagnostics/train_action_student.py'
+    node=next(n for n in ast.parse(path.read_text(encoding='utf-8')).body
+              if isinstance(n,ast.FunctionDef) and n.name=='heldout_episode')
+    scope={'hashlib':hashlib}
+    exec(compile(ast.Module(body=[node],type_ignores=[]),str(path),'exec'),scope)
+    for episode in range(50):
+        records=[SimpleNamespace(source=Path('same_source'),episode_index=episode,window=t)
+                 for t in range(10)]
+        assert len({scope['heldout_episode'](r) for r in records})==1

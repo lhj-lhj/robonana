@@ -61,6 +61,8 @@ def main():
     p.add_argument('--save-every', type=int, default=500)
     p.add_argument('--seed', type=int, default=20260910)
     p.add_argument('--offline', action='store_true')
+    p.add_argument('--resume',type=Path,help='Resume this student Accelerate checkpoint; never reload teacher from it')
+    p.add_argument('--memory-probe',action='store_true',help='Run real training updates and report peak memory without saving or evaluating')
     p.add_argument('--launch', action='store_true',help='Launch two ranks, then evaluate saved student after both exit')
     p.add_argument('--eval-jobs',type=Path)
     p.add_argument('--heldout-jobs',type=Path)
@@ -68,6 +70,8 @@ def main():
     p.add_argument('--robotwin',default='/workspace/hongjia/RoboTwin')
     p.add_argument('--initial-dataset',default='/workspace/datasets/fact-robotwin-v2/RoboTwin')
     args = p.parse_args()
+    if args.memory_probe and (args.launch or not args.offline):
+        p.error('--memory-probe requires --offline and cannot launch environment evaluation')
     if min(args.steps, args.batch_size, args.eval_every, args.save_every) < 1:
         p.error('positive step/batch/intervals required')
     if args.launch:
@@ -137,6 +141,27 @@ def main():
     sampler = RoboTwinPosttrainSampler(dataset, batch_size=args.batch_size * acc.num_processes, **sampler_cfg)
     loader = DataLoader(dataset, batch_size=args.batch_size, sampler=sampler, num_workers=0)
     student, optimizer, loader = acc.prepare(student, optimizer, loader)
+    start_step = 0
+    if args.resume:
+        saved = json.loads((args.resume.parent/'config.json').read_text())
+        for key in ('teacher','config','hidden_dim','lr','seed','steps'):
+            if str(saved[key]) != str(getattr(args,key)):
+                raise ValueError(f'student resume contract mismatch: {key}')
+        if saved['world_size'] != acc.num_processes:
+            raise ValueError('student resume requires unchanged DDP world size')
+        start_step = int(args.resume.name.removeprefix('step_'))
+        if start_step >= args.steps:
+            raise ValueError('resume must leave at least one optimizer update')
+        if (args.resume/'custom_checkpoint_0.pkl').exists():
+            acc.register_for_checkpointing(scheduler)
+        acc.load_state(str(args.resume))
+        # 中文：旧pilot未保存scheduler，按相同预算重建其确定性计数，不重置Adam。
+        # English: Reconstruct the original LambdaLR counter; preserve loaded Adam moments.
+        scheduler.last_epoch = start_step
+        scheduler._step_count = start_step + 1
+        scheduler._last_lr = [group['lr'] for group in optimizer.param_groups]
+    if not args.resume or not (args.resume/'custom_checkpoint_0.pkl').exists():
+        acc.register_for_checkpointing(scheduler)
     # Keep scheduler local: one step per optimizer update, never multiply by ranks.
     metadata = {**{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
                 'teacher_frozen':True,'student_only':True,'world_size':acc.num_processes,
@@ -190,10 +215,14 @@ def main():
             with (args.output/'metrics.jsonl').open('a') as f:f.write(json.dumps(dict(step=step,**metrics))+'\n')
             print(json.dumps(dict(step=step,**metrics)),flush=True)
         student.train()
-    validate(0)
+    if not args.memory_probe:validate(start_step)
     gen=torch.Generator(device=acc.device).manual_seed(args.seed+acc.process_index)
+    # 中文：变更batch后不是逐位重放；使用不同随机流，避免从第一个训练噪声重来。
+    # English: A batch-size change is not bitwise replay; do not restart the old noise stream.
+    if start_step:gen.manual_seed(args.seed+acc.process_index+start_step*acc.num_processes)
+    torch.cuda.reset_peak_memory_stats(acc.device)
     tic=time.perf_counter()
-    for step,item in enumerate(loader,1):
+    for step,item in enumerate(loader,start_step+1):
         cache,noise,target,pe=target_and_cache(item,gen)
         with acc.autocast(): prediction=student(cache,noise=noise,query_pe=pe)
         loss=(prediction.float()-target.float()).square().mean()
@@ -213,12 +242,19 @@ def main():
             if acc.is_main_process:print(json.dumps(dict(step=step,**metrics)),flush=True)
             tic=time.perf_counter()
         del cache,noise,target,pe,prediction,loss
+        if args.memory_probe:
+            torch.cuda.synchronize(acc.device)
+            print(json.dumps(dict(rank=acc.process_index,step=step,batch=args.batch_size,
+                peak_allocated_gib=torch.cuda.max_memory_allocated(acc.device)/2**30,
+                peak_reserved_gib=torch.cuda.max_memory_reserved(acc.device)/2**30)),flush=True)
+            if step>=args.steps:break
+            continue
         if step%args.eval_every==0 or step==args.steps:validate(step)
         if step%args.save_every==0 or step==args.steps:
             acc.save_state(str(args.output/f'step_{step:06d}'))
         if step>=args.steps:break
     acc.wait_for_everyone()
-    if acc.is_main_process:
+    if acc.is_main_process and not args.memory_probe:
         (args.output/'complete.json').write_text(json.dumps({'step':step,'teacher_unchanged':True}))
     for child in children:child.close()
     acc.end_training()
