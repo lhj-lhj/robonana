@@ -11,6 +11,21 @@ from robonana.models.position_ids import image_position_ids
 from robonana.sampling import evaluate_mac_critics, sample_mac_world
 
 
+def test_stage2_timing_excludes_nested_scopes():
+    """中文：分段和必须等于总时间。 English: Never double-count scopes."""
+    import runpy
+    from pathlib import Path
+    module = runpy.run_path(str(Path(__file__).resolve().parents[1] /
+                               "scripts/diagnostics/benchmark_mac_world_cache.py"))
+    source = dict(rollout=10.0, rejection=4.0, action=3.0, q_score=0.5,
+                  world=5.0, backward=2.0)
+    result = module["exclusive_times"](source)
+    assert result["prefix_selection_overhead"] == 0.5
+    assert result["bootstrap_other"] == 1.0
+    assert sum(result.values()) == 12.0
+    assert source["rollout"] == 10.0  # caller data is preserved
+
+
 def test_twenty_step_world_cache_matches_full_flow_and_logits():
     model, inputs = model_and_inputs()
     kwargs = dict(model=model, **sampling_inputs(inputs), clean_action=torch.randn(2, 48, 6),

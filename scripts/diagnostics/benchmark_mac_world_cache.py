@@ -34,6 +34,15 @@ def restore(value):
     return value
 
 
+def exclusive_times(times):
+    """Remove inclusive parents so percentages never double-count GPU work."""
+    result = dict(times)
+    result["prefix_selection_overhead"] = result.pop("rejection") - result["action"] - result["q_score"]
+    result["bootstrap_other"] = result.pop("rollout") - (
+        result["prefix_selection_overhead"] + result["action"] + result["q_score"] + result["world"])
+    return result
+
+
 def stage2_breakdown(args, config):
     """中文：复用生产采样；共享 GPU 的 BS1 诊断，不代表八卡吞吐。
 
@@ -113,8 +122,7 @@ def stage2_breakdown(args, config):
                     future_noise=torch.randn_like(inputs["current_latents"]),
                     future_state_noise=torch.randn_like(inputs["state"]), schedule=schedule,
                     **{k: post[k] for k in ("discount", "reward_non_goal", "reward_goal", "return_scale")})
-        times["prefix_selection_overhead"] = times["rejection"] - times["action"] - times["q_score"]
-        times["bootstrap_other"] = times["rollout"] - times["rejection"] - times["world"]
+        times = exclusive_times(times)
         with measure("critic_forward_loss"), torch.autocast("cuda", dtype=torch.bfloat16):
             v, q = sampling.evaluate_mac_critics(model=model, **inputs,
                 clean_action=rollout.selected_action, condition_cache=rollout.condition_cache)
@@ -130,8 +138,6 @@ def stage2_breakdown(args, config):
         with measure("ema"):
             ema.update(model.value_expert, optimizer_step=step + 1, optimizer_step_succeeded=True)
         del rollout, v, q, loss
-        times.pop("rejection")
-        times.pop("rollout")
         if step >= 2:
             rows.append(times)
         print(json.dumps(dict(step=step, warmup=step < 2, seconds=times)), flush=True)
