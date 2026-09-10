@@ -98,6 +98,11 @@ def main():
         args.output.mkdir(parents=True, exist_ok=False)
     acc.wait_for_everyone()
     cfg = restore_config_tuples(json.loads(args.config.read_text()))
+    # 中文：沿用源实验团队，禁止隐式写入服务器凭据的默认团队。
+    # English: Bind logging to the source experiment, never the account default.
+    tracker = cfg['train']['tracker_init_kwargs']['wandb'] if not args.offline else {}
+    if not args.offline and not tracker.get('entity'):
+        raise ValueError('source run must specify W&B entity; never use server account defaults')
     teacher, _ = load_flux2_fact_trained_checkpoint(args.teacher, config_path=args.config,
                                                    device=acc.device, dtype=torch.bfloat16)
     teacher.eval().requires_grad_(False)
@@ -144,7 +149,7 @@ def main():
         (args.output/'split.json').write_text(json.dumps(manifest,indent=2))
     if not args.offline:
         acc.init_trackers('robonana', config=metadata,
-                          init_kwargs={'wandb':{'name':args.output.name}})
+                          init_kwargs={'wandb':{'name':args.output.name,'entity':tracker['entity']}})
     imag = cfg['train']['posttrain']['imagination']
     schedule = flow_euler_schedule(imag['sampling_steps'],flow_shift=imag['flow_shift'],device=acc.device)
     def inputs(item):
