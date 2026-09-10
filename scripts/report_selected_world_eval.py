@@ -28,7 +28,7 @@ def composite(paths, size):
 
 def build_report(root):
     root = Path(root)
-    body = ['<h1>Q argmax: selected-action world predictions</h1>',
+    body = ['<h1>Executed-action world predictions (action-only / Q argmax)</h1>',
             '<p>Each row: actual input at t, predicted endpoint t+48, actual endpoint. '
             'Blue bars show all 48 expected rewards (range -1 to 0). '
             'Terminal refers to predicted success, not an environment timeout.</p>']
@@ -64,7 +64,8 @@ def build_report(root):
             else:
                 actual = None
                 endpoint_label = "endpoint unavailable"
-            caption = (f"step={row['step']} | Q={row['selected_q']:.2f} | "
+            q_label = "not used" if row.get("selected_q") is None else f"{row['selected_q']:.2f}"
+            caption = (f"step={row['step']} | Q={q_label} | "
                        f"R48={row['chunk_return']:.2f} | "
                        f"P(success)={row['success_probability']:.4f} | "
                        f"terminal={row['predicted_terminal']}")

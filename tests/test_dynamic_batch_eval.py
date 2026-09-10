@@ -101,9 +101,10 @@ def test_fact_tcp_server_batches_two_persistent_clients():
 
 
 @pytest.mark.parametrize("diagnostics", [False, True])
-def test_batched_policy_returns_one_action_chunk_per_observation(monkeypatch, diagnostics):
+@pytest.mark.parametrize("use_q", [False, True])
+def test_batched_policy_returns_one_action_chunk_per_observation(monkeypatch, diagnostics, use_q):
     policy = object.__new__(BatchedRoboNanaRobotWinPolicy)
-    policy.inference_mode = InferenceMode.ACTION_Q_REJECTION
+    policy.inference_mode = InferenceMode.ACTION_Q_REJECTION if use_q else InferenceMode.ACTION_ONLY
     policy.model_device = torch.device("cpu")
     policy.vae_device = torch.device("cpu")
     policy.dtype = torch.float32
@@ -142,7 +143,7 @@ def test_batched_policy_returns_one_action_chunk_per_observation(monkeypatch, di
             action=actions, candidates=actions[:, None].expand(-1, 2, -1, -1),
             candidate_q=torch.tensor([[-.3, -.2], [-.1, -.4]]),
             best_index=torch.tensor([1, 0]),
-        )
+        ) if use_q else None
         return actions
     policy._sample_action_batch = sample
     world_inputs = []

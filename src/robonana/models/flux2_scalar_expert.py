@@ -283,10 +283,22 @@ class DeterministicFlux2ScalarExpert(nn.Module):
         query = self.query.weight[None].expand(batch, 1, -1)
         zeros = torch.zeros(batch, device=query.device, dtype=torch.float32)
         vec = self.time_in(timestep_embedding(zeros, 256).to(dtype=dtype))
+        return self.forward_tokens(cache, query=query, query_pe=query_pe, vec=vec).squeeze(1)
+
+    def forward_tokens(self, cache: FrozenFluxKVCache, *, query: Tensor,
+                       query_pe: Tensor, vec: Tensor) -> Tensor:
+        """中文：共享 MoT block 计算，保持 scalar 的参数名和数值不变。
+
+        English: Reuse the same ImageWAM-derived blocks for isolated action
+        students; this introduces no new branch in the FLUX backbone.
+        """
+        batch, length, _ = query.shape
+        if query_pe.shape[0] != batch or query_pe.shape[2] != length:
+            raise ValueError("query position length mismatch")
         double_mod = self.double_stream_modulation_img(vec)
         single_mod = self.single_stream_modulation(vec)[0]
         expert_key_mask = torch.cat(
-            [cache.key_mask.to(device=query.device), torch.ones(batch, 1, device=query.device, dtype=torch.bool)],
+            [cache.key_mask.to(device=query.device), torch.ones(batch, length, device=query.device, dtype=torch.bool)],
             dim=1,
         )
 
@@ -313,7 +325,7 @@ class DeterministicFlux2ScalarExpert(nn.Module):
                 key_mask=expert_key_mask,
             )
             query = block.apply_post(mixed, state)
-        return self.head(query, vec).squeeze(1)
+        return self.head(query, vec)
 
 
 def _resize_tensor_to_shape(source: Tensor, target_shape: tuple[int, ...]) -> Tensor:
@@ -371,7 +383,7 @@ def initialize_scalar_expert_from_flux(
     copied = 0
     resized = 0
     mapped: dict[str, Tensor] = {}
-    fresh_prefixes = ("query.", "head.")
+    fresh_prefixes = ("query.", "head.", "action_encoder.")
     for name, target in target_state.items():
         if name.startswith(fresh_prefixes):
             continue

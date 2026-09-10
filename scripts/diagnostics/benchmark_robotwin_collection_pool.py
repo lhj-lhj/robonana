@@ -50,6 +50,8 @@ def main():
     parser.add_argument("--candidate-batch-size", type=int, default=16)
     parser.add_argument("--inference-mode", choices=("action_only", "action_q_rejection"), default="action_q_rejection")
     parser.add_argument('--collection-round', type=int, default=0)
+    parser.add_argument('--selected-world', action='store_true',
+                        help='Save predictions for executed chunks; needs a trained world-capable checkpoint')
     opts = parser.parse_args()
     if not 1 <= opts.inference_batch_size <= 8 or not 1 <= opts.candidate_batch_size <= 32:
         parser.error("request batch must be 1..8 and candidate batch 1..32")
@@ -94,6 +96,8 @@ def main():
     # Do not inherit optional diagnostics or global instruction overrides.
     common.update(ROBONANA_SELECTED_WORLD_ROOT="", ROBONANA_EVAL_INSTRUCTION="",
                   ROBONANA_OVERLAY_CHUNK_RETURN="0", ROBONANA_Q_DIAGNOSTICS_PATH="")
+    if opts.selected_world:
+        common['ROBONANA_SELECTED_WORLD_ROOT'] = str(output / 'selected_world')
     server_env = dict(common, CUDA_VISIBLE_DEVICES=str(opts.server_gpu),
                       ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE=str(opts.candidate_batch_size))
     server_cmd = [sys.executable, str(ROOT / "scripts/services/inference_server_robotwin_batched.py"),

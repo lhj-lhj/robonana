@@ -39,9 +39,10 @@ def save_selected_world(root, *, task, seed, step, request, response):
         Image.fromarray(frame).save(directory / f"{stem}_{key.rsplit('.', 1)[-1]}.png")
     world.update(
         task=task, seed=seed, step=step, sampling_seed=response.get("_sampling_seed"),
-        selected_q=response["selected_q"],
-        selected_candidate_index=response["selected_candidate_index"],
-        candidate_q=_array(response["candidate_q"]).tolist(),
+        inference_mode=response.get("_inference_mode"),
+        selected_q=response.get("selected_q"),
+        selected_candidate_index=response.get("selected_candidate_index"),
+        candidate_q=(_array(response["candidate_q"]).tolist() if "candidate_q" in response else []),
         action=_array(response["action"]).tolist(),
         instruction=request.get("instruction", request.get("prompt", "")),
         image=f"{stem}_predicted_t48.png",

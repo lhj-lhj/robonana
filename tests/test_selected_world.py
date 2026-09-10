@@ -53,3 +53,8 @@ def test_artifact_retains_selected_action_reward_curve_and_image(tmp_path):
     assert Image.open(directory / record["image"]).size == (6, 4)
     assert np.asarray(Image.open(directory / "step_0048_cam_high.png")).min() == 255
     assert "image" in response["selected_world"]
+    action_only = dict(selected_world=world, action=torch.ones(48,2), _inference_mode='action_only')
+    directory=save_selected_world(tmp_path,task='hanging_mug',seed=100001,step=0,
+                                  request=request,response=action_only)
+    record=json.loads((directory/'step_0000.json').read_text())
+    assert record['selected_q'] is None and record['candidate_q']==[]

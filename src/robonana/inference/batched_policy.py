@@ -295,8 +295,6 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
         for index, (observation, response) in enumerate(zip(observations, responses, strict=True)):
             if not observation.get("diagnose_selected_world", False):
                 continue
-            if rejection is None:
-                raise ValueError("selected-world diagnostics require Q argmax selection")
             from robonana.inference.selected_world import predict_selected_world
 
             start = time.perf_counter()
