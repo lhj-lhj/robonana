@@ -64,8 +64,11 @@ FP32 student/Adam masters，BF16 autocast；教师BF16且冻结；MSE为FP32。
 - 36项相关回归测试通过，涵盖Q/V缓存数值、独立学生梯度、四卡配置、报告与脚本入口。
 - 两卡真实smoke：`outputs/hanging_mug_fixed100_20260909/student_smoke`；完成2步、
   固定验证及student/Adam/RNG保存。不是正式学生效果评测。
-- 正式学生：`experiments/hanging_mug_action_student_pilot_20260910`；
-  日志 `outputs/hanging_mug_fixed100_20260909/student_pilot.launch.log`。
+- 正式学生：`experiments/hanging_mug_action_student_pilot_r2_20260910`；
+  日志 `outputs/hanging_mug_fixed100_20260909/student_pilot_r2.launch.log`。
+  首次pilot未显式传W&B entity，写入服务器凭据的默认团队，已停止，产物未删除。
+  r2从新初始化独立学生开始；日志必须沿用源Stage1配置的
+  `hongjia-liu-aalto-university`，缺少entity时拒绝启动，不能静默使用默认团队。
   `--launch` 在两rank训练退出后，读取step002000/model.safetensors，按固定100和
   已生成独立20场景依次评测。此开关目前明确绑定GPU6服务、GPU7仿真；不是通用集群调度器。
 - Stage1配对：`outputs/stage1_paired_eval_r2_20260910`；
