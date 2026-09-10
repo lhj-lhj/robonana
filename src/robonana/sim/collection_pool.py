@@ -109,7 +109,8 @@ class RoboNanaSubEnv:
     The custom bridge is necessary because stock SubEnv.step invokes the RLinf
     reward/action API rather than our unchanged per-control-step client/writer.
     """
-    def __init__(self, task, model, jobs, task_args, adapter, clear_cache_freq=8):
+    def __init__(self, task, model, jobs, task_args, adapter, clear_cache_freq=8,
+                 audit_actions=False, defer_publish=False):
         if clear_cache_freq < 1:
             raise ValueError("clear_cache_freq must be positive")
         self.task, self.model, self.adapter = task, model, adapter
@@ -119,6 +120,8 @@ class RoboNanaSubEnv:
         self.completed = 0
         self.active = False
         self.done = True
+        self.audit_actions = audit_actions
+        self.defer_publish = defer_publish
 
     def reset(self, env_seed=None):
         if not self.done:
@@ -132,18 +135,27 @@ class RoboNanaSubEnv:
         self.adapter.reset_model(self.model)
         self.done = False
         self.seed = int(env_seed)
+        self.action_trace = []
+        self.rgb_steps = 0
 
     def step(self, _unused):
         if self.done:
             raise RuntimeError("completed environment must be reset before stepping")
         observation = self.task.get_obs()
+        step = int(self.task.take_action_cnt)
+        if self.audit_actions and not observation.get('_fact_light_obs', False):
+            self.rgb_steps += 1
         self.adapter.eval(self.task, self.model, observation)
+        if self.audit_actions:
+            self.action_trace.append(self.model.planned_actions[
+                step % self.model.execute_actions_per_plan].copy())
         success = bool(self.task.eval_success)
         truncated = int(self.task.take_action_cnt) >= int(self.task.step_lim) and not success
         self.done = success or truncated
         if self.done:
             # Existing writer publishes true terminal obs before reset can destroy it.
-            self.adapter.reset_model(self.model)
+            if not self.defer_publish:
+                self.adapter.reset_model(self.model)
             self.completed += 1
         return {"obs": None, "reward": None, "terminated": success,
                 "truncated": truncated, "info": {"seed": self.seed,

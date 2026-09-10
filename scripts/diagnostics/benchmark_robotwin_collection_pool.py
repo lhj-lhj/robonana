@@ -54,6 +54,7 @@ def main():
                         help='Save predictions for executed chunks; needs a trained world-capable checkpoint')
     parser.add_argument('--action-student', type=Path,
                         help='Optional isolated student weights, action-only evaluation')
+    parser.add_argument('--capture-mode',choices=('full','full_failures','scout_replay','paired_benchmark'),default='full')
     opts = parser.parse_args()
     if not 1 <= opts.inference_batch_size <= 8 or not 1 <= opts.candidate_batch_size <= 32:
         parser.error("request batch must be 1..8 and candidate batch 1..32")
@@ -153,7 +154,7 @@ def main():
                 "--robotwin", str(opts.robotwin.resolve()), "--output", str(worker_dir),
                 "--vector-env-checkout", str(ROOT / "third_party/RoboTwin_RLinf"),
                 "--queue", str(queue_path), "--worker-id", str(rank),
-                "--port", str(opts.port)], cwd=ROOT, env=worker_env, stdout=logs[-1],
+                "--port", str(opts.port), '--capture-mode',opts.capture_mode], cwd=ROOT, env=worker_env, stdout=logs[-1],
                 stderr=subprocess.STDOUT, start_new_session=True)
             children.append(worker)
             workers.append(worker)
@@ -185,14 +186,16 @@ def main():
                 actual.append(int(handle.attrs["seed"]))
                 files_by_seed[int(handle.attrs['seed'])] = str(file)
         expected = sorted(int(job["seed"]) for job in jobs)
-        if sorted(actual) != expected or sorted(r["seed"] for r in rows) != expected:
+        expected_files = expected if opts.capture_mode=='full' else sorted(
+            r['seed'] for r in rows if not r['success'] and r.get('replay_verified',True))
+        if sorted(actual) != expected_files or sorted(r["seed"] for r in rows) != expected:
             raise RuntimeError("completed ledger/HDF5 seeds disagree with assigned jobs")
         if queue.counts() != {"done": len(jobs)}:
             raise RuntimeError("queue has unfinished claims")
         instructions = {int(job['seed']): job['instruction'] for job in jobs}
         rows.sort(key=lambda row: row['seed'])
         for row in rows:
-            row.update(instruction=instructions[row['seed']], hdf5=files_by_seed[row['seed']],
+            row.update(instruction=instructions[row['seed']], hdf5=files_by_seed.get(row['seed']),
                        round=opts.collection_round)
         summary = {"episodes": rows, "wall_seconds_including_startup": elapsed,
                    "success_count": sum(bool(row['success']) for row in rows),
@@ -202,6 +205,8 @@ def main():
                    "dataset_validated": True, "inference_batch_size": opts.inference_batch_size,
                    "candidate_batch_size": opts.candidate_batch_size,
                    "queue_counts": queue.counts(), "workers": len(workers)}
+        summary['capture_mode'] = opts.capture_mode
+        summary['replay_mismatches'] = sum(r.get('replay_verified') is False for r in rows)
         (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         print(json.dumps(summary), flush=True)
     finally:

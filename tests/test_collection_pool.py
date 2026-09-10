@@ -12,6 +12,25 @@ def test_valid_seed_list():
     assert validate_jobs(jobs, 2) is None
 
 
+def test_replay_defers_publication_until_audit():
+    import numpy as np
+    publications=[]
+    task=SimpleNamespace(take_action_cnt=0,step_lim=1,eval_success=False,
+                         get_obs=lambda:{'_fact_light_obs':True},
+                         setup_demo=lambda **kw:None,set_instruction=lambda **kw:None)
+    model=SimpleNamespace(planned_actions=np.ones((48,14)),execute_actions_per_plan=48)
+    def advance(task,model,obs):task.take_action_cnt+=1
+    adapter=SimpleNamespace(eval=advance,reset_model=lambda m:publications.append(True))
+    slot=RoboNanaSubEnv(task,model,[{'seed':123,'instruction':'hang'}],{},adapter,
+                       audit_actions=True,defer_publish=True)
+    slot.reset(123)
+    publications.clear()
+    result=slot.step(None)
+    assert result['truncated'] and slot.done
+    assert len(slot.action_trace)==1 and slot.rgb_steps==0
+    assert not publications
+
+
 @pytest.mark.parametrize("jobs,workers", [([], 1), ([{"seed": 1}], 1),
     ([{"seed": 1, "instruction": "x"}] * 2, 2)])
 def test_invalid_jobs_rejected(jobs, workers):

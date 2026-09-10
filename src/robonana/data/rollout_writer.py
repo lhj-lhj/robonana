@@ -75,6 +75,7 @@ class RoboTwinRolloutWriter:
         policy_version: str = "",
         round_id: int = 0,
         task_config: str = "",
+        failures_only: bool = False,
     ) -> None:
         self.dataset_root = Path(dataset_root).expanduser().resolve()
         if initial_dataset_root:
@@ -89,6 +90,7 @@ class RoboTwinRolloutWriter:
         self.policy_version = str(policy_version or checkpoint)
         self.round_id = int(round_id)
         self.task_config = str(task_config)
+        self.failures_only = bool(failures_only)
         self._frames: dict[str, list[bytes]] = {camera: [] for camera in CAMERAS}
         self._states: list[np.ndarray] = []
         self._actions: list[np.ndarray] = []
@@ -231,6 +233,9 @@ class RoboTwinRolloutWriter:
         if not self.has_pending_episode:
             return None
         if not self._terminal and not force:
+            return None
+        if self.failures_only and self._success:
+            self.reset()
             return None
         if not self._final_observation_appended:
             raise RuntimeError(
