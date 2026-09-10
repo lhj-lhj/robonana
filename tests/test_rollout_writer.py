@@ -24,6 +24,19 @@ def test_failures_only_never_publishes_success(tmp_path,success):
     assert not writer.has_pending_episode
 
 
+def test_unverified_replay_cannot_publish_during_cleanup(tmp_path):
+    writer=RoboTwinRolloutWriter(tmp_path/'rollouts',initial_dataset_root=None,failures_only=True)
+    images={camera:np.zeros((4,4,3),dtype=np.uint8) for camera in CAMERAS}
+    writer.publication_enabled=False
+    writer.append(task_name='hanging_mug',instruction='hang',seed=123,images=images,
+                  state=np.zeros(14),action=np.zeros(14),success=False,terminal=True)
+    writer.append_final_observation(images=images,state=np.zeros(14))
+    assert writer.finish_episode(force=True) is None
+    assert writer.has_pending_episode and not list((tmp_path/'rollouts').rglob('*.hdf5'))
+    writer.publication_enabled=True
+    assert writer.finish_episode() is not None
+
+
 def test_rollout_writer_saves_atomic_training_episode(tmp_path) -> None:
     initial_root = tmp_path / "initial"
     rollout_root = tmp_path / "rollouts" / "step100"

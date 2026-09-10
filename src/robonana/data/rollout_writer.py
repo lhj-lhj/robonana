@@ -91,6 +91,7 @@ class RoboTwinRolloutWriter:
         self.round_id = int(round_id)
         self.task_config = str(task_config)
         self.failures_only = bool(failures_only)
+        self.publication_enabled = True
         self._frames: dict[str, list[bytes]] = {camera: [] for camera in CAMERAS}
         self._states: list[np.ndarray] = []
         self._actions: list[np.ndarray] = []
@@ -230,6 +231,10 @@ class RoboTwinRolloutWriter:
             return index, lock
 
     def finish_episode(self, *, force: bool = False) -> Path | None:
+        # Replay verification may still be pending when an exception triggers atexit.
+        # 中文：未验证重放即使退出清理也不能发布。
+        if not self.publication_enabled:
+            return None
         if not self.has_pending_episode:
             return None
         if not self._terminal and not force:

@@ -109,6 +109,7 @@ def main():
             # _configure_robotwin_render / _patch_robotwin_low_frequency_rgb.
             # This deployed adapter is not claimed to be an upstream RoboTwin API.
             model._robonana_rollout_writer = writer if record else None
+            writer.publication_enabled = not scout_mode
             model.low_frequency_rgb = not record
             model.skip_action_render_sync = not record
             model._configure_robotwin_render()
@@ -140,6 +141,7 @@ def main():
                                       replay_steps=replay['steps'],action_exact=exact,action_max_abs=delta,
                                       replay_rgb_steps=replay['rgb_steps'])
                         if exact and result['success']==replay['success']:
+                            writer.publication_enabled = True
                             publish_start=time.perf_counter()
                             adapter.reset_model(model)
                             result['replay_seconds'] += time.perf_counter()-publish_start
