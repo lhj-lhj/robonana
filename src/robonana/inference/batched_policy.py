@@ -295,6 +295,8 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
         for index, (observation, response) in enumerate(zip(observations, responses, strict=True)):
             if not observation.get("diagnose_selected_world", False):
                 continue
+            if getattr(self, "inference_contract", {}).get("capabilities") == ["action_only"]:
+                raise ValueError("action-only pretrain export has no trained world heads")
             from robonana.inference.selected_world import predict_selected_world
 
             start = time.perf_counter()

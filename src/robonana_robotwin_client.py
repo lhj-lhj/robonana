@@ -186,7 +186,7 @@ def _write_q_diagnostics(task_env, model) -> None:
     if not output or getattr(model, "_robonana_q_diagnostics_written", False):
         return
     history = list(getattr(model, "_robonana_policy_selection_history", ()))
-    if not history:
+    if not history and not world_root:
         return
     selected = np.asarray([row["selected_q"] for row in history], dtype=np.float32)
     margins = np.asarray([row["q_margin"] for row in history], dtype=np.float32)
@@ -196,10 +196,10 @@ def _write_q_diagnostics(task_env, model) -> None:
         "success": int(bool(getattr(task_env, "eval_success", False))),
         "chunks": int(len(history)),
         "selected_q": selected.tolist(),
-        "selected_q_first": float(selected[0]),
-        "selected_q_last": float(selected[-1]),
-        "selected_q_mean": float(selected.mean()),
-        "q_margin_mean": float(margins.mean()),
+        "selected_q_first": float(selected[0]) if history else None,
+        "selected_q_last": float(selected[-1]) if history else None,
+        "selected_q_mean": float(selected.mean()) if history else None,
+        "q_margin_mean": float(margins.mean()) if history else None,
     }
     path = Path(output).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
