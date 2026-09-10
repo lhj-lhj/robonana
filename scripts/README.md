@@ -55,6 +55,10 @@ statistics for replay or treat metadata maintenance as a daily training step.
 
 ### diagnostics — 按需诊断 / Opt-in diagnostics
 
+- `prepare_universal_checkpoint.py`: 官方 DeepSpeed 重分片准备；保留原 checkpoint / Official conversion for changed GPU count, preserving source.
+- `compare_stage1_policy.py`: 固定100 + 独立20场景的 Stage1/120k action-only 对照与重建 / Paired action-only eval and world reports.
+- `train_action_student.py`: 独立一步 Action expert；`--launch` 两卡训练后再评测，不接入 Stage2 / Isolated student train-to-eval pilot.
+  详细参数和边界见 `docs/STAGE1_STUDENT_SPLIT_20260910.md` / See the experiment document for contracts and settings.
 - `probe_mac_world_fit.py`: 训练集固定窗口重建 / Fixed-window training-set reconstruction.
 - `start_mac_world_pilot.py`: 有界拟合实验，**确实会启动训练** / Bounded fitting pilot; **does start training**.
 - `benchmark_mac_prefix_cache.py`: Q 前缀缓存数值与速度 / Q-prefix parity and timing.

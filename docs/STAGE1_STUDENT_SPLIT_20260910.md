@@ -58,3 +58,19 @@ FP32 student/Adam masters，BF16 autocast；教师BF16且冻结；MSE为FP32。
 必须匹配teacher SHA256，只支持action-only，不自动替换Stage2候选生成器。
 
 所有新输出目录拒绝覆盖已有实验。失败pilot、训练产物与真实环境结果分开记录。
+
+## 启动记录 / Launch record
+
+- 36项相关回归测试通过，涵盖Q/V缓存数值、独立学生梯度、四卡配置、报告与脚本入口。
+- 两卡真实smoke：`outputs/hanging_mug_fixed100_20260909/student_smoke`；完成2步、
+  固定验证及student/Adam/RNG保存。不是正式学生效果评测。
+- 正式学生：`experiments/hanging_mug_action_student_pilot_20260910`；
+  日志 `outputs/hanging_mug_fixed100_20260909/student_pilot.launch.log`。
+  `--launch` 在两rank训练退出后，读取step002000/model.safetensors，按固定100和
+  已生成独立20场景依次评测。此开关目前明确绑定GPU6服务、GPU7仿真；不是通用集群调度器。
+- Stage1配对：`outputs/stage1_paired_eval_r2_20260910`；
+  初次预检因缺少显式SAPIEN渲染设备而退出，r2已补齐，原清单与checkpoint均未修改。
+  先准备20个独立场景，再依次跑固定100的Stage1/120k、独立20的Stage1/120k。
+- 当前学生pilot为fresh-only，不声称支持中途完整续训；最终模型可独立加载用于评测。
+- Universal只用于加载转换目录；后续从新保存的原生四卡checkpoint恢复时，要使用
+  原生DeepSpeed配置，不要对原生checkpoint继续开启Universal标志。
