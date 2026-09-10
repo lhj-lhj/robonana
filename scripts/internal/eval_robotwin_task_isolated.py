@@ -188,7 +188,10 @@ def run(args: argparse.Namespace) -> int:
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = output_dir / "episodes.jsonl"
-    seed_start = initial_seed(args.seed_group)
+    # 中文：复测历史崩溃seed，无需伪造已完成ledger。
+    # English: Explicit retry seed; existing ledger validation still applies.
+    seed_start = getattr(args,'start_seed',None)
+    if seed_start is None:seed_start = initial_seed(args.seed_group)
     rows = read_ledger(ledger_path, args.test_num, seed_start)
     if rows:
         print(f"[resume] {args.task_name}: {len(rows)}/{args.test_num} episodes", flush=True)
@@ -371,6 +374,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--launch-client", type=Path, required=True)
     parser.add_argument("--ckpt-setting", default="fact")
     parser.add_argument("--seed-group", type=int, default=0)
+    parser.add_argument('--start-seed',type=int,default=os.environ.get('ROBONANA_EVAL_START_SEED'),
+                        help='Explicit candidate seed for historical failure reproduction')
     parser.add_argument("--episode-timeout-seconds", type=int, default=3600)
     parser.add_argument(
         "--max-swallowed-errors",
@@ -386,6 +391,7 @@ def parse_args() -> argparse.Namespace:
         or args.episode_timeout_seconds < 1
         or args.gpu_attempts < 1
         or args.max_swallowed_errors < 0
+        or (args.start_seed is not None and args.start_seed < 0)
     ):
         parser.error("test-num, episode-timeout-seconds, and gpu-attempts must be valid")
     if not args.launch_client.is_file():

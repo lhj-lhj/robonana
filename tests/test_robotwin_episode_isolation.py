@@ -21,6 +21,15 @@ def load_script(name: str, relative_path: str):
     return module
 
 
+def test_isolated_runner_accepts_explicit_retry_seed(tmp_path,monkeypatch):
+    runner=load_script('isolated_seed_override','scripts/internal/eval_robotwin_task_isolated.py')
+    client=tmp_path/'client.sh';client.touch()
+    monkeypatch.setenv('ROBONANA_EVAL_START_SEED','100038')
+    monkeypatch.setattr(sys,'argv',['runner','--task-name','place_fan','--task-config','demo_clean',
+        '--test-num','1','--output-dir',str(tmp_path/'out'),'--launch-client',str(client)])
+    assert runner.parse_args().start_seed==100038
+
+
 def test_bootstrap_runs_one_episode_from_explicit_seed(tmp_path: Path) -> None:
     bootstrap = load_script("robotwin_eval_bootstrap_test", "scripts/env/robotwin_eval_bootstrap.py")
     entrypoint = tmp_path / "eval_policy.py"
