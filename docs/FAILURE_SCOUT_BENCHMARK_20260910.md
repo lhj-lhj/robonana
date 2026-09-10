@@ -16,7 +16,22 @@
 | stamp_seal | 1 / 2 |
 
 这只能证明这些初始seed可运行，不是50/200条完整验收。历史末次卡住的候选seed分别为
-100006、100038、100008、100039，需按原顺序另行复测；不能以最初两条替代。
+100006、100038、100008、100039，已按原顺序另行复测；不能以最初两条替代。
+
+复测目录：`outputs/eval4_historical_seeds_20260910`。每任务从指定候选seed开始，
+仅一次GPU尝试、不做CPU fallback。官方expert仍可能拒绝候选并递增seed。
+
+| Task | 起始候选seed | 复测结果 |
+|---|---:|---|
+| move_stapler_pad | 100006 | 正常完成，policy失败（0/1），不再是ERROR |
+| place_fan | 100038 | 正常完成，policy成功（1/1） |
+| place_mouse_pad | 100008 | ERROR，exit134 |
+| stamp_seal | 100039 | ERROR，exit134 |
+
+后两者都在`get_obs → cameras.update_picture → left_camera.take_picture`抛出
+`RuntimeError: vk::Queue::waitIdle: ErrorDeviceLost`，随后C++终止。该位置是环境取图；
+不能把进程崩溃作为policy失败轨迹计入训练。50任务全部稳定跑满200条尚有这两个
+已复现的渲染阻断项。本次没有更换渲染器、资产或驱动掩盖问题。
 
 ## 可选采集模式
 
@@ -79,5 +94,5 @@ scout+失败重放合计314.388s，对应逐帧记录基线322.561s，**1.026倍
 并不能证明50任务真实吞吐；仅测2条，首条还包括冷启动/缓存影响。
 各任务需使用独立的成功/失败时长统计再加权，不能把200条都按同一平均步数计算。
 
-16项采集/数据writer测试通过，7项隔离seed/episode测试通过。没有修改FLUX、Q/V、
+新增异常退出保护后，采集/数据writer/隔离seed合计24项测试通过。没有修改FLUX、Q/V、
 采样步数、reward、成功条件或控制动作，只新增显式基础设施诊断模式。
