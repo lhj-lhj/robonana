@@ -359,6 +359,20 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NCCL_NVLS_ENABLE=0 "$PY" -m torch.distribut
 
 #### 2026-09-12 验收接续
 
+##### 最新结论（20:00 UTC之后，后续条目保留排查历史）
+
+- 第二次真实4B恢复正常退出。不中断vs恢复：549,015/5,002,609,664元素不同；
+  恢复vs重复恢复：573,287元素不同。两组最大绝对差同为0.000244140625，差异元素均有限。
+  三次step3各loss一致到日志打印精度；两个恢复均完整加载model/Adam/scheduler/sampler/RNG。
+  **保存/恢复功能验收通过，但不宣称bitwise确定性**。重复恢复自身也存在同量级差异，
+  暂无证据显示恢复与不中断的偏差超过该跨运行波动；尚未定位到具体CUDA算子。
+  BF16有符号bit-pattern直接相减会在过零处失真，不能把该诊断位距称为真实ULP距离。
+- 缓存逐episode验收、Clean/Randomized失败重放、八卡采集和分布式保存/恢复均已执行。
+  八卡空闲后已提交正式120k启动命令，输出 `experiments/multitask_mbrl_v1/pretrain`，
+  日志 `outputs/cache_full_validation_20260911/pretrain.launch.log`；实际更新与W&B仍需启动后确认。
+  使用原始FLUX、27500示范、八卡×16×累积1=128、BF16、全关梯度checkpoint；
+  backbone LR2e-5、robot LR1e-4，500步warmup和120k衰减，10k/30k/60k/120k里程碑。
+
 - 真实4B三步保存测试正常退出（18:08 UTC），完整保留step2/step3，滚动保留策略删除了
   本探针的step1。W&B `8lsmxoii`。从step2在独立 `real4b_resume` 目录恢复后完成step3并
   正常退出（19:02 UTC），W&B `yzarzlh7`。日志确认模型、Adam、scheduler、sampler、RNG均加载。
