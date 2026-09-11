@@ -99,7 +99,7 @@ def training(opts):
     # English: Fail on missing/full-data caches before loading eight FLUX replicas.
     from robonana.data.robotwin_hdf5 import RoboTwinHDF5Dataset, RoboTwinPosttrainSampler
     from robonana.data.robotwin_lerobot import RoboTwinLeRobotDataset
-    from robonana.image_pipeline import validate_training_image_contracts
+    from robonana.image_pipeline import validate_training_image_contracts, validate_episode_caches
     from torch.utils.data import ConcatDataset
     classes = {cls.__name__:cls for cls in (RoboTwinHDF5Dataset, RoboTwinLeRobotDataset)}
     data = config["dataloaders"]["train"]["data_or_config"]
@@ -117,7 +117,8 @@ def training(opts):
             RoboTwinPosttrainSampler(dataset, batch_size=128, pool_weights=
                 config["dataloaders"]["train"]["sampler"]["pool_weights"])
         validate_training_image_contracts(dataset, config["models"]["checkpoint_dir"])
-        print("DATA PREFLIGHT PASSED: metadata, pool nonemptiness, A statistics and image contracts")
+        summaries = [validate_episode_caches(child.records) for child in children]
+        print("DATA PREFLIGHT PASSED: metadata, pools, A statistics, contracts AND all episode files", summaries)
     finally:
         for child in children:
             child.close()

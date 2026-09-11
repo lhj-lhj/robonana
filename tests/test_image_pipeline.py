@@ -113,3 +113,22 @@ def test_cache_contract_and_training_pools_fail_closed(tmp_path, monkeypatch):
         pipeline.write_image_contract(tmp_path, tmp_path)
     with pytest.raises(RuntimeError, match="rebuild"):
         pipeline.require_image_contract(tmp_path / "legacy")
+
+
+def test_episode_completion_is_not_inferred_from_task_contract(tmp_path, monkeypatch):
+    from flux2.text_encoder import MAX_LENGTH
+    contract = {"version": pipeline.IMAGE_PIPELINE_VERSION, "vae_sha256": "test-only"}
+    monkeypatch.setattr(pipeline, "image_contract", lambda _: contract)
+    pipeline.write_image_contract(tmp_path, tmp_path)
+    record = SimpleNamespace(task_dir=tmp_path, episode_index=0, length=2)
+    with pytest.raises(RuntimeError, match="Incomplete episode"):
+        pipeline.validate_episode_caches([record])
+    path = tmp_path / "flux_cache/latents_v2/episode_000000.pt"
+    pipeline.save_image_cache(torch.zeros(2,288,128), path)
+    language = tmp_path / "flux_cache/language/episode_000000.pt"
+    language.parent.mkdir()
+    torch.save(torch.zeros(MAX_LENGTH,7680,dtype=torch.bfloat16),language)
+    assert pipeline.validate_episode_caches([record])["episodes"] == 1
+    path.with_suffix(".json").unlink()
+    with pytest.raises(RuntimeError, match="Incomplete episode"):
+        pipeline.validate_episode_caches([record])

@@ -168,6 +168,29 @@ def valid_image_cache(path, length=None):
         return False
 
 
+def validate_episode_caches(records):
+    """中文：目录契约不等于整批完成；开训前逐episode检查文件和完成证明。
+    English: A task contract describes encoding, not completion. Check every
+    actual file without loading hundreds of GiB into RAM or re-encoding Qwen.
+    """
+    from flux2.text_encoder import MAX_LENGTH
+    from robonana.data.flux_cache import episode_cache_path, episode_language_context_path, language_context_path
+    count, frames = 0, 0
+    for record in records:
+        image = episode_cache_path(record.task_dir, record.episode_index)
+        if not valid_image_cache(image, record.length):
+            raise RuntimeError(f"Incomplete episode image cache: {image}")
+        language = episode_language_context_path(record.task_dir, record.episode_index)
+        if not language.is_file():
+            language = language_context_path(record.task_dir)
+        context = torch.load(language, map_location="cpu", weights_only=True, mmap=True)
+        if context.dtype != torch.bfloat16 or tuple(context.shape) != (MAX_LENGTH, 7680):
+            raise RuntimeError(f"Invalid episode language cache: {language}")
+        count += 1
+        frames += record.length
+    return dict(episodes=count, frames=frames, per_episode_files_verified=True)
+
+
 def validate_training_image_contracts(dataset, checkpoint):
     """Fail before training if any original/replay pool uses incompatible caches."""
     expected = image_contract(str(Path(checkpoint).resolve()))
