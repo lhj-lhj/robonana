@@ -1,9 +1,8 @@
 """Load the single maintained mac_mot_v2 FLUX.2 model.
 
-The old 120k legacy model was converted once to a complete MAC checkpoint.
-Runtime code intentionally has no legacy architecture or variable-horizon
-checkpoint loader; pass the converted 1000-step checkpoint (or a later MAC
-checkpoint) through ``load_flux2_fact_trained_checkpoint``.
+Initialize from complete upstream FLUX backbone weights for new pretraining,
+or strictly restore a trained MAC checkpoint. Neither path accepts a legacy
+robot architecture or variable-horizon checkpoint.
 """
 
 from __future__ import annotations

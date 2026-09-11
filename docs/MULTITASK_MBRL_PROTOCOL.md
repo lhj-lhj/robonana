@@ -44,7 +44,8 @@ return/discount/loss、加噪构造、VAE BN 反归一化保留当前 FP32 规�
 - Stage1：stage1_10k_ckpt_0 / stage1_30k_ckpt_0 / stage1_60k_ckpt_0。
 - Stage2：stage2_10k_ckpt_0 / stage2_20k_ckpt_0，最后指向 loop_ckpt_0。
 
-默认保持当前 checkpoint 策略。先测 `--no-gradient-checkpointing --smoke-steps 3`：
+新协议默认全关梯度 checkpoint（八卡batch16 smoke已经通过）；`--gradient-checkpointing` 可显式恢复原策略。
+显存测试使用 `--no-gradient-checkpointing --smoke-steps 3`：
 必须包含真实前向、反向、Adam 更新，不以加载后显存作结论；还需给保存/可视化留余量。
 若全关 OOM，保留原 checkpoint 策略，**不自动降低 batch/精度**。
 NVLS 默认关闭以绕开已复现聚合问题，NVLink P2P 不关闭。
@@ -180,3 +181,20 @@ scout+replay加速取决于SR：失败越多、重放开销越大，不保证始
 - 日志：`outputs/multitask_protocol_validation_20260911/gc_off.log`；W&B run `qozrly7w`，用户团队正确。
 - 仅显存探针允许 `--smoke-task-globs Clean/hanging_mug --smoke-steps 3`。正式入口拒绝无smoke预算的数据子集覆盖；
   这只能测试相同tensor尺寸下的显存，不能认证50任务缓存已经可用。
+- 子集八卡3-step全关GC完成：峰值allocated=101.211 GiB、reserved=107.293 GiB（所有rank最大值）；
+  首步5.549s，随后0.9268/0.9285s；均完成优化器更新、无OOM/NaN。此probe没有测checkpoint保存峰值。
+  日志 `outputs/multitask_protocol_validation_20260911/gc_off_subset.log`，W&B `l9ojo93a`。
+- 缓存覆盖：100个task/config目录中仅 `Clean/hanging_mug` 存在latents_v2契约，99个尚缺。
+  缺失缓存准备使用现有入口（此处记录命令，尚未启动全量预处理）：
+
+```bash
+PYTHONPATH=src:third_party/FACT:third_party/flux2/src:third_party/flux2_official/src \
+/data3/hongjia/conda/envs/robonana/bin/python -m torch.distributed.run --standalone --nproc_per_node=8 \
+  scripts/data/preprocess_robotwin_lerobot_flux.py \
+  --dataset-root /workspace/datasets/fact-robotwin-v2/RoboTwin \
+  --checkpoint checkpoints/FLUX.2-klein-base-4B \
+  --task-glob 'Clean/*' --task-glob 'Randomized/*' --stage images
+```
+
+这一步是新链路实际编码，不是重命名旧缓存。应先做1个episode的有界转换/一致性和耗时测试，
+估算全量磁盘与时间后再开27500条。语言缓存完整性也需要独立检查。

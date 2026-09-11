@@ -37,6 +37,9 @@ def build_protocol_config(base, phase):
     if phase != "pretrain" and not os.environ.get("ROBONANA_REPLAY_ROOT"):
         raise ValueError("Stage1/Stage2 require explicit failure replay root")
     result["models"]["train_mode"] = mac_phase
+    # Eight B200s, batch16 BF16: verified 101.21 GiB allocated / 107.29 GiB reserved.
+    # Full-data cache certification is a separate gate; no precision/batch reduction.
+    result["models"]["gradient_checkpointing"] = os.environ.get("ROBONANA_GRADIENT_CHECKPOINTING", "0") == "1"
     result["launch"]["gpu_ids"] = list(range(8))
     loader["batch_size_per_gpu"] = 16
     train.update(max_steps=milestones[-1], gradient_accumulation_steps=1,

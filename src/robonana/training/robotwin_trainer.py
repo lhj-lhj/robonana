@@ -311,7 +311,7 @@ class RoboNanaTrainer(Trainer):
             for name in ('value_expert', 'q_expert'):
                 copied, resized = initialize_scalar_expert_from_flux(getattr(model, name), model)
                 self.logger.info('Converted actor %s initialization: copied=%s resized=%s', name, copied, resized)
-        initialization_label = f"trained MAC checkpoint parameters={report.checkpoint_parameters}"
+        initialization_label = f"{'original FLUX' if original_flux else 'trained MAC'} checkpoint parameters={report.checkpoint_parameters}"
         train_mode = str(_config_value(model_config, "train_mode", "full"))
         trainable_names = configure_trainable_parameters(model, train_mode)
         if bool(_config_value(model_config, "gradient_checkpointing", True)):

@@ -12,9 +12,12 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import signal
+import threading
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts/diagnostics"), str(ROOT / "scripts/internal")]
+STOP = threading.Event()
 
 
 def atomic_json(path, value):
@@ -35,9 +38,16 @@ def run_bounded(command, *, env, log, timeout):
         child = subprocess.Popen(command, cwd=ROOT, env=env, stdout=handle,
                                  stderr=subprocess.STDOUT, start_new_session=True)
         try:
-            return child.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return 124
+            deadline = time.monotonic() + timeout
+            while not STOP.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return 124
+                try:
+                    return child.wait(timeout=min(.5, remaining))
+                except subprocess.TimeoutExpired:
+                    pass
+            raise InterruptedError("Collection cancelled; do not replace this seed")
         finally:
             terminate_process_group(child, grace_seconds=40)
 
@@ -51,8 +61,7 @@ def training(opts):
                            ("replay_root", "ROBONANA_REPLAY_ROOT")):
         if value := getattr(opts, flag):
             os.environ[variable] = str(value.resolve())
-    if opts.no_gradient_checkpointing:
-        os.environ["ROBONANA_GRADIENT_CHECKPOINTING"] = "0"
+    os.environ["ROBONANA_GRADIENT_CHECKPOINTING"] = "1" if opts.gradient_checkpointing else "0"
     if opts.smoke_steps:
         os.environ["ROBONANA_PROTOCOL_SMOKE_STEPS"] = str(opts.smoke_steps)
     else:
@@ -130,7 +139,9 @@ def collect_lane(opts, pairs, lane):
                         raise ValueError("Locked scenes do not match simulator revision/config")
                 attempts = len(ledger)
                 while (attempts < len(locked["jobs"]) if locked else len(accepted) < opts.episodes):
-                    if attempts >= opts.episodes * 20:
+                    if STOP.is_set():
+                        raise InterruptedError("Collection cancelled")
+                    if attempts >= opts.episodes * opts.candidate_multiplier:
                         raise RuntimeError("Candidate budget exhausted; partial ledger retained, no false completion")
                     attempt = task_root / f"attempt_{attempts:05d}"
                     if attempt.exists():
@@ -220,7 +231,7 @@ def collection(opts):
     pairs = [(task, cfg) for task in tasks for cfg in ("demo_clean", "demo_randomized")]
     if len(opts.gpus) < 2 or len(opts.gpus) % 2 or len(set(opts.gpus)) != len(opts.gpus):
         raise ValueError("Use distinct GPU pairs; default 4 policy + 4 simulator GPUs")
-    if opts.episodes <= 0 or opts.seed_timeout <= 0 or opts.seed_start < 0:
+    if opts.episodes <= 0 or opts.seed_timeout <= 0 or opts.seed_start < 0 or opts.candidate_multiplier <= 0:
         raise ValueError("Invalid episode count, seed or timeout")
     if opts.command == "eval" and not opts.manifests:
         raise ValueError("Paired evaluation requires locked collection --manifests")
@@ -235,6 +246,9 @@ def collection(opts):
                      manifests=str(opts.manifests.resolve()) if opts.manifests else None)
     signature = json.loads(json.dumps(signature))
     path = opts.output / "protocol.json"
+    signature["robotwin_commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=opts.robotwin, text=True).strip()
+    signature["task_config_sha256"] = {cfg:sha256_file(opts.robotwin / "task_config" / f"{cfg}.yml")
+                                      for cfg in ("demo_clean", "demo_randomized")}
     if path.exists() and json.loads(path.read_text()) != signature:
         raise ValueError("Output belongs to a different collection/eval protocol")
     atomic_json(path, signature)
@@ -253,7 +267,9 @@ def main():
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--model-config", type=Path)
     parser.add_argument("--replay-root", type=Path)
-    parser.add_argument("--no-gradient-checkpointing", action="store_true")
+    gc = parser.add_mutually_exclusive_group()
+    gc.add_argument("--no-gradient-checkpointing", action="store_true", help="Verified protocol default")
+    gc.add_argument("--gradient-checkpointing", action="store_true", help="Explicit fallback to existing block checkpoint policy")
     parser.add_argument("--smoke-steps", type=int, default=0, help="Bounded 1..10 update probe; no checkpoints")
     parser.add_argument("--smoke-task-globs", help="Explicit certified-data subset for memory probes only")
     parser.add_argument("--execute", action="store_true")
@@ -265,6 +281,7 @@ def main():
     parser.add_argument("--episodes", type=int, default=100, help="Per task AND per clean/random config")
     parser.add_argument("--seed-start", type=int, default=300000)
     parser.add_argument("--seed-timeout", type=int, default=1200)
+    parser.add_argument("--candidate-multiplier", type=int, default=20, help="Maximum candidates per requested episode; lower for probes")
     parser.add_argument("--port", type=int, default=8400)
     parser.add_argument("--manifests", type=Path)
     opts = parser.parse_args()
@@ -274,6 +291,8 @@ def main():
     os.environ["PYTHONPATH"] = os.pathsep.join(sources) + os.pathsep + os.environ.get("PYTHONPATH", "")
     opts.output = opts.output.resolve()
     if opts.command in ("collect", "eval"):
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, lambda *_args: STOP.set())
         if not opts.checkpoint or not opts.model_config:
             parser.error("Collection/eval requires checkpoint and model-config")
         collection(opts)

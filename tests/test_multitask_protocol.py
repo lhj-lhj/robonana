@@ -110,7 +110,7 @@ def test_seed_timeout_replaced_but_locked_eval_not_replaced(tmp_path, monkeypatc
     (simulator/"task_config/demo_clean.yml").write_text("config")
     opts=SimpleNamespace(command="collect",output=tmp_path/"collect",robotwin=simulator,
         checkpoint=tmp_path/"model.bin",model_config=tmp_path/"model.json",gpus=[0,1],port=8400,
-        episodes=1,seed_timeout=60,seed_start=300000,sim_python=Path(sys.executable),
+        episodes=1,seed_timeout=60,seed_start=300000,candidate_multiplier=20,sim_python=Path(sys.executable),
         initial_dataset=tmp_path/"initial",manifests=None)
     prepared=[]
     def fake_run(command,**kwargs):
