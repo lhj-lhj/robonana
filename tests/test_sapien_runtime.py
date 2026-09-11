@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from pathlib import Path
+import subprocess
 
 import pytest
 
 from robonana.sim.sapien_runtime import configure_sapien_runtime
+
+
+def test_zero_throughput_dependency_patch_is_valid():
+    # 中文：验证补丁格式及两个shader目标；实际编译/黑色目标回归必须在仿真GPU执行。
+    # English: Check patch syntax/targets; compilation and black-target regression require a sim GPU.
+    patch = Path(__file__).resolve().parents[1] / "patches/sapien/0002-terminate-zero-throughput-rays.patch"
+    result = subprocess.run(["git", "apply", "--numstat", str(patch)],
+                            check=True, capture_output=True, text=True)
+    assert "vulkan_shader/rt/camera.rchit" in result.stdout
+    assert "vulkan_shader/rt/camera.rgen" in result.stdout
 
 
 class FakeScene:

@@ -28,6 +28,41 @@ cuda_arch=${CMAKE_CUDA_ARCHITECTURES:-100}
 source_dir=${SVULKAN_SOURCE_DIR:-${build_root}/sapien-vulkan-2-${svulkan_commit:0:8}}
 build_dir=${SVULKAN_BUILD_DIR:-${build_root}/build-${svulkan_commit:0:8}}
 patch_file=${repo_root}/patches/sapien/0001-serialize-oidn-vulkan-cuda.patch
+ray_patch_file=${repo_root}/patches/sapien/0002-terminate-zero-throughput-rays.patch
+
+apply_ray_guard() {
+  # 中文：修复纯黑目标的零散射光线；不改任务颜色/几何，也不切换渲染器。
+  # English: Guard zero-scattering rays without changing task colors/geometry or renderer.
+  # Upstream: https://github.com/haosulab/sapien-vulkan-2/blob/74d6529a6a213bfb84dee75035600b79eb7c3c44/shader/rt/camera.rchit
+  # Upstream: https://github.com/haosulab/sapien-vulkan-2/blob/74d6529a6a213bfb84dee75035600b79eb7c3c44/shader/rt/camera.rgen
+  local package_dir
+  package_dir=$("${python_bin}" -c 'import importlib.util,pathlib; print(pathlib.Path(importlib.util.find_spec("sapien").origin).resolve().parent)')
+  case "${package_dir}" in
+    "${env_prefix}"/*) ;;
+    *) echo "SAPIEN resolved outside target environment: ${package_dir}" >&2; exit 2 ;;
+  esac
+  if git -C "${package_dir}" apply --reverse --check "${ray_patch_file}" 2>/dev/null; then
+    echo "SAPIEN zero-throughput ray guard is already applied"
+    return
+  fi
+  git -C "${package_dir}" apply --check "${ray_patch_file}"
+  local shader
+  for shader in camera.rchit camera.rgen; do
+    if [[ ! -f "${package_dir}/vulkan_shader/rt/${shader}.robonana-original" ]]; then
+      cp -p "${package_dir}/vulkan_shader/rt/${shader}" "${package_dir}/vulkan_shader/rt/${shader}.robonana-original"
+    fi
+  done
+  git -C "${package_dir}" apply "${ray_patch_file}"
+  echo "Installed SAPIEN zero-throughput ray guard: ${package_dir}/vulkan_shader/rt"
+}
+
+# 中文：已有正确OIDN运行时仅更新shader，无需重编译库；新进程才会加载。
+# English: An existing OIDN runtime can update shaders without rebuilding; affects new processes.
+# Invocation: ROBONANA_SAPIEN_SHADER_ONLY=1 bash scripts/env/install_sapien_oidn_blackwell.sh ENV_PREFIX
+if [[ "${ROBONANA_SAPIEN_SHADER_ONLY:-0}" == "1" ]]; then
+  apply_ray_guard
+  exit 0
+fi
 
 for executable in "${python_bin}" "${cmake_bin}" ninja git "${cuda_path}/bin/nvcc"; do
   if ! command -v "${executable}" >/dev/null 2>&1 && [[ ! -x "${executable}" ]]; then
@@ -56,6 +91,7 @@ PY
 if [[ "${installed_version}" != "${sapien_version}" ]]; then
   "${python_bin}" -m pip install --no-deps --force-reinstall "${sapien_wheel_url}"
 fi
+apply_ray_guard
 
 if [[ ! -d "${source_dir}/.git" ]]; then
   git clone --no-checkout "${svulkan_repo}" "${source_dir}"

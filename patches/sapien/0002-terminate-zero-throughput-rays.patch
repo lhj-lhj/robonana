@@ -1,0 +1,51 @@
+diff --git a/vulkan_shader/rt/camera.rchit b/vulkan_shader/rt/camera.rchit
+--- a/vulkan_shader/rt/camera.rchit
++++ b/vulkan_shader/rt/camera.rchit
+@@ -140,9 +140,13 @@
+   float transmissionProb = transmission;
+   float total = diffuseProb + specularProb + transmissionProb;
+ 
+-  diffuseProb = diffuseProb / total;
+-  specularProb = specularProb / total;
+-  transmissionProb = transmissionProb / total;
++  // Pure black, non-scattering materials have zero total probability.
++  // Keep all probabilities zero; the ray generator terminates zero throughput.
++  if (total > 0.0) {
++    diffuseProb = diffuseProb / total;
++    specularProb = specularProb / total;
++    transmissionProb = transmissionProb / total;
++  }
+ 
+   // HACK: avoid extreme values to reduce fireflies
+   if (diffuseProb > 1e-6) {
+@@ -156,9 +160,11 @@
+     transmissionProb += 0.1;
+   }
+   total = diffuseProb + specularProb + transmissionProb;
+-  diffuseProb = diffuseProb / total;
+-  specularProb = specularProb / total;
+-  transmissionProb = transmissionProb / total;
++  if (total > 0.0) {
++    diffuseProb = diffuseProb / total;
++    specularProb = specularProb / total;
++    transmissionProb = transmissionProb / total;
++  }
+ 
+   float rand = rnd(ray.seed);
+ 
+diff --git a/vulkan_shader/rt/camera.rgen b/vulkan_shader/rt/camera.rgen
+--- a/vulkan_shader/rt/camera.rgen
++++ b/vulkan_shader/rt/camera.rgen
+@@ -118,6 +118,12 @@
+         vec4 ndc = cameraBuffer.projectionMatrix * position;
+         imageStore(outPosition, ivec2(gl_LaunchIDEXT.xy), vec4(position.xyz, ndc.z / ndc.w));
+       }
++      // An absorbed ray contributes nothing further. Never trace its zero
++      // direction (e.g. a pure-black target): that is invalid for Vulkan.
++      // Preserve first-hit outputs above, including segmentation and position.
++      if (all(equal(attenuation, vec3(0.0)))) {
++        break;
++      }
+     }
+     // TODO: implement unterminated ray properly
+   }
