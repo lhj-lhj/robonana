@@ -203,3 +203,18 @@ PYTHONPATH=src:third_party/FACT:third_party/flux2/src:third_party/flux2_official
 
 这一步是新链路实际编码，不是重命名旧缓存。应先做1个episode的有界转换/一致性和耗时测试，
 估算全量磁盘与时间后再开27500条。语言缓存完整性也需要独立检查。
+
+### 有界采集 smoke（不是正式 Round0）
+
+使用已有 `120k_action_only_export_20260909`，GPU6 policy/GPU7 simulator，
+`hanging_mug`、seed200001、每配置目标1条、最多1个候选、每候选300s。
+Clean expert检查通过；scout执行900步失败，进入逐帧重放；重放未在此严格预算内完成，
+collector触发 `TimeoutError: collection probe exceeded its bounded deadline`。
+supervisor写入 infrastructure_error，不计作有效policy episode，测试候选预算耗尽后退出。
+没有发布HDF5（文件数0），八卡均已释放；Randomized未进入，所以不能报“clean/random重放测试通过”。
+首次收集换新seed、最终locked eval不换seed由故障注入测试覆盖，真实多seed替换还要进一步验收。
+正式默认1200s不是该smoke的300s；尚未据此测出8卡吞吐或完成50任务压力测试。
+产物：`outputs/multitask_protocol_validation_20260911/infra_smoke/`，包含任务ledger、命令配置和独立服务/环境日志。
+
+本次只改RoboNana配置/初始化适配/采集总控及文档测试；没有改RoboTwin任务源代码或RoboNana的MAC目标公式。
+旧单任务实验MD和posttrain_config中用户已有未提交修改保持原样。
