@@ -172,3 +172,11 @@ scout+replay加速取决于SR：失败越多、重放开销越大，不保证始
 最后观察日志step7930；最新完整checkpoint为 `checkpoint_epoch_23_step_7000`，包含FLUX/专家、Value EMA和optimizer。
 通过终止已核实的 accelerate launcher PID992629 完成退出，未停止其他任务。尾段未另存。
 新协议的长训练、10000场景采集尚未启动。测试结果在完成后补入本节；未运行的门槛不标作通过。
+
+- 190首轮相关回归61项通过；新增seed故障回归后协议文件7项通过（与前61项有重叠，不相加）。
+- 真实数据元信息：Clean 50任务×50=2500；Randomized 50任务×500=25000。
+- 首次八卡、batch16、全关GC smoke在真实数据契约检查失败：`Clean/adjust_bottle/flux_cache/latents_v2/_contract.json` 缺失。
+  已进入prepare，原始FLUX与optimizer准备未报错，但没有完成训练step，因此这次测试不能给出显存可行性结论。
+- 日志：`outputs/multitask_protocol_validation_20260911/gc_off.log`；W&B run `qozrly7w`，用户团队正确。
+- 仅显存探针允许 `--smoke-task-globs Clean/hanging_mug --smoke-steps 3`。正式入口拒绝无smoke预算的数据子集覆盖；
+  这只能测试相同tensor尺寸下的显存，不能认证50任务缓存已经可用。

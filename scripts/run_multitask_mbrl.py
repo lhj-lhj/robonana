@@ -57,6 +57,10 @@ def training(opts):
         os.environ["ROBONANA_PROTOCOL_SMOKE_STEPS"] = str(opts.smoke_steps)
     else:
         os.environ.pop("ROBONANA_PROTOCOL_SMOKE_STEPS", None)
+    if opts.smoke_task_globs:
+        os.environ["ROBONANA_PROTOCOL_SMOKE_TASK_GLOBS"] = opts.smoke_task_globs
+    else:
+        os.environ.pop("ROBONANA_PROTOCOL_SMOKE_TASK_GLOBS", None)
     from robonana.configs.multitask_mbrl import config, MILESTONES
     if opts.command == "aliases":
         # No duplicate multi-GB weights. Resolve only actual complete inference exports.
@@ -251,6 +255,7 @@ def main():
     parser.add_argument("--replay-root", type=Path)
     parser.add_argument("--no-gradient-checkpointing", action="store_true")
     parser.add_argument("--smoke-steps", type=int, default=0, help="Bounded 1..10 update probe; no checkpoints")
+    parser.add_argument("--smoke-task-globs", help="Explicit certified-data subset for memory probes only")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--robotwin", type=Path, default=Path("/workspace/hongjia/RoboTwin"))
     parser.add_argument("--sim-python", type=Path, default=Path("/data3/hongjia/venvs/robotwin-sapien303/bin/python"))

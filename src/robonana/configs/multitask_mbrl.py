@@ -57,6 +57,9 @@ def build_protocol_config(base, phase):
         if "round_max" in pool:
             pool["round_max"] = -1
     smoke_steps = int(os.environ.get("ROBONANA_PROTOCOL_SMOKE_STEPS", "0"))
+    smoke_globs = os.environ.get("ROBONANA_PROTOCOL_SMOKE_TASK_GLOBS", "")
+    if smoke_globs and not smoke_steps:
+        raise ValueError("Data subset overrides are only allowed in bounded smoke tests")
     if smoke_steps:
         if not 1 <= smoke_steps <= 10:
             raise ValueError("Smoke budget must be 1..10 updates")
@@ -64,6 +67,8 @@ def build_protocol_config(base, phase):
                      checkpoint_keeps=[])
         result["schedulers"].update(decay_steps=smoke_steps, warmup_steps=1)
         train["tracker_init_kwargs"]["wandb"]["name"] += "-smoke"
+        if smoke_globs:
+            pools[0]["task_globs"] = tuple(smoke_globs.split(","))
     return result
 
 
