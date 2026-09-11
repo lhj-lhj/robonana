@@ -359,6 +359,24 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NCCL_NVLS_ENABLE=0 "$PY" -m torch.distribut
 
 #### 2026-09-12 验收接续
 
+- 真实4B三步保存测试正常退出（18:08 UTC），完整保留step2/step3，滚动保留策略删除了
+  本探针的step1。W&B `8lsmxoii`。从step2在独立 `real4b_resume` 目录恢复后完成step3并
+  正常退出（19:02 UTC），W&B `yzarzlh7`。日志确认模型、Adam、scheduler、sampler、RNG均加载。
+- **恢复尚未获逐元素等价认证，正式训练仍未启动。** 两次step3的loss打印值一致，但导出模型
+  392个tensor中86个非逐元素相等：5,002,609,664个元素中549,015个不同（约0.011%），
+  最大绝对差0.000244140625（BF16）。不能仅凭幅度就认定是CUDA误差，也不能称为bitwise恢复。
+  已启动同一step2的第二次独立恢复 `real4b_resume_repeat`，比较重复恢复与不中断更新，
+  用以继续定位差异来源；日志 `real4b_resume_repeat.launch.log`。
+  恢复入口命令（不要在当前测试运行时重复执行）：
+
+  ```bash
+  ROBONANA_PYTHON="$PY" \
+  ROBONANA_RESUME_CHECKPOINT="$CHECK/real4b_save/pretrain/models/checkpoint_epoch_1_step_2" \
+  ROBONANA_RESUME_CONFIG="$CHECK/real4b_save/pretrain/config.json" \
+  ROBONANA_PROJECT_DIR="$CHECK/real4b_resume_repeat" NCCL_NVLS_ENABLE=0 \
+    bash scripts/run_robotwin_train.sh --config robonana.configs.world_policy_resume.config
+  ```
+
 - 后续采集测试完成：16条有效episode，9成功、7失败；7次失败重放全部
   `action_exact=true, action_max_abs=0, replay_verified=true`，覆盖Clean和Randomized。
   每次rollout的summary均提供逐帧数据验收标记；成功样本没有HDF5。
