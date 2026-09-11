@@ -93,7 +93,35 @@ def training(opts):
                 destination.symlink_to(checkpoint, target_is_directory=True)
         return
     print(json.dumps(config, indent=2, default=str))
-    if not opts.execute:
+    if not opts.execute and opts.command != "audit":
+        return
+    # 中文：在占GPU前复用真实数据类和cache契约检查，不只是检查配置字典。
+    # English: Fail on missing/full-data caches before loading eight FLUX replicas.
+    from robonana.data.robotwin_hdf5 import RoboTwinHDF5Dataset, RoboTwinPosttrainSampler
+    from robonana.data.robotwin_lerobot import RoboTwinLeRobotDataset
+    from robonana.image_pipeline import validate_training_image_contracts
+    from torch.utils.data import ConcatDataset
+    classes = {cls.__name__:cls for cls in (RoboTwinHDF5Dataset, RoboTwinLeRobotDataset)}
+    data = config["dataloaders"]["train"]["data_or_config"]
+    children = []
+    try:
+        for spec in data if isinstance(data, list) else [data]:
+            child = classes[spec["_class_name"]].load(spec)
+            children.append(child)
+            child._ensure_index()
+        if not opts.smoke_steps and (len(children[0].records) != 27500 or
+                                    len({r.task_name for r in children[0].records}) != 50):
+            raise ValueError("Full protocol requires exactly 27,500 original episodes across 50 tasks")
+        dataset = ConcatDataset(children) if len(children) > 1 else children[0]
+        if len(children) > 1:
+            RoboTwinPosttrainSampler(dataset, batch_size=128, pool_weights=
+                config["dataloaders"]["train"]["sampler"]["pool_weights"])
+        validate_training_image_contracts(dataset, config["models"]["checkpoint_dir"])
+        print("DATA PREFLIGHT PASSED: metadata, pool nonemptiness, A statistics and image contracts")
+    finally:
+        for child in children:
+            child.close()
+    if opts.command == "audit":
         return
     project = Path(config["project_dir"])
     if project.exists():
@@ -261,7 +289,7 @@ def collection(opts):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("train", "aliases", "collect", "eval"))
+    parser.add_argument("command", choices=("audit", "train", "aliases", "collect", "eval"))
     parser.add_argument("--phase", choices=("pretrain", "stage1", "stage2"), default="pretrain")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path)

@@ -2,6 +2,8 @@
 
 更新：2026-09-11。单次 loop：`idx=0`。这是新的完整实验，**不续跑旧 hanging_mug 优化器或 LR 时钟**。
 维护入口：[run_multitask_mbrl.py](../scripts/run_multitask_mbrl.py)。默认只打印计划，`--execute` 才执行。
+`audit` 是例外：只运行真实数据元信息、池非空、A统计和cache契约校验，不分配训练模型、不启动仿真。
+正式 `train --execute` 也会先执行这项CPU preflight，避免等八份FLUX加载之后才发现缓存缺失。
 算法仍是 `mac_mot_v2`，固定 chunk=48；不启用 student、softmax、Q EMA 或 EMA FLUX。
 
 ## 1. 阶段、数据、参数 / Stages
@@ -97,6 +99,7 @@ PY=/data3/hongjia/conda/envs/robonana/bin/python
 
 # 预训练配置检查；正式执行需人工补 --execute。
 $PY scripts/run_multitask_mbrl.py train --phase pretrain --output "$RUN"
+$PY scripts/run_multitask_mbrl.py audit --phase pretrain --output "$RUN"
 # 独立显存 smoke，不保存 ckpt，不会接上正式训练。
 $PY scripts/run_multitask_mbrl.py train --phase pretrain --output "${RUN}_gc_smoke" \
   --no-gradient-checkpointing --smoke-steps 3 --execute
@@ -175,6 +178,8 @@ scout+replay加速取决于SR：失败越多、重放开销越大，不保证始
 新协议的长训练、10000场景采集尚未启动。测试结果在完成后补入本节；未运行的门槛不标作通过。
 
 - 190首轮相关回归61项通过；新增seed故障回归后协议文件7项通过（与前61项有重叠，不相加）。
+- 最新相关回归集合62项通过（52.90s）；涵盖真实配置构造、原始FLUX初始化、分组LR、scout/replay队列、
+  跨进程超时清理、首次收集换seed及锁定eval不换seed。没有把这些单测当作10,000场景压力测试。
 - 真实数据元信息：Clean 50任务×50=2500；Randomized 50任务×500=25000。
 - 首次八卡、batch16、全关GC smoke在真实数据契约检查失败：`Clean/adjust_bottle/flux_cache/latents_v2/_contract.json` 缺失。
   已进入prepare，原始FLUX与optimizer准备未报错，但没有完成训练step，因此这次测试不能给出显存可行性结论。
