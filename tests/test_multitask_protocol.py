@@ -41,6 +41,22 @@ def test_protocol_config(monkeypatch, phase, steps, rates, keeps):
     assert base["dataloaders"]["train"]["data_or_config"]["task_globs"] == ("Clean/hanging_mug",)
 
 
+def test_bounded_checkpoint_probe(monkeypatch):
+    from robonana.configs.multitask_mbrl import build_protocol_config
+    from robonana.configs.robotwin_flux2 import config as base
+    monkeypatch.setenv("ROBONANA_PROTOCOL_SMOKE_SAVE", "1")
+    monkeypatch.delenv("ROBONANA_PROTOCOL_SMOKE_STEPS", raising=False)
+    with pytest.raises(ValueError, match="bounded smoke budget"):
+        build_protocol_config(base, "pretrain")
+    monkeypatch.setenv("ROBONANA_PROTOCOL_SMOKE_STEPS", "3")
+    config = build_protocol_config(base, "pretrain")
+    assert config["train"]["max_steps"] == 3
+    assert not config["train"]["disable_checkpointing"]
+    assert config["train"]["checkpoint_interval"] == 1
+    assert config["train"]["checkpoint_save_optimizer"]
+    assert config["train"]["checkpoint_keeps"] == []
+
+
 def test_missing_source_rejected(monkeypatch):
     from robonana.configs.multitask_mbrl import build_protocol_config
     from robonana.configs.robotwin_flux2 import config as base

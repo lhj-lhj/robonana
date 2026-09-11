@@ -61,6 +61,9 @@ def build_protocol_config(base, phase):
             pool["round_max"] = -1
     smoke_steps = int(os.environ.get("ROBONANA_PROTOCOL_SMOKE_STEPS", "0"))
     smoke_globs = os.environ.get("ROBONANA_PROTOCOL_SMOKE_TASK_GLOBS", "")
+    smoke_save = os.environ.get("ROBONANA_PROTOCOL_SMOKE_SAVE", "0") == "1"
+    if smoke_save and not smoke_steps:
+        raise ValueError("Smoke checkpoint saving requires a bounded smoke budget")
     if smoke_globs and not smoke_steps:
         raise ValueError("Data subset overrides are only allowed in bounded smoke tests")
     if smoke_steps:
@@ -70,6 +73,10 @@ def build_protocol_config(base, phase):
                      checkpoint_keeps=[])
         result["schedulers"].update(decay_steps=smoke_steps, warmup_steps=1)
         train["tracker_init_kwargs"]["wandb"]["name"] += "-smoke"
+        # 中文：复用正式保存钩子；独立短测目录，不改变正式里程碑和保存频率。
+        # English: Exercise production save hooks in a separate bounded smoke run.
+        if smoke_save:
+            train.update(disable_checkpointing=False, checkpoint_interval=1)
         if smoke_globs:
             pools[0]["task_globs"] = tuple(smoke_globs.split(","))
     return result
