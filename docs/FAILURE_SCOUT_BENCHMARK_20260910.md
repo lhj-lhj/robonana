@@ -35,7 +35,8 @@
 
 ### 2026-09-11：seed 与渲染路径二次隔离
 
-结论：**不是所有 seed 都崩溃，也不是故障起点的初始场景必崩；目前尚未修复完整 rollout 的 Vulkan 错误。**
+以下是修复前的隔离记录；最终修复及完整回归见下一节。结论：不是所有seed都崩溃，
+也不是故障起点的初始场景必崩。
 注意候选起点不是实际评测 seed：`stamp_seal` 从100039开始，expert拒绝100039、100040、100041，
 接受100042。不能把该次策略执行报错标为“实际场景100039崩溃”。
 
@@ -71,6 +72,68 @@ CPU/GPU去噪可能改变RGB，进而改变闭环动作；一次CPU成功不能�
 只增强已有可选诊断：`ROBONANA_SAPIEN_TRACE_CAMERAS=1`记录相机姿态；
 `ROBONANA_EVAL_DEBUG=1`记录异常发生时实际seed/控制步，并仅逐行跟踪官方评测文件，
 不逐行跟踪模型/规划器。默认关闭，不改生产计算。相关本地测试14项通过。
+
+### 最终定位与修复：纯黑目标 / 零能量光线（2026-09-11）
+
+增强日志确认一组GPU/CPU对照中，place_mouse_pad实际100008在控制步144报错；
+stamp_seal实际100042在控制步96报错，相机姿态均为有限数值。
+把左相机直接放到对应故障姿态，即使不运行policy也能复现；关闭去噪仍崩溃。
+最小复现见190 `outputs/render_pose_probe_20260911/`。
+
+两个目标颜色恰好都是Black。保持故障视角，仅移除鼠标/印章视觉仍崩溃，
+仅移除目标薄盒视觉则均正常：`outputs/render_visual_isolation_20260911/`。
+这只是诊断隔离，**正式修复保留黑盒颜色、几何、碰撞和全部物体**。
+
+原始SAPIEN光追shader会对零散射概率继续归一化，并在throughput已经为零后继续追踪。
+最小修复位于已有依赖维护目录 `patches/sapien/0002-terminate-zero-throughput-rays.patch`：
+
+1. `camera.rchit`：两次概率归一化均检查total > 0，防止零除。
+2. `camera.rgen`：完成当前命中颜色/segmentation/position输出后，当累计throughput全零时结束该光路，
+   不继续提交没有能量、可能为零方向的光线；不使用亮度阈值提前截断非零光路。
+3. 复用 `scripts/env/install_sapien_oidn_blackwell.sh`，增加shader-only安装模式；
+   校验目标在指定venv内，先check再apply，保留两份 `.robonana-original` 原shader备份；重复安装幂等。
+   无需重编译OIDN/C++库、替换GPU驱动或切换CPU去噪。脚本注释标注固定上游commit与文件链接。
+
+代码经GitHub同步，核心修复commit `1829956`。依赖补丁是受版本控制的上游修复，
+不是绕开GitHub部署项目源码。190安装命令：
+
+```bash
+ROBONANA_SAPIEN_SHADER_ONLY=1 bash scripts/env/install_sapien_oidn_blackwell.sh \
+  /data3/hongjia/venvs/robotwin-sapien303
+```
+
+修复后恢复全部视觉，两个原必崩姿态均连续完成三次三路取图：
+`outputs/render_ray_guard_regression_20260911/`。
+随后使用原120k action-only、GPU OIDN、原采样配置、启用原skip_action_render_sync，
+不使用CPU fallback，完成正式入口四条回归：
+
+| Task | 起始候选seed | 实际seed | 结果 | episode耗时（含初始化/预检） |
+|---|---:|---:|---|---:|
+| place_mouse_pad | 100008 | 100008 | 正常完成，policy失败；无ERROR | 79.107s |
+| place_mouse_pad | 100009 | 100009 | 正常完成，policy成功 | 50.069s |
+| stamp_seal | 100039 | 100042 | 正常完成，policy成功 | 82.116s |
+| stamp_seal | 100043 | 100043 | 正常完成，policy成功 | 51.066s |
+
+完整记录：190 `outputs/render_fixed_full_eval_20260911/`。
+使用空闲GPU2/3推理、4/5仿真，未停止占用6/7的其他任务。
+本地和190相关测试均15项通过。以上证明已复现故障得到修复，并非50任务×200条全量稳定性认证。
+
+#### 正常场景RGB影响边界
+
+在同一GPU4、place_mouse_pad seed100000初始场景、原GPU OIDN下，使用独立诊断shader目录
+比较备份原shader与修复版，不改正式shader配置。原版自身重复两次三路RGB逐像素完全一致；
+修复版相对原版的uint8 RGB差异如下（通道值范围0–255）：
+
+| Camera | 平均绝对差 | 最大绝对差 | 改变的通道元素占比 |
+|---|---:|---:|---:|
+| head_camera | 0.093967 | 10 | 8.9167% |
+| left_camera | 0.049384 | 4 | 4.9141% |
+| right_camera | 0.054579 | 12 | 5.4188% |
+
+记录及原始数组：190 `outputs/render_ray_guard_rgb_control_20260911/`。
+因此本次是修正渲染器的光路终止行为，**不声称历史RGB逐像素等价**；提前结束零能量光路
+会改变后续采样的随机数消费路径。没有改变模型权重、归一化、VAE处理、采样参数、物体颜色、
+几何或物理规则，也没有回写任何历史数据。此对照仅覆盖一个正常初始场景，不能替代广泛视觉回归。
 
 ## 可选采集模式
 
