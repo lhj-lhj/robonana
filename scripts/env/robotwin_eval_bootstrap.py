@@ -37,8 +37,15 @@ def _install_exception_trace() -> None:
                 and frame.f_code.co_name != "parse_override_pairs"
             ):
                 exc_type, exc, tb = arg
+                # 中文：候选 seed 可能被专家检查跳过；必须报告真实场景和控制步。
+                # English: Expert checks can skip candidate seeds; report the live scene/step.
+                task_env = frame.f_locals.get("TASK_ENV")
+                context = {
+                    "seed": frame.f_locals.get("now_seed"),
+                    "control_step": getattr(task_env, "take_action_cnt", None),
+                }
                 print(
-                    "[RoboNana eval exception]\n"
+                    f"[RoboNana eval exception] context={context}\n"
                     + "".join(traceback.format_exception(exc_type, exc, tb)),
                     file=sys.stderr,
                     flush=True,

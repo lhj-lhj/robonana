@@ -65,12 +65,14 @@ def test_configure_sapien_runtime_can_trace_camera_calls(monkeypatch, capsys):
 
     configure_sapien_runtime(device="cuda:0", sapien_module=module)
     camera = module.pysapien.render.RenderCameraComponent()
+    camera.entity.get_pose = lambda: SimpleNamespace(p=[1, 2, 3], q=[1, 0, 0, 0])
     camera.take_picture()
 
     assert camera.calls == 1
     output = capsys.readouterr().out
     assert "take_picture begin camera='head_camera'" in output
     assert "take_picture end camera='head_camera'" in output
+    assert "camera_pose p=[1, 2, 3] q=[1, 0, 0, 0]" in output
 
 
 @pytest.mark.parametrize("device", ["", "cuda", "cuda:x", "gpu:1"])

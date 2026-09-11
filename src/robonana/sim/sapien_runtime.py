@@ -71,6 +71,11 @@ def configure_sapien_runtime(
             if not camera_name and entity is not None and hasattr(entity, "get_name"):
                 camera_name = entity.get_name()
             print(f"[RoboNana SAPIEN] take_picture begin camera={camera_name!r}", flush=True)
+            # 中文：仅在显式诊断时记录姿态，区分无效相机状态与渲染后端错误。
+            # English: Diagnostic-only pose logging distinguishes invalid camera state from backend faults.
+            if entity is not None and hasattr(entity, "get_pose"):
+                pose = entity.get_pose()
+                print(f"[RoboNana SAPIEN] camera_pose p={pose.p} q={pose.q}", flush=True)
             original_take_picture(camera)
             print(f"[RoboNana SAPIEN] take_picture end camera={camera_name!r}", flush=True)
 
