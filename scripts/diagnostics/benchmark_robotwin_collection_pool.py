@@ -30,6 +30,19 @@ from eval_robotwin_task_isolated import terminate_process_group
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def server_command(opts, output):
+    """中文：正式多任务入口复用同一服务参数。 English: Shared server argv, no second inference path."""
+    return [sys.executable, str(ROOT / "scripts/services/inference_server_robotwin_batched.py"),
+        "--checkpoint", str(opts.checkpoint.resolve()), "--model-config", str(opts.model_config.resolve()),
+        "--flux-checkpoint-dir", str(ROOT / "checkpoints/FLUX.2-klein-base-4B"),
+        "--stats-path", str(A_STATS_PATH),
+        "--model-device", "cuda:0", "--vae-device", "cuda:0", "--text-encoder-device", "cuda:0",
+        "--inference-mode", opts.inference_mode, "--port", str(opts.port),
+        "--max-batch-size", str(opts.inference_batch_size),
+        "--max-batch-wait-ms", str(opts.batch_wait_ms), "--max-clients", "8",
+        "--batch-metrics-path", str(output / "batch_metrics.jsonl")]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sources = parser.add_mutually_exclusive_group(required=True)
@@ -54,7 +67,9 @@ def main():
                         help='Save predictions for executed chunks; needs a trained world-capable checkpoint')
     parser.add_argument('--action-student', type=Path,
                         help='Optional isolated student weights, action-only evaluation')
-    parser.add_argument('--capture-mode',choices=('full','full_failures','scout_replay','paired_benchmark'),default='full')
+    parser.add_argument('--capture-mode',choices=('full','full_failures','scout','scout_replay','paired_benchmark'),default='full')
+    parser.add_argument('--external-server', action='store_true',
+                        help='Use a server owned by the multi-task supervisor; never terminate it here')
     opts = parser.parse_args()
     if not 1 <= opts.inference_batch_size <= 8 or not 1 <= opts.candidate_batch_size <= 32:
         parser.error("request batch must be 1..8 and candidate batch 1..32")
@@ -103,16 +118,7 @@ def main():
         common['ROBONANA_SELECTED_WORLD_ROOT'] = str(output / 'selected_world')
     server_env = dict(common, CUDA_VISIBLE_DEVICES=str(opts.server_gpu),
                       ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE=str(opts.candidate_batch_size))
-    server_cmd = [sys.executable, str(ROOT / "scripts/services/inference_server_robotwin_batched.py"),
-        "--checkpoint", str(opts.checkpoint.resolve()), "--model-config", str(opts.model_config.resolve()),
-        "--flux-checkpoint-dir", str(ROOT / "checkpoints/FLUX.2-klein-base-4B"),
-        "--stats-path", str(A_STATS_PATH),
-        "--model-device", "cuda:0", "--vae-device", "cuda:0", "--text-encoder-device", "cuda:0",
-        "--inference-mode", opts.inference_mode, "--port", str(opts.port),
-        # Scheduling knobs only; algorithm settings come from the checkpoint.
-        "--max-batch-size", str(opts.inference_batch_size),
-        "--max-batch-wait-ms", str(opts.batch_wait_ms), "--max-clients", "8",
-        "--batch-metrics-path", str(output / "batch_metrics.jsonl")]
+    server_cmd = server_command(opts, output)
     configuration = {k: str(v) if isinstance(v, Path) else v for k, v in vars(opts).items()}
     if opts.action_student:
         server_cmd += ['--action-student',str(opts.action_student.resolve())]
@@ -129,9 +135,10 @@ def main():
     signal.signal(signal.SIGINT, interrupted)
     try:
         logs.append((output / "server.log").open("w"))
-        server = subprocess.Popen(server_cmd, env=server_env, cwd=ROOT, stdout=logs[-1],
+        server = None if opts.external_server else subprocess.Popen(server_cmd, env=server_env, cwd=ROOT, stdout=logs[-1],
                                   stderr=subprocess.STDOUT, start_new_session=True)
-        children.append(server)
+        if server is not None:
+            children.append(server)
         for rank, gpu in enumerate(opts.sim_gpus):
             worker_dir = output / f"worker_{rank}_gpu_{gpu}"
             worker_dir.mkdir()
@@ -160,7 +167,7 @@ def main():
             workers.append(worker)
         with (output / "gpu_usage.jsonl").open("w", buffering=1) as gpu_log:
             while any(worker.poll() is None for worker in workers):
-                if server.poll() is not None or any(worker.poll() not in (None, 0) for worker in workers):
+                if (server is not None and server.poll() is not None) or any(worker.poll() not in (None, 0) for worker in workers):
                     raise RuntimeError("server/worker failed; inspect independent logs")
                 if time.perf_counter() - start > opts.timeout_seconds:
                     raise TimeoutError("collection probe exceeded its bounded deadline")
@@ -186,7 +193,7 @@ def main():
                 actual.append(int(handle.attrs["seed"]))
                 files_by_seed[int(handle.attrs['seed'])] = str(file)
         expected = sorted(int(job["seed"]) for job in jobs)
-        expected_files = expected if opts.capture_mode=='full' else sorted(
+        expected_files = [] if opts.capture_mode == 'scout' else expected if opts.capture_mode=='full' else sorted(
             r['seed'] for r in rows if not r['success'] and r.get('replay_verified',True))
         if sorted(actual) != expected_files or sorted(r["seed"] for r in rows) != expected:
             raise RuntimeError("completed ledger/HDF5 seeds disagree with assigned jobs")

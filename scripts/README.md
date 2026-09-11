@@ -15,6 +15,7 @@ read-only help commands: inspect their headers and the project README first.
 
 | 文件 / File | 用途 / Purpose | 副作用 / Effects |
 |---|---|---|
+| [run_multitask_mbrl.py](run_multitask_mbrl.py) | 50任务固定协议 / Fixed 50-task protocol | 默认打印计划；`--execute` 启动训练/采集/评测 / Dry-run unless explicitly executed |
 | [run_robotwin_train.sh](run_robotwin_train.sh) | 单阶段训练 / Single-phase training | 启动训练，写日志和权重 / Trains; writes logs and checkpoints |
 | [run_hanging_mug_mac_round.sh](run_hanging_mug_mac_round.sh) | 完整 MAC 轮次 / Full MAC round | 两阶段训练、评测和采集 / Trains, evaluates and collects |
 | [collect_prepare_robotwin_rollouts.sh](collect_prepare_robotwin_rollouts.sh) | 采集并准备回放 / Collect and prepare replay | 仿真、轨迹和缓存 / Simulation, rollouts and caches |

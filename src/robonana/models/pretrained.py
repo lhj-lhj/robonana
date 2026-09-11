@@ -63,6 +63,36 @@ def _load_state(path: Path) -> dict[str, torch.Tensor]:
     return state
 
 
+def load_flux2_backbone_checkpoint(checkpoint_path, *, params, action_dim=14,
+                                   state_dim=14, expert_hidden_dim=1024,
+                                   device="cpu", dtype=torch.bfloat16):
+    """中文：原始 FLUX 初始化，不接受缺失 backbone 或夹带旧 robot head。
+
+    English: Load only the complete upstream FLUX state, then reuse the existing
+    ImageWAM-derived expert transfer (queries/scalar heads stay freshly initialized).
+    Upstream loader: https://github.com/black-forest-labs/flux2/blob/main/src/flux2/util.py
+    No transformer implementation is copied or precision policy changed here.
+    """
+    from safetensors.torch import load_file
+    from .flux2_scalar_expert import initialize_scalar_expert_from_flux
+
+    model = MacFlux2FACTModel(params, action_dim=action_dim, state_dim=state_dim,
+                             expert_hidden_dim=expert_hidden_dim)
+    state = load_file(str(checkpoint_path), device="cpu")
+    robot_names = set(robot_parameter_names(model))
+    backbone = set(model.state_dict()) - robot_names
+    if set(state) != backbone:
+        raise ValueError(f"Original FLUX keys mismatch: missing={sorted(backbone-set(state))}, "
+                         f"unexpected={sorted(set(state)-backbone)}")
+    model.load_state_dict(state, strict=False)  # Exact key set checked above; shapes checked by PyTorch.
+    for name in ("value_expert", "q_expert"):
+        initialize_scalar_expert_from_flux(getattr(model, name), model)
+    model.to(device=device, dtype=dtype)
+    return model, PretrainedLoadReport(
+        checkpoint=str(checkpoint_path), checkpoint_parameters=sum(v.numel() for v in state.values()),
+        initialized_robot_parameters=tuple(sorted(robot_names)), loaded_parameter_names=tuple(sorted(state)))
+
+
 def load_flux2_fact_trained_checkpoint(
     checkpoint_path: str | Path,
     *,

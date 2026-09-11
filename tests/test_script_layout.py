@@ -11,6 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 PUBLIC = {
+    "run_multitask_mbrl.py",
     "run_robotwin_train.sh", "run_hanging_mug_mac_round.sh",
     "collect_prepare_robotwin_rollouts.sh", "eval_robotwin_all_tasks_parallel.sh",
     "prepare_robotwin_rollouts.py", "report_selected_world_eval.py",

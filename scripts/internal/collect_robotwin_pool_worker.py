@@ -33,7 +33,9 @@ def main():
     parser.add_argument("--worker-id", required=True)
     parser.add_argument("--prepare-seeds", type=int, default=0,
                         help="Expert-check this many new seeds, without loading a policy or recording replay")
-    parser.add_argument('--capture-mode', choices=('full','full_failures','scout_replay','paired_benchmark'),default='full')
+    parser.add_argument('--capture-mode', choices=('full','full_failures','scout','scout_replay','paired_benchmark'),default='full')
+    parser.add_argument('--candidate-limit', type=int, default=None,
+                        help='Bound expert seed attempts; production supervisor uses one candidate per watchdog')
     opts = parser.parse_args()
     if not opts.jobs and not opts.prepare_seeds:
         parser.error('--jobs is required for collection')
@@ -67,7 +69,7 @@ def main():
             import numpy as np
             accepted = []
             start_seed = int(payload['jobs'][0]['seed'])
-            for seed in range(start_seed, start_seed + opts.prepare_seeds * 20):
+            for seed in range(start_seed, start_seed + (opts.candidate_limit or opts.prepare_seeds * 20)):
                 try:
                     task.setup_demo(now_ep_num=0, seed=seed, is_test=True, **args)
                     episode = task.play_once()
@@ -97,7 +99,7 @@ def main():
         task.suc = 0
         task.test_num = 0
         results = []
-        scout_mode = opts.capture_mode in ('scout_replay','paired_benchmark')
+        scout_mode = opts.capture_mode in ('scout','scout_replay','paired_benchmark')
         slot = RoboNanaSubEnv(task, model, payload["jobs"], args, adapter,
                              audit_actions=scout_mode, defer_publish=scout_mode)
         writer = model._robonana_rollout_writer
@@ -132,7 +134,7 @@ def main():
                     result['scout_rgb_steps'] = result['rgb_steps']
                     # Benchmark replays successes too to measure the baseline cost;
                     # their frames are buffered then discarded, never published.
-                    if not result['success'] or opts.capture_mode == 'paired_benchmark':
+                    if opts.capture_mode != 'scout' and (not result['success'] or opts.capture_mode == 'paired_benchmark'):
                         replay, replay_actions = phase(job, record=True)
                         same_shape = len(actions)==len(replay_actions)
                         exact = same_shape and np.array_equal(np.asarray(actions),np.asarray(replay_actions))

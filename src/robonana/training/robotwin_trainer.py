@@ -280,21 +280,30 @@ class RoboNanaTrainer(Trainer):
         # Missing metadata is never silently promoted to a certified checkpoint.
         # Only a deliberate new Stage-1 adaptation may start from old weights;
         # Stage 2 freezes FLUX and cannot certify a changed input representation.
-        converted_actor = validate_training_initialization(
+        original_flux = _config_value(model_config, "initialization", "trained") == "flux_backbone"
+        if original_flux and self.mac_phase != "world_policy":
+            raise ValueError("Original FLUX initialization is only valid for world-policy pretraining")
+        converted_actor = False if original_flux else validate_training_initialization(
             checkpoint, self.inference_contract, phase=self.mac_phase,
             allow_uncertified=self.kwargs.get('allow_uncertified_pretrain', False),
             resume=self.kwargs.get('resume', False),
         )
-        model, report = load_flux2_fact_trained_checkpoint(
-            str(checkpoint), action_dim=action_dim, state_dim=state_dim,
-            reward_dim=reward_dim, success_dim=success_dim, q_dim=q_dim,
-            reward_head_type=reward_head_type, max_horizon=max_horizon,
-            pred_action_bidirectional=pred_action_bidirectional,
-            architecture_version=architecture_version, chunk_horizon=chunk_horizon,
-            value_dim=value_dim, expert_hidden_dim=expert_hidden_dim,
-            device=self.device, dtype=self.dtype, params=params,
-            config_path=_config_value(model_config, "checkpoint_config", None),
-        )
+        if original_flux:
+            from robonana.models.pretrained import load_flux2_backbone_checkpoint
+            model, report = load_flux2_backbone_checkpoint(
+                checkpoint, params=params, action_dim=action_dim, state_dim=state_dim,
+                expert_hidden_dim=expert_hidden_dim, device=self.device, dtype=self.dtype)
+        else:
+            model, report = load_flux2_fact_trained_checkpoint(
+                str(checkpoint), action_dim=action_dim, state_dim=state_dim,
+                reward_dim=reward_dim, success_dim=success_dim, q_dim=q_dim,
+                reward_head_type=reward_head_type, max_horizon=max_horizon,
+                pred_action_bidirectional=pred_action_bidirectional,
+                architecture_version=architecture_version, chunk_horizon=chunk_horizon,
+                value_dim=value_dim, expert_hidden_dim=expert_hidden_dim,
+                device=self.device, dtype=self.dtype, params=params,
+                config_path=_config_value(model_config, "checkpoint_config", None),
+            )
         if converted_actor:
             # One-time Stage-1 warm start: reuse the ImageWAM transfer helper.
             # Preserve actor weights and freshly initialized scalar queries/heads.
