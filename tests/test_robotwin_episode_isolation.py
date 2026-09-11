@@ -21,6 +21,23 @@ def load_script(name: str, relative_path: str):
     return module
 
 
+def test_exception_trace_reports_live_seed_without_tracing_planner(monkeypatch, capsys):
+    bootstrap = load_script("bootstrap_exception_context", "scripts/env/robotwin_eval_bootstrap.py")
+    hooks = []
+    monkeypatch.setenv("ROBONANA_EVAL_DEBUG", "1")
+    monkeypatch.setattr(sys, "settrace", hooks.append)
+    bootstrap._install_exception_trace()
+    trace = hooks[0]
+    frame = SimpleNamespace(
+        f_code=SimpleNamespace(co_filename="/robotwin/script/eval_policy.py", co_name="eval_policy"),
+        f_locals={"now_seed": 100042, "TASK_ENV": SimpleNamespace(take_action_cnt=96)},
+    )
+    assert trace(frame, "exception", (RuntimeError, RuntimeError("device lost"), None)) is trace
+    assert "'seed': 100042, 'control_step': 96" in capsys.readouterr().err
+    frame.f_code.co_filename = "/planner/planner.py"
+    assert trace(frame, "call", None) is None
+
+
 def test_isolated_runner_accepts_explicit_retry_seed(tmp_path,monkeypatch):
     runner=load_script('isolated_seed_override','scripts/internal/eval_robotwin_task_isolated.py')
     client=tmp_path/'client.sh';client.touch()

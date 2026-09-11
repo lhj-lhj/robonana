@@ -30,11 +30,14 @@ def _install_exception_trace() -> None:
         return
 
     def trace(frame: Any, event: str, arg: Any):
+        filename = str(frame.f_code.co_filename)
+        # 中文：不逐行追踪模型/规划器；诊断只需要官方评测函数的异常。
+        # English: Avoid line tracing model/planner code; only evaluator exceptions matter.
+        if not filename.endswith(("/eval_policy.py", "\\eval_policy.py")):
+            return None
         if event == "exception":
-            filename = str(frame.f_code.co_filename)
             if (
-                (filename.endswith("/eval_policy.py") or filename.endswith("\\eval_policy.py"))
-                and frame.f_code.co_name != "parse_override_pairs"
+                frame.f_code.co_name != "parse_override_pairs"
             ):
                 exc_type, exc, tb = arg
                 # 中文：候选 seed 可能被专家检查跳过；必须报告真实场景和控制步。
