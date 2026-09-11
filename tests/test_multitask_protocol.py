@@ -86,3 +86,63 @@ def test_bounded_process_timeout(tmp_path):
     rc=module.run_bounded([sys.executable,"-c","import time; time.sleep(90)"],
                            env=dict(os.environ),log=tmp_path/"sleep.log",timeout=.2)
     assert rc==124 and time.monotonic()-start<5
+
+
+def test_seed_timeout_replaced_but_locked_eval_not_replaced(tmp_path, monkeypatch):
+    """Run the real lane supervisor with fake simulator processes, not GPU jobs."""
+    import importlib.util
+    import json
+    from pathlib import Path
+    import sys
+    from types import SimpleNamespace
+    path=Path(__file__).resolve().parents[1]/"scripts/run_multitask_mbrl.py"
+    spec=importlib.util.spec_from_file_location("protocol_lane_test",path)
+    module=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setitem(sys.modules,"benchmark_robotwin_collection_pool",
+                        SimpleNamespace(server_command=lambda *args:["fake-server"]))
+    monkeypatch.setitem(sys.modules,"eval_robotwin_task_isolated",
+                        SimpleNamespace(terminate_process_group=lambda *args,**kw:None))
+    monkeypatch.setattr(module.subprocess,"Popen",lambda *args,**kw:SimpleNamespace(poll=lambda:None))
+    monkeypatch.setattr(module.subprocess,"check_output",lambda *args,**kw:"revision\n")
+    simulator=tmp_path/"sim"
+    (simulator/"task_config").mkdir(parents=True)
+    (simulator/"task_config/demo_clean.yml").write_text("config")
+    opts=SimpleNamespace(command="collect",output=tmp_path/"collect",robotwin=simulator,
+        checkpoint=tmp_path/"model.bin",model_config=tmp_path/"model.json",gpus=[0,1],port=8400,
+        episodes=1,seed_timeout=60,seed_start=300000,sim_python=Path(sys.executable),
+        initial_dataset=tmp_path/"initial",manifests=None)
+    prepared=[]
+    def fake_run(command,**kwargs):
+        if "--prepare-seeds" in command:
+            seed=int(command[command.index("--seed-start")+1])
+            prepared.append(seed)
+            if len(prepared)==1:
+                return 124
+            output=Path(command[command.index("--output")+1])
+            module.atomic_json(output/"accepted_seeds.json",dict(jobs=[dict(seed=seed,instruction="fixed words")]))
+        else:
+            output=Path(command[command.index("--output")+1])
+            module.atomic_json(output/"summary.json",dict(replay_mismatches=0,
+                episodes=[dict(seed=300001,success=True,hdf5=None)]))
+        return 0
+    monkeypatch.setattr(module,"run_bounded",fake_run)
+    module.collect_lane(opts,[("hanging_mug","demo_clean")],0)
+    locked_path=opts.output/"hanging_mug/demo_clean/seeds.json"
+    locked=locked_path.read_bytes()
+    assert prepared==[300000,300001]
+    assert json.loads(locked)["jobs"][0]["seed"]==300001
+    opts.command="eval"
+    opts.manifests=opts.output
+    opts.output=tmp_path/"eval"
+    eval_commands=[]
+    def error_run(command,**kwargs):
+        eval_commands.append(command)
+        assert "--prepare-seeds" not in command
+        assert command[command.index("--capture-mode")+1]=="scout"
+        return 124
+    monkeypatch.setattr(module,"run_bounded",error_run)
+    module.collect_lane(opts,[("hanging_mug","demo_clean")],0)
+    assert len(eval_commands)==1 and locked_path.read_bytes()==locked
+    summary=json.loads((opts.output/"hanging_mug/demo_clean/summary.json").read_text())
+    assert summary==dict(evaluated=0,errors=1,successes=0,paired_scene_count=1)

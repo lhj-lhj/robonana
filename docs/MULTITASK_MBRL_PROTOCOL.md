@@ -140,9 +140,11 @@ reward 各步期望为 `-1 + sigmoid(logit_i)`，chunk return 为 `R = sum_i gam
 
 `y_Q = R + gamma^48 (1-d) stopgrad(V_online(s'))`
 
-`L_V = mean(((V(s)-stopgrad(y_V))/1000)^2)`
+专家直接输出归一化标量 `v=V/1000`、`q=Q/1000`；日志中的 return 是未归一化值。
 
-`L_Q = mean(((Q(s,a)-stopgrad(y_Q))/1000)^2)`
+`L_V = mean((v(s)-stopgrad(y_V)/1000)^2)`
+
+`L_Q = mean((q(s,a)-stopgrad(y_Q)/1000)^2)`
 
 Value EMA 每 optimizer update：`V_EMA ← .995 V_EMA + .005 V_online`。
 FLUX/world-generated targets无梯度；Q没有EMA。公式的精确 scaling 应以 `deterministic_return_loss` 为准。

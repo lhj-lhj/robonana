@@ -129,6 +129,8 @@ def collect_lane(opts, pairs, lane):
                     if attempts >= opts.episodes * 20:
                         raise RuntimeError("Candidate budget exhausted; partial ledger retained, no false completion")
                     attempt = task_root / f"attempt_{attempts:05d}"
+                    if attempt.exists():
+                        raise FileExistsError(f"Uncommitted attempt requires inspection, refusing overwrite: {attempt}")
                     seed_started = time.monotonic()
                     # Seed numbers may repeat across tasks/configs; identity is the full tuple.
                     seed = locked["jobs"][attempts]["seed"] if locked else opts.seed_start + attempts
@@ -261,8 +263,10 @@ def main():
     parser.add_argument("--port", type=int, default=8400)
     parser.add_argument("--manifests", type=Path)
     opts = parser.parse_args()
-    os.environ["PYTHONPATH"] = os.pathsep.join(str(ROOT / path) for path in
-        ("src", "third_party/FACT", "third_party/flux2/src", "third_party/flux2_official/src")) + os.pathsep + os.environ.get("PYTHONPATH", "")
+    sources = [str(ROOT / path) for path in
+        ("src", "third_party/FACT", "third_party/flux2/src", "third_party/flux2_official/src")]
+    sys.path[:0] = sources
+    os.environ["PYTHONPATH"] = os.pathsep.join(sources) + os.pathsep + os.environ.get("PYTHONPATH", "")
     opts.output = opts.output.resolve()
     if opts.command in ("collect", "eval"):
         if not opts.checkpoint or not opts.model_config:
