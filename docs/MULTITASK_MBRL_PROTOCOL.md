@@ -361,6 +361,14 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NCCL_NVLS_ENABLE=0 "$PY" -m torch.distribut
 
 ##### 最新结论（20:00 UTC之后，后续条目保留排查历史）
 
+- **正式120k已确认实际训练**：2026-09-11 20:05:49 UTC（北京时间9月12日04:05:49）
+  已完成60步，loss均有限；约0.929秒/step、137.7样本/秒。
+  纯训练估算约31小时，另加checkpoint保存等开销，不是完成时间保证。
+  W&B: https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/i98ayusu 。
+  启动代码提交 `74c5b1d`，后续仅同步实验文档。输出与正式配置见下文。
+  本次授权终点为长训练成功启动；验收自动化随后暂停，不停止服务器训练，
+  不自动启动正式Round0/Stage1/Stage2。
+
 - 第二次真实4B恢复正常退出。不中断vs恢复：549,015/5,002,609,664元素不同；
   恢复vs重复恢复：573,287元素不同。两组最大绝对差同为0.000244140625，差异元素均有限。
   三次step3各loss一致到日志打印精度；两个恢复均完整加载model/Adam/scheduler/sampler/RNG。
