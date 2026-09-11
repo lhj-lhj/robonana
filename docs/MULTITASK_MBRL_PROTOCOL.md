@@ -359,6 +359,26 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NCCL_NVLS_ENABLE=0 "$PY" -m torch.distribut
 
 #### 2026-09-12 验收接续
 
+- 后续采集测试完成：16条有效episode，9成功、7失败；7次失败重放全部
+  `action_exact=true, action_max_abs=0, replay_verified=true`，覆盖Clean和Randomized。
+  每次rollout的summary均提供逐帧数据验收标记；成功样本没有HDF5。
+  `stamp_seal/demo_clean`有2个候选expert检查拒绝后替换，不计为policy失败。
+  从protocol文件发布到最后任务summary发布约867秒（14.45分钟），约66.4有效episode/小时；
+  这是含启动/expert/scout/replay的文件时间戳区间估计，不含末尾服务清理，不能外推50任务。
+  单失败scout约44–74秒、逐帧replay约110–253秒；成功scout约31–65秒。
+- 现有短测入口新增显式 `--smoke-save`：仅在1–10步有界短测时允许每步保存，
+  复用正式模型/优化器保存钩子；不改变正式120k预算和里程碑策略。
+  协议和恢复相关12项测试在190通过，提交 `4991767`。
+  已启动真实4B、全数据、八卡×16、BF16、无梯度checkpoint的三步保存测试：
+
+  ```bash
+  "$PY" scripts/run_multitask_mbrl.py train --phase pretrain \
+    --output "$CHECK/real4b_save" --smoke-steps 3 --smoke-save --execute
+  ```
+
+  日志 `outputs/cache_full_validation_20260911/real4b_save.launch.log`。
+  此测试启动前全量逐episode preflight再次通过；保存/恢复结果尚待验证。
+
 - 用户已授权定时接续，全部验收通过后启动正式120k预训练；自动化 `robonana` 已创建。
   下方早期“未创建自动化”的记录是历史状态，不代表当前授权。
 - 全部8个缓存worker完成并释放GPU。实际逐episode audit通过：27,500条、6,075,103帧，
