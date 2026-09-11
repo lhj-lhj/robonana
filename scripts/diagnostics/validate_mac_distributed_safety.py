@@ -2,7 +2,7 @@
 # English: Diagnostic: verify multi-rank finite-value guards and DeepSpeed checkpoint lifecycle.
 # 调用 / Invocation: 使用 torchrun 和小模型测试；不启动正式训练。 / Uses torchrun and tiny test models; never starts production training.
 # 导航 / Guide: scripts/README.md (diagnostics)
-"""Two-rank integration checks for real Accelerate/ZeRO, not mocked reducers.
+"""Multi-rank integration checks for real Accelerate/ZeRO, not mocked reducers.
 
 Run with torchrun --standalone --nproc_per_node=2. CPU checks run in pytest;
 --backend deepspeed requires CUDA and is run explicitly on 190. A tiny model
@@ -67,7 +67,7 @@ def main():
         })
     accelerator = Accelerator(cpu=args.backend == "gloo", gradient_accumulation_steps=2,
                               mixed_precision="bf16", deepspeed_plugin=plugin)
-    assert accelerator.num_processes == 2
+    assert accelerator.num_processes >= 2
     torch.manual_seed(42)
     model = TinyCritics().bfloat16()
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-3)
@@ -86,6 +86,15 @@ def main():
     trainer.model_name = "transformer"
     trainer.checkpoint_safe_serialization = False
     trainer.checkpoint_strict = True
+    # 中文：仅给微型诊断模型提供明确标识的测试契约，复用正式保存/恢复hook。
+    # English: This is a synthetic fixture, NOT certification of real images or
+    # an inference-ready MAC checkpoint. The production loader rejects this tiny
+    # model's schema. Exercise the current contract hooks without weakening them.
+    trainer._image_inputs_certified = True
+    trainer.mac_phase = "critic"
+    trainer.inference_contract = dict(version=1, sampling={}, imagination_candidate_count=1,
+        image={"diagnostic_fixture_only": True}, normalization_sha256="synthetic-test-only",
+        action_mapping="synthetic-test-only")
     # FACT's hook uses a normal logger only on the main rank.
     import logging
     trainer.logger = logging.getLogger("safety-check")
@@ -111,7 +120,7 @@ def main():
         except FloatingPointError:
             caught = True
         caught_count = accelerator.reduce(torch.tensor(int(caught), device=accelerator.device), reduction="sum")
-        assert caught_count.item() == 2
+        assert caught_count.item() == accelerator.num_processes
         assert_same(online.state_dict(), saved_model)
         assert_same(trainer.target_value_ema.model.state_dict(), saved_target)
         assert_same(scheduler.state_dict(), saved_scheduler)
@@ -160,7 +169,7 @@ def main():
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         print(json.dumps(dict(status="PASS", backend=args.backend, mode=args.mode,
-                              bad=args.bad, micro=args.micro)), flush=True)
+                              bad=args.bad, micro=args.micro, ranks=accelerator.num_processes)), flush=True)
     accelerator.end_training()
     if dist.is_initialized():
         dist.destroy_process_group()

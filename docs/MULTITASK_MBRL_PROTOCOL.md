@@ -218,3 +218,139 @@ supervisor写入 infrastructure_error，不计作有效policy episode，测试�
 
 本次只改RoboNana配置/初始化适配/采集总控及文档测试；没有改RoboTwin任务源代码或RoboNana的MAC目标公式。
 旧单任务实验MD和posttrain_config中用户已有未提交修改保持原样。
+
+## 8. 全量缓存生成与正式训练命令（2026-09-11）
+
+### 为什么以前生成过，现在又要生成？
+
+旧缓存没有删除：`flux_cache/latents` 仍有27,500个文件，合计417.19 GiB。
+语言 `flux_cache/language` 仍有27,500个文件，合计805.65 GiB；本次不重算Qwen、不改其精度。
+旧 `_manifest.json` 只记录shape/dtype，不证明与后来统一的在线编码数值一致。
+2026-09-08的提交 `1c83eb0` 将在线/缓存统一成 FACT像素变换、FP32单图VAE、禁TF32、BF16落盘，
+新缓存改用 `latents_v2` 并附VAE/运行库指纹。此前只有Clean/hanging_mug的50条完成v2转换。
+因此“缺99个配置的缓存”准确说是缺**新链路缓存**，不是原缓存消失。
+
+全数据实际为6,075,103帧，新缓存纯tensor约417.14 GiB；启动前/data3剩余约2.7 TiB。
+旧缓存、旧checkpoint和所有原始视频都保留；不使用`--overwrite`，重复执行会跳过有效v2文件。
+目录的 `_contract.json` 表示编码规范，不表示该目录已经全量完成。
+训练入口已加强：每个episode必须有有效图像文件/完成证明及正确shape/dtype的语言文件，避免缓存生成一半就误开训。
+
+### 一次性环境设置 / Environment
+
+以下命令都在190执行；先设置这些变量，再复制后续命令。所有输出都在190，本机同名路径不是服务器目录。
+
+```bash
+cd /data3/hongjia/robonana
+export PYTHONPATH="$PWD/src:$PWD/third_party/FACT:$PWD/third_party/flux2/src:$PWD/third_party/flux2_official/src"
+PY=/data3/hongjia/conda/envs/robonana/bin/python
+DATA=/workspace/datasets/fact-robotwin-v2/RoboTwin
+FLUX="$PWD/checkpoints/FLUX.2-klein-base-4B"
+CHECK="$PWD/outputs/cache_full_validation_20260911"
+RUN="$PWD/experiments/multitask_mbrl_v1"
+ROUND=/data3/hongjia/robonana_rollouts/multitask_round0_v1
+mkdir -p "$CHECK"
+```
+
+### 单episode转换与实际落盘一致性 / Completed pilot
+
+```bash
+CUDA_VISIBLE_DEVICES=0 "$PY" scripts/data/preprocess_robotwin_lerobot_flux.py \
+  --dataset-root "$DATA" --checkpoint "$FLUX" --task-glob Clean/adjust_bottle \
+  --stage images --max-episodes 1
+
+CUDA_VISIBLE_DEVICES=0 "$PY" scripts/diagnostics/verify_image_pipeline.py \
+  --checkpoint "$FLUX" --lerobot-task "$DATA/Clean/adjust_bottle" --device cuda:0 \
+  --verify-saved-cache --report "$CHECK/single_parity.json"
+```
+
+结果：episode0共143帧，转换段耗时约3.69s；缓存shape `[143,288,128]`，全tensor有限。
+抽查帧0/1：实际落盘缓存、offline编码、online batch1/batch2完全一致，max_abs_error=0。
+这是两帧严格数值对照加整episode结构/有限值检查，不是宣称逐帧全部重新编码比对。
+相关测试24项通过。单episode速度不能直接当全数据吞吐结论。
+
+### 八卡全量缓存 / Active job
+
+**2026-09-11已启动，下列命令是复现/断点重跑入口，不要在现有任务运行时重复启动。**
+启动commit `1ce717e`；torchrun PID `1739983`，PID会失效，以实际进程和日志为准。
+此次应复用51份有效v2文件，生成27,449份；不会生成新的语言缓存。
+
+```bash
+nohup env CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+  "$PY" -u -m torch.distributed.run --standalone --nproc_per_node=8 \
+  scripts/data/preprocess_robotwin_lerobot_flux.py \
+  --dataset-root "$DATA" --checkpoint "$FLUX" \
+  --task-glob 'Clean/*' --task-glob 'Randomized/*' --stage images \
+  > "$CHECK/full_cache.log" 2>&1 < /dev/null &
+echo $! > "$CHECK/full_cache.pid"
+
+tail -n 20 "$CHECK/full_cache.log"
+# 全部worker正常退出之后验收；此命令不会起训练：
+"$PY" scripts/run_multitask_mbrl.py audit --phase pretrain --output "$RUN"
+```
+
+`--batch-size 64`（默认）只是解码/传输分组，VAE内部仍逐图FP32编码，不能为了吞吐擅自改成批量卷积。
+终端断开不会取消任务。重跑前核实旧torchrun和8个worker均已退出；不要同时开两个生成器写同一个cache。
+验收必须达到27,500个有效episode，不能仅看到100个契约文件就认为完成。
+
+### 正式预训练、Stage1、Stage2 / Explicit training launches
+
+以下是**人工正式启动**命令，本轮没有执行。W&B仍使用服务器已有认证和用户团队。
+默认八卡×16×累积1，BF16；梯度checkpoint全关；不要与缓存/验收任务抢同一批GPU。
+
+```bash
+# 原始FLUX开始，120k，backbone LR2e-5 / robot LR1e-4。
+nohup "$PY" -u scripts/run_multitask_mbrl.py train --phase pretrain --output "$RUN" --execute \
+  > "$CHECK/pretrain.launch.log" 2>&1 < /dev/null &
+
+# 预训练完成后，生成10k/30k/60k/120k里程碑别名。
+"$PY" scripts/run_multitask_mbrl.py aliases --phase pretrain --output "$RUN" --execute
+BASE="$RUN/base_ckpt_120k/transformer/diffusion_pytorch_model.bin"
+
+# 必须先完成该base policy的正式Round0采集及失败集缓存。
+"$PY" scripts/run_multitask_mbrl.py collect --checkpoint "$BASE" \
+  --model-config "$RUN/pretrain/config.json" --output "$ROUND" --execute
+"$PY" scripts/prepare_robotwin_rollouts.py --dataset-root "$ROUND/failure_dataset" \
+  --task-glob '**/robonana_rollout' --checkpoint "$FLUX" --initial-dataset-root "$DATA" --stage all
+
+# Stage1，60k，全部LR2e-5。
+"$PY" scripts/run_multitask_mbrl.py train --phase stage1 --output "$RUN" \
+  --checkpoint "$BASE" --model-config "$RUN/pretrain/config.json" \
+  --replay-root "$ROUND/failure_dataset" --execute
+"$PY" scripts/run_multitask_mbrl.py aliases --phase stage1 --output "$RUN" \
+  --checkpoint "$BASE" --model-config "$RUN/pretrain/config.json" \
+  --replay-root "$ROUND/failure_dataset" --execute
+S1="$RUN/stage1_60k_ckpt_0/transformer/diffusion_pytorch_model.bin"
+
+# Stage2，20k，Q/V LR1e-4，FLUX冻结，仅Value有EMA。
+"$PY" scripts/run_multitask_mbrl.py train --phase stage2 --output "$RUN" \
+  --checkpoint "$S1" --model-config "$RUN/stage1/config.json" \
+  --replay-root "$ROUND/failure_dataset" --execute
+"$PY" scripts/run_multitask_mbrl.py aliases --phase stage2 --output "$RUN" \
+  --checkpoint "$S1" --model-config "$RUN/stage1/config.json" \
+  --replay-root "$ROUND/failure_dataset" --execute
+```
+
+### 缓存完成后的授权验收 / Queued, not yet passed
+
+先检查GPU占用，只使用空闲卡，不取消其他任务。测试输出不能混进正式Round0数据。
+
+```bash
+# 小模型、真实八进程DeepSpeed ZeRO：检查冻结参数、Q/V、FP32 Value EMA、Adam、LR和RNG恢复。
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NCCL_NVLS_ENABLE=0 "$PY" -m torch.distributed.run \
+  --standalone --nproc_per_node=8 scripts/diagnostics/validate_mac_distributed_safety.py \
+  --backend deepspeed --mode resume --checkpoint-dir "$CHECK/tiny_ds8_resume"
+
+# 现有120k actor仅用于infra测试；四个任务×clean/random×2 episodes，共16个目标episode。
+# 4 policy GPUs + 4 simulator GPUs；给完整失败重放1200s/seed预算。
+"$PY" scripts/run_multitask_mbrl.py collect --output "$CHECK/infra_eight_gpu" \
+  --checkpoint "$PWD/checkpoints/120k_action_only_export_20260909/diffusion_pytorch_model.bin" \
+  --model-config "$PWD/checkpoints/120k_action_only_export_20260909/model_config.json" \
+  --tasks hanging_mug move_stapler_pad place_mouse_pad stamp_seal \
+  --episodes 2 --gpus 0 1 2 3 4 5 6 7 --seed-start 300000 \
+  --seed-timeout 1200 --candidate-multiplier 3 --execute
+```
+
+要求Clean和Randomized都实际覆盖失败重放，检查action_exact、replay_verified、末帧和有效transition；
+若没有失败样本，只能报“未覆盖”，不能判重放一致性通过。
+吞吐分别报告端到端（含expert/启动/重放）和scout用时，不用单纯GPU利用率判断性能上限。
+小模型DS恢复测试不等于4B模型完整保存/恢复测试；4B实测继续复用现有真实训练/恢复入口，另行记录。
