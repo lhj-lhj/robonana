@@ -33,6 +33,45 @@
 不能把进程崩溃作为policy失败轨迹计入训练。50任务全部稳定跑满200条尚有这两个
 已复现的渲染阻断项。本次没有更换渲染器、资产或驱动掩盖问题。
 
+### 2026-09-11：seed 与渲染路径二次隔离
+
+结论：**不是所有 seed 都崩溃，也不是故障起点的初始场景必崩；目前尚未修复完整 rollout 的 Vulkan 错误。**
+注意候选起点不是实际评测 seed：`stamp_seal` 从100039开始，expert拒绝100039、100040、100041，
+接受100042。不能把该次策略执行报错标为“实际场景100039崩溃”。
+
+复用官方 `eval_policy.py::main` 构造任务，不加载policy、不改变相机/资产/渲染配置，
+每seed使用独立进程取三次三路RGB：
+
+| Task | 直接初始化测试的 seeds | 结果 |
+|---|---|---|
+| place_mouse_pad | 100000, 100001, 100006, 100007, 100008, 100009 | 6/6完成 |
+| stamp_seal | 100000, 100001, 100038, 100039, 100040, 100041 | 6/6完成 |
+
+再按官方 expert-check → close → setup 顺序测试故障起点，place_mouse_pad实际100008、
+stamp_seal实际100042也都完成三次三路取图。上述只验证初始化/静态观测，**不是12条完整episode成功率**。
+日志：190 `outputs/render_seed_probe_20260911/`。
+
+完整120k action-only对照使用同一导出checkpoint、Clean环境、原48步规划和采样设置，未更改模型算法：
+
+| 对照 | place_mouse_pad，起点100008 | stamp_seal，起点100039 |
+|---|---|---|
+| 原配置，GPU OIDN | exit134；完成5次三路观测后左相机报错 | exit134；完成2次三路观测后左相机报错 |
+| 仅关闭 skip_action_render_sync | 仍exit134 | 仍exit134 |
+| GPU失败后使用现有CPU OIDN fallback | GPU和CPU均exit134 | GPU exit134；CPU完成，实际100042，policy成功 |
+
+对应目录依次为 `outputs/render_seed_full_eval_20260911/`、
+`outputs/render_sync_control_20260911/`、`outputs/render_oidn_control_20260911/`。
+每次均单环境/进程，前两组GPU4/5推理、6/7仿真；不占用GPU0–3的Stage2训练。
+首次静态探针使用6/7，expert重置探针使用当时空闲的4/5。
+
+CPU/GPU去噪可能改变RGB，进而改变闭环动作；一次CPU成功不能证明故障仅在CUDA去噪，
+更不能证明两者轨迹等价。因此未默认启用CPU fallback、未跳过这些seed，亦未更改渲染器、
+资产、控制动作或成功条件。错误episode不得作为正常失败数据进入回放。
+
+只增强已有可选诊断：`ROBONANA_SAPIEN_TRACE_CAMERAS=1`记录相机姿态；
+`ROBONANA_EVAL_DEBUG=1`记录异常发生时实际seed/控制步，并仅逐行跟踪官方评测文件，
+不逐行跟踪模型/规划器。默认关闭，不改生产计算。相关本地测试14项通过。
+
 ## 可选采集模式
 
 复用`scripts/diagnostics/benchmark_robotwin_collection_pool.py`及现有持久化worker：
