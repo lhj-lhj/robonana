@@ -330,7 +330,7 @@ S1="$RUN/stage1_60k_ckpt_0/transformer/diffusion_pytorch_model.bin"
   --replay-root "$ROUND/failure_dataset" --execute
 ```
 
-### 缓存完成后的授权验收 / Queued, not yet passed
+### 缓存完成后的授权验收 / Pending, not yet scheduled
 
 先检查GPU占用，只使用空闲卡，不取消其他任务。测试输出不能混进正式Round0数据。
 
@@ -354,3 +354,16 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NCCL_NVLS_ENABLE=0 "$PY" -m torch.distribut
 若没有失败样本，只能报“未覆盖”，不能判重放一致性通过。
 吞吐分别报告端到端（含expert/启动/重放）和scout用时，不用单纯GPU利用率判断性能上限。
 小模型DS恢复测试不等于4B模型完整保存/恢复测试；4B实测继续复用现有真实训练/恢复入口，另行记录。
+
+### 当前运行记录与接续状态
+
+- 全量缓存启动成功，PID1739983；各rank确认为CUDA 0–7，约1.87 GiB/卡。
+  2026-09-11 11:40 UTC附近日志已各完成130–140个新episode（打印间隔10个），
+  初期单卡约0.205–0.214 episode/s，剩余ETA约4.3–4.5小时；仅为动态估计。
+- 更新后的现有保存/恢复诊断已在CPU双进程Gloo执行通过：`status=PASS, mode=resume, ranks=2`。
+  对照断点前后online参数、Value EMA、优化器导致的下一步更新、scheduler、RNG与冻结参数均一致。
+  日志 `outputs/cache_full_validation_20260911/tiny_gloo_resume.log`。
+  这不是八卡DeepSpeed或4B checkpoint验收，后两项仍待执行。
+- 自动定时跟进未获权限检查批准，因此没有创建自动化任务，也没有用后台脚本绕过。
+  已启动的全量缓存持续运行；剩余验收命令已经准备，但需要本线程继续执行，或用户明确批准跨时段自动跟进后接续。
+- 正式120k长训练、正式Round0以及Stage1/Stage2均未启动。
