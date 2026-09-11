@@ -12,11 +12,12 @@ rebase_loaded_scheduler = _module["rebase_loaded_scheduler"]
 build_world_policy_resume = _module["build_world_policy_resume"]
 
 
-def test_world_policy_resume_only_changes_execution_and_restore_paths(tmp_path):
+@pytest.mark.parametrize("initialization", ["trained", "flux_backbone"])
+def test_world_policy_resume_only_changes_execution_and_restore_paths(tmp_path, initialization):
     import copy
     source = dict(
         project_dir=str(tmp_path / "old"),
-        models=dict(train_mode="world_policy", gradient_checkpointing=True),
+        models=dict(train_mode="world_policy", gradient_checkpointing=True, initialization=initialization),
         launch=dict(gpu_ids=list(range(8))),
         dataloaders=dict(train=dict(batch_size_per_gpu=32, data_or_config=[{"data_path": "original"}])),
         optimizers=dict(lr=2e-5, betas=["__tuple__", 0.9, 0.95]),
@@ -37,6 +38,7 @@ def test_world_policy_resume_only_changes_execution_and_restore_paths(tmp_path):
     assert config["train"]["gradient_accumulation_steps"] == 1
     assert config["train"]["mixed_precision"] == "bf16"
     assert config["models"]["gradient_checkpointing"] is False
+    assert config["models"]["initialization"] == "trained"
     assert config["train"]["resume"] is True
     assert config["train"]["resume_from"] == str(kwargs["checkpoint"])
     assert config["train"]["rebase_scheduler_on_resume"] is False

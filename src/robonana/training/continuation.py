@@ -40,6 +40,9 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
         raise ValueError("use a separate project directory; preserve the source experiment")
     config["project_dir"] = str(project_dir)
     config["models"].update(
+        # 中文：保存点已经是完整 MAC 模型，不能继承预训练的原始 FLUX 加载标记。
+        # English: Resume the trained MAC export, not the original FLUX initializer.
+        initialization="trained",
         checkpoint=str(checkpoint / "transformer/diffusion_pytorch_model.bin"),
         checkpoint_config=str(source_config),
         gradient_checkpointing=bool(gradient_checkpointing),
