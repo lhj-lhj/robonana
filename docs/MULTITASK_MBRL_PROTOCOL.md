@@ -357,6 +357,22 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NCCL_NVLS_ENABLE=0 "$PY" -m torch.distribut
 
 ### 当前运行记录与接续状态
 
+#### 2026-09-12 验收接续
+
+- 用户已授权定时接续，全部验收通过后启动正式120k预训练；自动化 `robonana` 已创建。
+  下方早期“未创建自动化”的记录是历史状态，不代表当前授权。
+- 全部8个缓存worker完成并释放GPU。实际逐episode audit通过：27,500条、6,075,103帧，
+  `per_episode_files_verified=true`，包括元数据、A统计、输入契约与语言/图像缓存文件。
+  日志 `outputs/cache_full_validation_20260911/audit_20260912.log`。这不代表逐帧重新编码比较。
+- 八卡DeepSpeed小模型保存/恢复通过：`status=PASS, backend=deepspeed, mode=resume, ranks=8`。
+  日志 `outputs/cache_full_validation_20260911/tiny_ds8_resume.log`；真实4B保存/恢复仍待执行。
+- 修复现有world-policy恢复适配器：从已训练保存点恢复时明确 `initialization=trained`，
+  不再继承新预训练的 `flux_backbone` 标记。其余优化器/LR/数据预算不变；
+  原始配置不修改。两种初始化来源的回归共4项在本地和190通过，GitHub提交 `b19fb50`。
+- 已提交启动上方16条八卡infra测试，输出 `outputs/cache_full_validation_20260911/infra_eight_gpu`，
+  总控日志 `infra_eight_gpu.launch.log`；结果尚待验收，不能标记重放或吞吐测试通过。
+- 正式120k训练尚未启动；需继续完成重放和真实4B保存/恢复等门槛。
+
 - 全量缓存启动成功，PID1739983；各rank确认为CUDA 0–7，约1.87 GiB/卡。
   2026-09-11 11:40 UTC附近日志已各完成130–140个新episode（打印间隔10个），
   初期单卡约0.205–0.214 episode/s，剩余ETA约4.3–4.5小时；仅为动态估计。
