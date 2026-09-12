@@ -361,6 +361,31 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NCCL_NVLS_ENABLE=0 "$PY" -m torch.distribut
 
 ##### 最新结论（20:00 UTC之后，后续条目保留排查历史）
 
+###### 9月12日中断与授权续训
+
+- 原run于06:55 UTC中断，最后正常日志39270步，最新完整保存点39000。
+  系统日志：06:54:48启动apt自动更新，06:55:12–18重启Fabric Manager/NVLink Subnet Manager，
+  06:55:21训练报告不可恢复NVLink错误。未发现loss爆炸/OOM作为此次退出原因。
+- 用户明确要求续训后，确认八卡空闲、Fabric Manager active、apt升级服务inactive，
+  使用已有 `world_policy_resume` 从39000恢复；没有更改系统自动更新策略，相关风险仍在。
+  原run和checkpoint保持不动，新输出 `experiments/multitask_mbrl_v1/pretrain_resume39000`。
+  参数保持八卡×16×累积1、BF16、无梯度checkpoint；Adam与原120k LR进度恢复，不重置。
+  08:06:21 UTC已完成39060步，loss有限，约0.9295秒/step，剩余纯训练约21小时另加保存开销。
+  W&B https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/ngd8h4zc 。
+  日志 `outputs/cache_full_validation_20260911/pretrain_resume39000.launch.log`。
+
+  ```bash
+  ROBONANA_PYTHON="$PY" \
+  ROBONANA_RESUME_CHECKPOINT="$RUN/pretrain/models/checkpoint_epoch_1_step_39000" \
+  ROBONANA_RESUME_CONFIG="$RUN/pretrain/config.json" \
+  ROBONANA_PROJECT_DIR="$RUN/pretrain_resume39000" \
+  ROBONANA_GRADIENT_CHECKPOINTING=0 NCCL_NVLS_ENABLE=0 \
+    bash scripts/run_robotwin_train.sh --config robonana.configs.world_policy_resume.config
+  ```
+
+  上述仅记录已执行入口，不要在当前训练运行时重复执行。后续60k/120k保存点将位于续训目录，
+  原10k/30k仍在原目录；不能假定所有里程碑集中在同一个run目录。
+
 - **正式120k已确认实际训练**：2026-09-11 20:05:49 UTC（北京时间9月12日04:05:49）
   已完成60步，loss均有限；约0.929秒/step、137.7样本/秒。
   纯训练估算约31小时，另加checkpoint保存等开销，不是完成时间保证。
