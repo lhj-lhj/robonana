@@ -223,6 +223,14 @@ supervisor写入 infrastructure_error，不计作有效policy episode，测试�
 
 ### 2026-09-14：四卡方案已撤回，改回八卡
 
+连接恢复后核实：四卡曾实际更新至119130，随后已退出，无残留训练进程；八卡全部空闲。
+190已拉取GitHub回退版本 `174581b`，原八卡恢复回归4项通过。
+按用户要求重新从**原八卡119000**保存点续训，未使用Universal视图或四卡更新。
+输出 `experiments/multitask_mbrl_v1/pretrain119k_8gpu`，日志
+`outputs/cache_full_validation_20260911/pretrain119k_8gpu.launch.log`。
+八卡×16×累积1=128、BF16、无梯度checkpoint，保留Adam与120k学习率进度。
+本次新增四卡代码已撤销；历史critic Universal工具仍保留，未删除已有数据或转换产物。
+
 用户随后明确撤回四卡方案，要求用原119k保存点八卡×16×累积1续到120k。
 新增的四卡适配提交 `0ad48e4` 已撤回；原八卡恢复入口保留。
 官方Universal转换已完成，但转换视图不再用于本次续训，原保存点未改动。
