@@ -50,6 +50,19 @@ def test_world_policy_resume_only_changes_execution_and_restore_paths(tmp_path, 
     assert partial["models"]["gradient_checkpointing_single_stride"] == 2
     assert partial["dataloaders"] == source["dataloaders"]
     assert partial["schedulers"] == source["schedulers"]
+    with pytest.raises(ValueError, match="preserve global batch"):
+        build_world_policy_resume(source, **kwargs, gpu_ids=(4, 5, 6, 7))
+    with pytest.raises(ValueError, match="Universal"):
+        build_world_policy_resume(source, **kwargs, gpu_ids=(4, 5, 6, 7), accumulation_steps=2)
+    kwargs["checkpoint"].mkdir(parents=True)
+    (kwargs["checkpoint"] / "deepspeed_universal.json").write_text('{}')
+    four = build_world_policy_resume(source, **kwargs, gpu_ids=(4, 5, 6, 7), accumulation_steps=2, universal=True)
+    assert four["launch"]["gpu_ids"] == [4, 5, 6, 7]
+    assert four["train"]["gradient_accumulation_steps"] == 2
+    assert four["train"]["max_steps"] == source["train"]["max_steps"]
+    assert four["schedulers"] == source["schedulers"]
+    assert four["dataloaders"] == source["dataloaders"]
+    assert source == original
     with pytest.raises(ValueError, match="positive integer"):
         build_world_policy_resume(source, **kwargs, single_checkpoint_stride=0)
     with pytest.raises(ValueError, match="separate"):
@@ -57,6 +70,16 @@ def test_world_policy_resume_only_changes_execution_and_restore_paths(tmp_path, 
     source["models"]["train_mode"] = "critic"
     with pytest.raises(ValueError, match="world_policy"):
         build_world_policy_resume(source, **kwargs)
+
+
+def test_universal_conversion_requires_only_phase_owned_state():
+    module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts/diagnostics/prepare_universal_checkpoint.py"))
+    required = module["required_checkpoint_files"]
+    assert "target_value_expert.safetensors" not in required("world_policy")
+    assert "target_value_expert.safetensors" in required("critic")
+    assert "scheduler.bin" in required("world_policy")
+    with pytest.raises(ValueError, match="Unsupported"):
+        required("unknown")
 
 
 def test_continuation_preserves_data_and_optimizer_with_current_execution():
