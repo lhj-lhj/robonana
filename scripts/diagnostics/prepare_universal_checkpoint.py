@@ -16,16 +16,6 @@ import subprocess
 import sys
 
 
-def required_checkpoint_files(phase):
-    """中文：按实际阶段校验；world-policy没有Value EMA。 English: Validate phase-owned state only."""
-    if phase not in {"world_policy", "critic"}:
-        raise ValueError(f"Unsupported checkpoint phase: {phase}")
-    files = ["pytorch_model", "transformer", "scheduler.bin", "custom_checkpoint_0.pkl"]
-    if phase == "critic":
-        files += ["target_value_expert.safetensors", "value_ema_state.json"]
-    return files
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
@@ -36,7 +26,8 @@ def main():
     if source == output or source in output.parents or output in source.parents:
         parser.error("source and output must be separate non-nested directories")
     cfg = json.loads(args.source_config.read_text())
-    for name in required_checkpoint_files(cfg["train"]["posttrain"]["phase"]):
+    for name in ("pytorch_model", "transformer", "scheduler.bin", "custom_checkpoint_0.pkl",
+                 "target_value_expert.safetensors", "value_ema_state.json"):
         if not (source / name).exists():
             raise FileNotFoundError(source / name)
     output.mkdir(parents=True, exist_ok=False)

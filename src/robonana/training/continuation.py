@@ -17,13 +17,12 @@ def restore_config_tuples(value):
 
 
 def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
-                             gradient_checkpointing=False, single_checkpoint_stride=1,
-                             gpu_ids=None, accumulation_steps=None, universal=False):
+                             gradient_checkpointing=False, single_checkpoint_stride=1):
     """中文：用当前 BF16 精度续训 Stage 1；不重置优化器或学习率。
 
     English: Resume Stage 1 using the maintained FACT BF16 precision.
     Reuse FACT restore and the existing model toggle. Preserve data, batch,
-    GPU topology by default and the original schedule/budget; never use the
+    GPU topology and the original schedule/budget; never use the
     critic continuation's schedule extension or two-GPU defaults here.
     """
     config = restore_config_tuples(copy.deepcopy(source))
@@ -40,27 +39,6 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
     ):
         raise ValueError("use a separate project directory; preserve the source experiment")
     config["project_dir"] = str(project_dir)
-    # 中文：只允许显式、保持global batch的拓扑变更；Adam重分片交给官方UC。
-    # English: Explicit topology changes preserve global batch; official UC reshares Adam.
-    previous_ids = config["launch"]["gpu_ids"]
-    next_ids = list(previous_ids if gpu_ids is None else gpu_ids)
-    previous_acc = config["train"]["gradient_accumulation_steps"]
-    next_acc = previous_acc if accumulation_steps is None else accumulation_steps
-    if not next_ids or len(set(next_ids)) != len(next_ids) or any(type(g) is not int or g < 0 for g in next_ids):
-        raise ValueError("gpu_ids must be distinct nonnegative integers")
-    if type(next_acc) is not int or next_acc < 1:
-        raise ValueError("accumulation_steps must be a positive integer")
-    if len(next_ids) * next_acc != len(previous_ids) * previous_acc:
-        raise ValueError("world-policy resume must preserve global batch")
-    if len(next_ids) != len(previous_ids) and not universal:
-        raise ValueError("world size change requires an explicitly converted Universal checkpoint")
-    if universal:
-        ds_path = checkpoint / "deepspeed_universal.json"
-        if not ds_path.is_file():
-            raise FileNotFoundError(ds_path)
-        config["launch"]["deepspeed_config"] = {"deepspeed_config_file": str(ds_path)}
-    config["launch"]["gpu_ids"] = next_ids
-    config["train"]["gradient_accumulation_steps"] = next_acc
     config["models"].update(
         # 中文：保存点已经是完整 MAC 模型，不能继承预训练的原始 FLUX 加载标记。
         # English: Resume the trained MAC export, not the original FLUX initializer.

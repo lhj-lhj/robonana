@@ -26,7 +26,4 @@ config = build_world_policy_resume(
     project_dir=Path(os.environ["ROBONANA_PROJECT_DIR"]).resolve(),
     gradient_checkpointing=os.environ.get("ROBONANA_GRADIENT_CHECKPOINTING", "0") == "1",
     single_checkpoint_stride=int(os.environ.get("ROBONANA_GRADIENT_CHECKPOINTING_SINGLE_STRIDE", "1")),
-    gpu_ids=tuple(int(x) for x in os.environ["ROBONANA_GPU_IDS"].split(",")) if "ROBONANA_GPU_IDS" in os.environ else None,
-    accumulation_steps=int(os.environ["ROBONANA_GRADIENT_ACCUMULATION_STEPS"]) if "ROBONANA_GRADIENT_ACCUMULATION_STEPS" in os.environ else None,
-    universal=os.environ.get("ROBONANA_UNIVERSAL_CHECKPOINT") == "1",
 )
