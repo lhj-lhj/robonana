@@ -221,6 +221,36 @@ supervisor写入 infrastructure_error，不计作有效policy episode，测试�
 
 ## 8. 全量缓存生成与正式训练命令（2026-09-11）
 
+### 2026-09-14：四卡方案已撤回，改回八卡
+
+用户随后明确撤回四卡方案，要求用原119k保存点八卡×16×累积1续到120k。
+新增的四卡适配提交 `0ad48e4` 已撤回；原八卡恢复入口保留。
+官方Universal转换已完成，但转换视图不再用于本次续训，原保存点未改动。
+四卡启动调用曾被用户中断，不能据此确定服务器是否执行；切换前必须核对、必要时只停该四卡任务。
+切换检查时190连续两次SSH banner连接被拒绝，因此尚未确认启动八卡，亦未删除转换产物。
+以下仅保留被撤回方案的执行历史，**不要再执行四卡转换/启动**。
+
+用户要求用GPU4–7、每卡16、累积2（global128）完成119k→120k；0–3为其他用户任务，不停止或抢占。
+复用 `prepare_universal_checkpoint.py` 和 DeepSpeed官方 `ds_to_universal`：
+原始 `pretrain_resume39000/models/checkpoint_epoch_3_step_119000` 保留，
+新转换目录 `checkpoint_views/pretrain119k_uc4_20260914`。
+
+本次仅扩展现有适配器（提交 `0ad48e4`）：转换器按阶段要求EMA文件；world-policy恢复支持
+显式GPU/累积设置，强制global batch不变，改变world size必须使用UC；Trainer继续校验Adam
+step和moments，只在critic阶段要求Value EMA。没有重写优化器重分片，也不重置LR或120k预算。
+本地5项、190相关10项回归通过。实际转换和更新结果需后续验收，不以单测代替实跑。
+
+```bash
+# 190，仓库根目录；新输出不能覆盖原checkpoint。
+/data3/hongjia/conda/envs/robonana/bin/python scripts/diagnostics/prepare_universal_checkpoint.py \
+  --source experiments/multitask_mbrl_v1/pretrain_resume39000/models/checkpoint_epoch_3_step_119000 \
+  --source-config experiments/multitask_mbrl_v1/pretrain_resume39000/config.json \
+  --output checkpoint_views/pretrain119k_uc4_20260914
+```
+
+转换日志 `outputs/cache_full_validation_20260911/pretrain119k_uc4.convert.log`。
+卡数变化不保证后续采样和归约逐位相同；需要验证Adam=119000、LR接续和最终120k完整落盘。
+
 ### 为什么以前生成过，现在又要生成？
 
 旧缓存没有删除：`flux_cache/latents` 仍有27,500个文件，合计417.19 GiB。
