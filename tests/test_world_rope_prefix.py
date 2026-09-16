@@ -142,7 +142,7 @@ def test_absorbing_success_and_missing_failure_transition_after_h():
     with patch.object(ds, "_sample_horizon", return_value=6):
         row = ds._get_data(8)
     assert row["future_index"].item() == 10 and row["success"].item() == 1
-    assert row["action_valid_mask"].sum().item() == 2
+    assert row["action_valid_mask"].all()
     assert row["reward_chunk_mask"].sum().item() == 6
     assert row["reward_chunk"][:2].sum() == 0
     assert torch.all(row["reward_chunk"][2:6] == 1)

@@ -9,13 +9,22 @@ from robonana.training.losses import (
 )
 
 
-def test_absorbing_padding_and_failed_actions_have_zero_bc_gradient():
+def test_explicitly_invalid_steps_and_failed_actions_have_zero_bc_gradient():
     prediction = torch.tensor([[[1.0], [100.0]], [[100.0], [100.0]]], requires_grad=True)
     loss = masked_action_mse(prediction, torch.zeros_like(prediction),
                              torch.tensor([[1, 0], [1, 1]]), torch.tensor([1, 0]))
     assert loss.item() == 1
     loss.backward()
     torch.testing.assert_close(prediction.grad, torch.tensor([[[2.0], [0.0]], [[0.0], [0.0]]]))
+
+
+def test_successful_absorbing_steps_match_fact_full_chunk_loss_and_have_gradients():
+    prediction = torch.tensor([[[1.0], [3.0]], [[100.0], [100.0]]], requires_grad=True)
+    target = torch.zeros_like(prediction)
+    loss = masked_action_mse(prediction, target, torch.ones(2, 2), torch.tensor([1, 0]))
+    torch.testing.assert_close(loss, torch.nn.functional.mse_loss(prediction[:1], target[:1]))
+    loss.backward()
+    torch.testing.assert_close(prediction.grad, torch.tensor([[[1.0], [3.0]], [[0.0], [0.0]]]))
 
 
 def test_failure_mask_removes_action_sample():

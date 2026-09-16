@@ -321,16 +321,13 @@ class RoboTwinHDF5Dataset(BaseDataset):
                 "posttraining replay requires reset-pre final observations; recollect these episodes: "
                 + ", ".join(str(path) for path in missing_final[:5])
             )
-        # MAC samples action-start indices, not every observation row. With T
-        # real actions there are T+1 observations; the last row has no outgoing
-        # transition. Success starts are 0..T-1 (up to 47 absorbing pad steps),
-        # while failure starts are 0..T-48 inclusive (no padding at all).
-        # MAC's upstream samplers also precompute complete-chunk starts:
-        # https://github.com/kwanyoungpark/MAC/blob/main/utils/datasets.py#L618-L628
-        # Our success exception is deliberate: RoboTwin stops immediately on
-        # success, so dropping its tail would discard terminal supervision.
+        # FACT samples every successful observation, including the terminal
+        # row, and repeats the terminal action through the full BC chunk.
+        # With T real transitions and T+1 observations, success starts are
+        # 0..T (the final start explicitly teaches holding still). Failures
+        # retain complete real windows only: starts 0..T-48, never padded.
         def window_count(record):
-            return max(0, record.length - (1 if record.success else self.action_chunk))
+            return max(0, record.length - (0 if record.success else self.action_chunk))
 
         records = [record for record in records if window_count(record) > 0]
         self.records = records
@@ -469,7 +466,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         q_clean = 0.0
         action_indices = np.clip(
             frame_index + np.arange(self.action_chunk, dtype=np.int64),
-            0, record.length - 2,
+            0, record.length - (1 if record.success else 2),
         )
 
         # Episodes are short (~140 steps). Reading the small arrays once also
@@ -487,6 +484,13 @@ class RoboTwinHDF5Dataset(BaseDataset):
             )
         state_raw = vector[frame_index]
         action_raw = policy_action[action_indices]
+        if record.success:
+            # FACT repeat/clip supervision includes every absorbing step.
+            # Raw LeRobot demos store the final state as their final action.
+            # Collected HDF5 instead repeats the last executed command in its
+            # no-transition row; use the observed terminal pose to hold still.
+            absorbing = frame_index + np.arange(self.action_chunk) >= record.length - 1
+            action_raw[absorbing] = vector[-1]
         # The state target is the observation at t+h, clipped only for a
         # successful terminal suffix that is padded with absorbing frames.
         future_state_raw = vector[future_index]
@@ -538,9 +542,10 @@ class RoboTwinHDF5Dataset(BaseDataset):
             "state": torch.from_numpy(norm_state.copy()),
             "action": torch.from_numpy(norm_action.copy()),
             "behavior_action": torch.from_numpy(norm_action.copy()),
-            # Padding is only a conditioning placeholder after successful
-            # termination; it must not become fabricated action BC targets.
-            "action_valid_mask": torch.from_numpy(
+            # Successful terminal holds are BC targets, not real transitions.
+            # Keep failure validity/truncation independent of absorbing BC.
+            "action_valid_mask": torch.ones(self.action_chunk, dtype=torch.bool)
+            if record.success else torch.from_numpy(
                 (frame_index + np.arange(self.action_chunk) < record.length - 1)
                 & transition_valid[action_indices]
             ),

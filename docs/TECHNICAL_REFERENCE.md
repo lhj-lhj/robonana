@@ -84,7 +84,9 @@ The canonical dataset is `RoboTwinHDF5Dataset` (the LeRobot adapter reuses the s
 
 `context`, `current_latents`, `future_latents`, `state`, `future_state`, `behavior_action`, `action_valid_mask`, `reward_chunk`, `reward_chunk_mask`, `success`, `reward`, `reward_h`, and `chunk_horizon=48`.
 
-Default `fixed48` has no sampled horizon. The optional `rope_prefix` world ablation adds scalar sample metadata `world_horizon=h` (uniform 1..48), never a horizon token: image/state/success target t+h, reward loss covers only the first h steps. Both modes retain `chunk_horizon=48` and the same action BC windows. Dataset windows are success starts `0..T-2` with absorbing suffix padding, or failure starts `0..T-49` with no padding. A failure episode shorter than one complete 48-step chunk is excluded.
+Default `fixed48` has no sampled horizon. The optional `rope_prefix` world ablation adds scalar sample metadata `world_horizon=h` (uniform 1..48), never a horizon token: image/state/success target t+h, reward loss covers only the first h steps. Both modes retain `chunk_horizon=48` and the same action BC windows. For N observation rows, success starts are `0..N-1`, including the terminal observation, and every step of each 48-action chunk is supervised. Terminal/padded actions hold the final observed pose. Failure starts remain `0..N-49`, with no padding and no action BC; shorter failure episodes are excluded.
+
+Terminal joint targets are `q_final - q_current`, not unconditionally zero: at the terminal observation they are zero in raw delta coordinates and `-action_mean/action_std` after normalization. Grippers keep the final absolute values. The source `transition_valid=False` on the terminal row still means no real transition, but must not suppress its absorbing-state BC target. Collected HDF5's repeated last command is a storage placeholder; terminal BC uses the final observed state. This leaves original successful LeRobot data equivalent to FACT's repeat-last action targets.
 
 ## Checkpoints and commands
 

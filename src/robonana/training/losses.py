@@ -18,7 +18,12 @@ def masked_mse(prediction: Tensor, target: Tensor, sample_mask: Tensor | None = 
 def masked_action_mse(
     prediction: Tensor, target: Tensor, step_mask: Tensor, success_mask: Tensor
 ) -> Tensor:
-    """Success-only BC on real actions, excluding absorbing padding steps."""
+    """Success-only BC, including terminal holds marked valid by the dataset.
+
+    Successful chunks supervise every step, matching FACT's full-chunk MSE.
+    The step mask still supports invalid actions; the sample mask excludes
+    failure trajectories regardless of their per-step validity.
+    """
     per_step = (prediction.float() - target.float()).square().mean(dim=-1)
     if per_step.shape != step_mask.shape:
         raise ValueError("action_valid_mask must match [batch, action_horizon]")

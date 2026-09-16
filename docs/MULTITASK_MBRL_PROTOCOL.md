@@ -132,7 +132,21 @@ CPU验证覆盖mask、跨层梯度泄漏、目标帧与RoPE、成功吸收尾段
 - Python编译、提交diff格式检查通过。两组 `train --world-conditioning ...` dry-run入口实际执行，只打印配置，未创建实验目录。
 - 日志：190的 `/tmp/robonana_world_rope_prefix_20260916_pytest.log` 和 `/tmp/robonana_world_rope_prefix_20260916_distributed.log`。
 
-上述GPU验证使用小模型，不是4B正式训练或成功率评测。用户已决定先保留审阅分支 `codex/world-rope-prefix-20260916`，不合入main；190主checkout和71运行中的源码未更新。后续验证仍在190独立验收目录进行。
+上述GPU验证使用小模型，不是4B正式训练或成功率评测。用户随后要求先合入main再修复吸收态BC：原审阅分支 `76edb7f` 已合入GitHub main并同步190主checkout。71运行中的源码未更新，后续验证仍全部在190进行。
+
+## 成功尾部吸收态 BC 修复
+
+用户报告 `place_dual_shoes` 放到位后仍移动、破坏稳定成功判定，并指出86%→27%的下降。已确认代码存在成功尾部监督缺口：action clip到倒数第二帧、padding的BC mask为0，而且成功采样排除了最终观察帧。这个缺口需要修复；是否解释全部成功率差异仍需训练后复测。
+
+对齐190的FACT `_get_query_indices` 和完整chunk Action MSE：
+
+- 成功样本包含最后一帧；action索引clip到 `length-1`，终点和超长部分使用最终state作为绝对hold目标，48步 `action_valid_mask` 全为True。
+- 原始LeRobot末行action已等于最终state（抽查 `place_dual_shoes` / `adjust_bottle` 的episode0确认）；HDF5回放末行只是上一条command的占位，不能直接把它当终点保持目标。
+- 所有action仍减chunk起始state的12个关节维度；夹爪两维保持最终绝对值。到终点前，padding是 `q_final-q_current`；在终点才是raw delta=0，归一化值为 `-action_mean/action_std`。
+- 失败窗口范围、transition有效性检查、无尾部补造规则、BC权重0均保持。reward/success的吸收态规则也保持。
+- 两组world消融共用这次BC修复；不能再把修复前120k与仅追加训练的新模型当成严格的两组对照。
+
+源码修复不会改变已有120k权重的行为；后续训练与正式成功率复测尚未启动。回归覆盖真实HDF5/LeRobot适配器读取、FACT末尾索引、终点零位移、夹爪保持、非零统计归一化、尾部BC梯度及失败轨迹不变。
 
 ## 原定完整实验参数
 
