@@ -123,6 +123,17 @@ python scripts/run_multitask_mbrl.py train --phase pretrain \
 
 CPU验证覆盖mask、跨层梯度泄漏、目标帧与RoPE、成功吸收尾段、失败完整窗口、默认行为、旧actor转换、保存配置和BF16训练backward。真实GPU训练和RoboTwin评测等待卡空闲后再运行；CPU通过不等于训练消融已有结论。
 
+### 2026-09-16 验收
+
+用户指定后续测试全部在190进行，并允许GPU小测试，暂不启动正式训练。代码提交 `f2be651` 在190的独立目录 `/data3/hongjia/robonana_worktrees/world_rope_prefix_20260916` 验收：
+
+- 完整pytest：247项通过，含两组CPU/GPU BF16 forward/backward、world缓存和全部新消融测试。
+- 原有4项CPU/Gloo双进程测试因只暴露一张GPU触发 `invalid device ordinal`；用 `CUDA_VISIBLE_DEVICES= ACCELERATE_USE_CPU=true` 按CPU模式重跑，4项全部通过。合计251项通过，无代码测试遗留失败。
+- Python编译、提交diff格式检查通过。两组 `train --world-conditioning ...` dry-run入口实际执行，只打印配置，未创建实验目录。
+- 日志：190的 `/tmp/robonana_world_rope_prefix_20260916_pytest.log` 和 `/tmp/robonana_world_rope_prefix_20260916_distributed.log`。
+
+上述GPU验证使用小模型，不是4B正式训练或成功率评测。main发布与190主checkout同步另需确认；当前可审阅分支为 `codex/world-rope-prefix-20260916`。71运行中的源码未更新。
+
 ## 原定完整实验参数
 
 | 阶段 | 数据/初始化 | 更新步数 | 有效 batch |
