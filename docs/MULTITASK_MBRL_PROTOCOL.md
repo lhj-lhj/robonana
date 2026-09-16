@@ -132,7 +132,7 @@ CPU验证覆盖mask、跨层梯度泄漏、目标帧与RoPE、成功吸收尾段
 - Python编译、提交diff格式检查通过。两组 `train --world-conditioning ...` dry-run入口实际执行，只打印配置，未创建实验目录。
 - 日志：190的 `/tmp/robonana_world_rope_prefix_20260916_pytest.log` 和 `/tmp/robonana_world_rope_prefix_20260916_distributed.log`。
 
-上述GPU验证使用小模型，不是4B正式训练或成功率评测。main发布与190主checkout同步另需确认；当前可审阅分支为 `codex/world-rope-prefix-20260916`。71运行中的源码未更新。
+上述GPU验证使用小模型，不是4B正式训练或成功率评测。用户已决定先保留审阅分支 `codex/world-rope-prefix-20260916`，不合入main；190主checkout和71运行中的源码未更新。后续验证仍在190独立验收目录进行。
 
 ## 原定完整实验参数
 

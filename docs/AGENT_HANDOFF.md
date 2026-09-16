@@ -6,7 +6,7 @@
 
 - 仓库：https://github.com/lhj-lhj/robonana ，分支 main。
 - 190 checkout：`/data3/hongjia/robonana`；本次 eval 已由用户要求停止。
-- 本次消融验收目录：`/data3/hongjia/robonana_worktrees/world_rope_prefix_20260916`，代码 `f2be651` 已在190通过251项测试；GitHub审阅分支 `codex/world-rope-prefix-20260916`，main合入等待确认。
+- 本次消融验收目录：`/data3/hongjia/robonana_worktrees/world_rope_prefix_20260916`，代码 `f2be651` 已在190通过251项测试；GitHub审阅分支 `codex/world-rope-prefix-20260916`。用户已决定先保留审阅分支，不合入main，不更新190主checkout或71运行中的源码。
 - 71 checkout：`/raid/hongjia/robonana`；共享GPU的Round0在容器中，修改源码可能影响新启动子进程，不能无条件同步到正在运行的71。
 - 本地 checkout 因机器不同而变化；不要照搬历史的 Windows 路径。
 - 190 GPU当前被占用。用户要求先整理文档、准备对照入口；没有授权现在启动新实验。
