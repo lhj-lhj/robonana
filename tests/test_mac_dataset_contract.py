@@ -2,6 +2,7 @@ import h5py
 import numpy as np
 import pytest
 import torch
+from types import SimpleNamespace
 
 from robonana.data.robotwin_hdf5 import (
     ALOHA_DELTA_MASK, EpisodeRecord, RoboTwinHDF5Dataset, mac_binary_chunk_targets,
@@ -91,9 +92,8 @@ def test_preterminal_padding_holds_terminal_pose_relative_to_current_state(tmp_p
     try:
         frame = len(states) - 3
         row = ds._get_data(frame)
-        fact = object.__new__(LeRobotDataset)
-        fact.delta_info = {"action": 48}
-        indices = fact._get_query_indices(frame, len(states), "action")
+        fact = SimpleNamespace(delta_info={"action": 48})
+        indices = LeRobotDataset._get_query_indices(fact, frame, len(states), "action")
         expected = actions[indices].copy()
         expected[indices == len(states) - 1] = states[-1]  # HDF5's terminal command is only a placeholder.
         expected[:, ALOHA_DELTA_MASK] -= states[frame, ALOHA_DELTA_MASK]
