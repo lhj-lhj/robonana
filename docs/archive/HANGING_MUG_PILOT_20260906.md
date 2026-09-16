@@ -1,3 +1,5 @@
+> 历史记录。这里只保留当时的实验结果和操作；当前状态与计划见 [当前实验](../MULTITASK_MBRL_PROTOCOL.md)。
+
 # Hanging-mug 初步实验：world 拟合 -> MAC 收益检查
 
 用户确认第一阶段预算至少 5,000 步。本轮任务是 `hanging_mug`（历史对话中

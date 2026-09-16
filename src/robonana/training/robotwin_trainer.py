@@ -251,6 +251,9 @@ class RoboNanaTrainer(Trainer):
         if architecture_version != "mac_mot_v2":
             raise ValueError("RoboNana only supports the mac_mot_v2 architecture")
         chunk_horizon = int(_config_value(model_config, "chunk_horizon", max_horizon))
+        self.world_conditioning = str(_config_value(model_config, "world_conditioning", "fixed48"))
+        if self.world_conditioning not in {"fixed48", "rope_prefix"}:
+            raise ValueError("world_conditioning must be fixed48 or rope_prefix")
         value_dim = int(_config_value(model_config, "value_dim", 1))
         expert_hidden_dim = _config_value(model_config, "expert_hidden_dim", None)
         expert_hidden_dim = None if expert_hidden_dim is None else int(expert_hidden_dim)
@@ -304,6 +307,12 @@ class RoboNanaTrainer(Trainer):
                 device=self.device, dtype=self.dtype, params=params,
                 config_path=_config_value(model_config, "checkpoint_config", None),
             )
+        if model.world_conditioning != self.world_conditioning:
+            if self.mac_phase != "world_policy" or self.kwargs.get("resume", False):
+                raise ValueError("Cannot change checkpoint world_conditioning in resume or critic training")
+            self.logger.info("Fresh world-policy adaptation: world_conditioning %s -> %s",
+                             model.world_conditioning, self.world_conditioning)
+            model.world_conditioning = self.world_conditioning
         if converted_actor:
             # One-time Stage-1 warm start: reuse the ImageWAM transfer helper.
             # Preserve actor weights and freshly initialized scalar queries/heads.
@@ -342,7 +351,7 @@ class RoboNanaTrainer(Trainer):
                 "Attention layout: architecture=%s; A=%s; clean_action=%s",
                 architecture_version,
                 "bidirectional" if model.pred_action_bidirectional else "causal",
-                "full-48" if architecture_version == "mac_mot_v2" else "causal-prefix",
+                "causal-prefix/RoPE" if model.world_conditioning == "rope_prefix" else "bidirectional/full-48",
             )
         return model
 
@@ -385,7 +394,9 @@ class RoboNanaTrainer(Trainer):
             exported = list(directory.glob("*.bin")) + list(directory.glob("*.safetensors"))
             if len(exported) != 1:
                 raise RuntimeError(f"Expected one exported transformer weight file: {directory}")
-            write_contract(exported[0], self.inference_contract, phase=self.mac_phase, step=self.cur_step)
+            write_contract(exported[0], dict(self.inference_contract,
+                world_conditioning=getattr(self, "world_conditioning", "fixed48")),
+                phase=self.mac_phase, step=self.cur_step)
         if self.target_value_ema is not None and self.is_main_process:
             output = Path(output_dir)
             save_file(
@@ -416,7 +427,10 @@ class RoboNanaTrainer(Trainer):
         exported = list(directory.glob("*.bin")) + list(directory.glob("*.safetensors"))
         if len(exported) != 1:
             raise RuntimeError(f"Expected one exported transformer weight file: {directory}")
-        check_contract(read_contract(exported[0]), self.inference_contract)
+        saved_contract = read_contract(exported[0])
+        check_contract(saved_contract, self.inference_contract)
+        if saved_contract.get("world_conditioning", "fixed48") != getattr(self, "world_conditioning", "fixed48"):
+            raise ValueError("Resume checkpoint world_conditioning disagrees with this run")
         super().load_model_hook(models, input_dir)
         if self.target_value_ema is not None:
             target_path = Path(input_dir) / "target_value_expert.safetensors"
@@ -615,6 +629,17 @@ class RoboNanaTrainer(Trainer):
         ).reshape(-1)
         if not bool(torch.all(horizon == 48)):
             raise ValueError("mac_mot_v2 batches must use the fixed 48-step horizon")
+        world_horizon = batch_dict.get("world_horizon", horizon).to(
+            device=self.device, dtype=torch.long
+        ).reshape(-1)
+        mode = getattr(self, "world_conditioning", "fixed48")
+        prefix = batch_dict.get("world_prefix_causal", torch.zeros_like(horizon, dtype=torch.bool)).to(device=self.device)
+        if not bool(torch.all(prefix == (mode == "rope_prefix"))):
+            raise ValueError("Dataset and model world_conditioning disagree")
+        if world_horizon.shape != horizon.shape or bool(torch.any((world_horizon < 1) | (world_horizon > 48))):
+            raise ValueError("Batch world_horizon must lie in [1,48] with shape [B]")
+        if mode == "fixed48" and not bool(torch.all(world_horizon == 48)):
+            raise ValueError("fixed48 requires world_horizon=48")
         expected_tokens = self.grid_height * self.grid_width
         if current.shape[1] != expected_tokens or future.shape[1] != expected_tokens:
             raise ValueError(f"cached FLUX image tensors must contain {expected_tokens} tokens")
@@ -629,6 +654,7 @@ class RoboNanaTrainer(Trainer):
             "future_state": future_state,
             "action": action,
             "horizon": horizon,
+            "world_horizon": world_horizon,
         }
 
     def _forward_step_mac_world_policy(
@@ -656,7 +682,7 @@ class RoboNanaTrainer(Trainer):
             batch,
             grid_height=self.grid_height,
             grid_width=self.grid_width,
-            time_coord=values["horizon"],
+            time_coord=values["world_horizon"],
             device=self.device,
         )
         empty = values["action"].new_empty(batch, 0, 1, dtype=self.dtype)
@@ -671,6 +697,7 @@ class RoboNanaTrainer(Trainer):
             noisy_pred_action=noisy_action.to(dtype=self.dtype),
             gt_action_cond=values["action"].to(dtype=self.dtype),
             chunk_horizon=values["horizon"],
+            world_horizon=values["world_horizon"],
             noisy_future_state=noisy_state.to(dtype=self.dtype),
             noisy_reward=empty,
             noisy_q=empty,

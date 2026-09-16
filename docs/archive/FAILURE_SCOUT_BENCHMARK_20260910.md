@@ -1,3 +1,5 @@
+> 历史记录。这里只保留当时的实验结果和操作；当前状态与计划见 [当前实验](../MULTITASK_MBRL_PROTOCOL.md)。
+
 # 120k actor：失败轨迹 scout/replay 测试
 
 本次使用固定48帧的120k action-only导出权重，GPU6做推理、GPU7做仿真。

@@ -1,7 +1,9 @@
+> 历史记录。这里只保留当时的实验结果和操作；当前状态与计划见 [当前实验](../MULTITASK_MBRL_PROTOCOL.md)。
+
 # mac_mot_v2 正式实验就绪审查（2026-09-06）
 
 > 精度说明是历史快照，不代表当前配置。现在 RoboNana FLUX/Q/V 仅支持 FP32；
-> Qwen/VAE 等冻结编码器保持原样。见 [当前数值策略](../README.md#numerical-policy)。
+> Qwen/VAE 等冻结编码器保持原样。见 [当前数值策略](../TECHNICAL_REFERENCE.md#numerical-policy)。
 
 > 后续状态：本文保留首次审查时的故障证据。三个 P1 已按用户确认的方案
 > 修复，验证结果见 [训练安全修复记录](MAC_TRAINING_SAFETY_VALIDATION_20260906.md)。

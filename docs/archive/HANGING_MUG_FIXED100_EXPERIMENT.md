@@ -1,3 +1,5 @@
+> 历史记录。这里只保留当时的实验结果和操作；当前状态与计划见 [当前实验](../MULTITASK_MBRL_PROTOCOL.md)。
+
 # Hanging mug：固定 100 个训练场景的 MAC 实验
 
 更新：2026-09-09。执行主机：190；代码：`/data3/hongjia/robonana`。

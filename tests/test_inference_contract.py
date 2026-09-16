@@ -135,7 +135,8 @@ def test_resume_checks_contract_before_fact_restores_weights(monkeypatch, tmp_pa
 
 
 @pytest.mark.parametrize("phase", ["world_policy", "critic"])
-def test_training_save_hook_binds_exported_weights(monkeypatch, tmp_path, phase):
+@pytest.mark.parametrize("world_conditioning", ["fixed48", "rope_prefix"])
+def test_training_save_hook_binds_exported_weights(monkeypatch, tmp_path, phase, world_conditioning):
     from types import SimpleNamespace
     from robonana.training.robotwin_trainer import RoboNanaTrainer
     from fact_train.trainers.trainer import Trainer
@@ -146,6 +147,7 @@ def test_training_save_hook_binds_exported_weights(monkeypatch, tmp_path, phase)
     trainer._image_inputs_certified = True
     trainer.model_name = "transformer"
     trainer.mac_phase = phase
+    trainer.world_conditioning = world_conditioning
     trainer.inference_contract = expected
     trainer.target_value_ema = None
     def export(self, models, weights, output_dir):
@@ -158,6 +160,7 @@ def test_training_save_hook_binds_exported_weights(monkeypatch, tmp_path, phase)
     contracts.check_contract(actual, expected)
     assert actual["phase"] == phase
     assert actual["step"] == 10
+    assert actual["world_conditioning"] == world_conditioning
 
 
 def test_uncertified_training_cannot_publish_contract(monkeypatch, tmp_path):

@@ -56,6 +56,7 @@ def training(opts):
     # FACT config entry reuses the existing loader, optimizer, scheduler and trainer.
     os.environ["ROBONANA_PROTOCOL_PHASE"] = opts.phase
     os.environ["ROBONANA_PROTOCOL_ROOT"] = str(opts.output.resolve())
+    os.environ["ROBONANA_WORLD_CONDITIONING"] = opts.world_conditioning
     for flag, variable in (("checkpoint", "ROBONANA_MAC_PRETRAIN_CHECKPOINT"),
                            ("model_config", "ROBONANA_MAC_PRETRAIN_CONFIG"),
                            ("replay_root", "ROBONANA_REPLAY_ROOT")):
@@ -293,6 +294,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("audit", "train", "aliases", "collect", "eval"))
     parser.add_argument("--phase", choices=("pretrain", "stage1", "stage2"), default="pretrain")
+    parser.add_argument("--world-conditioning", choices=("fixed48", "rope_prefix"), default="fixed48",
+                        help="World training: fixed48 bidirectional or random h/RoPE with causal clean-action prefix")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--model-config", type=Path)

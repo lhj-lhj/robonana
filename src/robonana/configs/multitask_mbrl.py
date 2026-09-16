@@ -19,6 +19,16 @@ def build_protocol_config(base, phase):
     milestones = MILESTONES[phase]
     loader, train = result["dataloaders"]["train"], result["train"]
     pools = loader["data_or_config"]
+    world_conditioning = os.environ.get("ROBONANA_WORLD_CONDITIONING", "fixed48")
+    if world_conditioning not in {"fixed48", "rope_prefix"}:
+        raise ValueError("world_conditioning must be fixed48 or rope_prefix")
+    result["models"]["world_conditioning"] = world_conditioning
+    # This switch changes world supervision only; action chunks stay 48.
+    # This two-arm experiment covers pretrain/Stage1, not a new critic protocol.
+    for pool in pools:
+        pool["world_conditioning"] = world_conditioning if phase != "stage2" else "fixed48"
+    if phase == "stage2" and world_conditioning != "fixed48":
+        raise ValueError("rope_prefix ablation supports pretrain/stage1 only; Stage2 needs a separate protocol")
     pools[0]["task_globs"] = ("Clean/*", "Randomized/*")
     # 中文：只从示范和本轮失败池取样；保留现有四池接口，零权重池不参与。
     # English: Reuse the four-pool sampler, explicitly disable unused replay pools.
@@ -46,6 +56,7 @@ def build_protocol_config(base, phase):
                  resume=False, allow_uncertified_pretrain=False, mixed_precision="bf16",
                  checkpoint_interval=1000, early_checkpoint_steps=(), checkpoint_keeps=list(milestones),
                  checkpoint_total_limit=2, checkpoint_save_optimizer=True, disable_checkpointing=False)
+    train.setdefault("seed", 6666)  # Record FACT's existing default for paired runs.
     result["optimizers"].update(lr=1e-4 if phase == "stage2" else 2e-5,
                                 robot_lr=2e-5 if phase == "stage1" else 1e-4)
     result["schedulers"].update(warmup_steps=500, decay_steps=milestones[-1])
@@ -53,6 +64,8 @@ def build_protocol_config(base, phase):
     result["project_dir"] = str(Path(os.environ.get("ROBONANA_PROTOCOL_ROOT", "experiments/multitask_mbrl")) / phase)
     train["tracker_init_kwargs"]["wandb"].update(
         entity="hongjia-liu-aalto-university", name=f"multitask-mbrl-loop0-{phase}")
+    if world_conditioning != "fixed48":
+        train["tracker_init_kwargs"]["wandb"]["name"] += f"-{world_conditioning}"
     train["posttrain"]["current_collection_round"] = 0
     for pool in pools[1:]:
         if "round_id" in pool:

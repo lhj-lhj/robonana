@@ -27,6 +27,7 @@ class RoboNanaCheckpointConfig:
     value_dim: int
     source: str
     expert_hidden_dim: int = 1024
+    world_conditioning: str = "fixed48"
 
 
 def discover_model_config(checkpoint_path: str | Path) -> Path | None:
@@ -70,6 +71,9 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
         raise ValueError("the maintained model requires a 48-logit binary_chunk reward head")
     if any(int(models[name]) != 1 for name in ("success_dim", "q_dim", "value_dim")):
         raise ValueError("success, Q and Value dimensions must be one")
+    world_conditioning = str(models.get("world_conditioning", "fixed48"))
+    if world_conditioning not in {"fixed48", "rope_prefix"}:
+        raise ValueError("world_conditioning must be fixed48 or rope_prefix")
     return RoboNanaCheckpointConfig(
         params=Flux2Params(**dict(raw_params)), action_dim=int(models["action_dim"]),
         state_dim=int(models["state_dim"]), reward_dim=48,
@@ -78,6 +82,7 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
         pred_action_bidirectional=True, architecture_version=architecture,
         chunk_horizon=48, value_dim=1, source=str(path),
         expert_hidden_dim=int(models.get("expert_hidden_dim", 1024)),
+        world_conditioning=world_conditioning,
     )
 
 
@@ -94,7 +99,13 @@ def resolve_checkpoint_config(
     """Read the complete MAC schema; explicit overrides are for test tooling only."""
 
     discovered = Path(config_path).expanduser().resolve() if config_path else discover_model_config(checkpoint_path)
+    contract_path = Path(checkpoint_path).expanduser().parent / "inference_contract.json"
+    recorded_mode = None
+    if contract_path.is_file():
+        recorded_mode = json.loads(contract_path.read_text(encoding="utf-8")).get("world_conditioning", "fixed48")
     if discovered is None:
+        if recorded_mode not in (None, "fixed48"):
+            raise FileNotFoundError("rope_prefix checkpoint requires its recorded model config")
         explicit = (params, action_dim, state_dim, reward_dim, success_dim, q_dim, reward_head_type, max_horizon)
         if not all(value is not None for value in explicit):
             raise FileNotFoundError("complete mac_mot_v2 config is required beside the checkpoint")
@@ -112,6 +123,10 @@ def resolve_checkpoint_config(
             expert_hidden_dim=1024 if expert_hidden_dim is None else int(expert_hidden_dim),
         )
     config = _load_complete_config(discovered)
+    # The fingerprinted sidecar pins semantics even if a caller supplies a
+    # different config with identical parameter shapes. Older exports are fixed48.
+    if recorded_mode is not None and recorded_mode != config.world_conditioning:
+        raise ValueError("Checkpoint contract and config world_conditioning disagree")
     for name, value in (("params", params), ("action_dim", action_dim), ("state_dim", state_dim),
                         ("reward_dim", reward_dim), ("success_dim", success_dim), ("q_dim", q_dim),
                         ("reward_head_type", reward_head_type), ("max_horizon", max_horizon),

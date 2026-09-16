@@ -1,5 +1,6 @@
 """One-off export guards; no legacy sampling implementation is maintained."""
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -15,9 +16,9 @@ conversion = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(conversion)
 
 
-def test_actor_migration_preserves_masked_forward_and_segment_rows():
+def test_actor_migration_preserves_archived_forward_and_segment_rows():
     mac, inputs = model_and_inputs()
-    # Same shared FACT wrapper as historical actor, including asymmetric mask.
+    # Construct historical parameter layout; legacy forward/mask are no longer shipped.
     from flux2.model import Flux2Params
     params = Flux2Params(in_channels=8, context_in_dim=16, hidden_size=32, num_heads=4,
         depth=2, depth_single_blocks=2, axes_dim=[2, 2, 2, 2], mlp_ratio=2., use_guidance_embed=False)
@@ -35,9 +36,12 @@ def test_actor_migration_preserves_masked_forward_and_segment_rows():
         gt_action_cond=torch.randn_like(action), chunk_horizon=torch.full((2,), 48),
         noisy_future_state=torch.randn(2, 1, 6), noisy_reward=torch.randn(2, 1, 1),
         noisy_q=torch.randn(2, 1, 1), wm_timestep=torch.ones(2))
+    # These CPU outputs were recorded before removing the legacy forward at
+    # 58c4996 (torch 2.8.0). Keep RNG draws above identical to the original test.
+    fixture = json.loads((Path(__file__).parent / "fixtures/legacy_actor_forward.json").read_text())
     with torch.no_grad():
-        for sigma in (0., .5, 1.):
-            reference = old(**common, action_timestep=torch.full((2,), sigma)).action
+        for sigma, expected in zip(fixture["sigmas"], fixture["outputs"], strict=True):
+            reference = torch.tensor(expected, dtype=action.dtype)
             actual = full_action(mac, inputs, action, torch.tensor(sigma))
             torch.testing.assert_close(actual, reference, atol=2e-6, rtol=2e-5)
     broken = dict(source)

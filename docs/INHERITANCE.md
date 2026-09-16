@@ -27,9 +27,14 @@ autocast target forward on the shared BF16 FLUX cache.
 
 ## Checkpoint boundary
 
-Runtime loading accepts only complete `mac_mot_v2` checkpoints. New runs use
-the 1,000-step MAC checkpoint configured in `posttrain_config.py`; later rounds
-exact-load the previous online model and initialize a fresh Value EMA as a copy
-of that online Value expert. Resuming the same critic phase restores its saved
-EMA state. The old 120k checkpoint remains an archived artifact, not a runtime
-format, and no conversion/legacy loader is shipped here.
+Runtime loading accepts complete `mac_mot_v2` checkpoints. The current 50-task
+experiment starts from its own pretraining run; see `MULTITASK_MBRL_PROTOCOL.md`
+for exact paths. The older single-task config's default is not this experiment's
+initialization. A new critic phase copies the online Value expert into its EMA;
+resuming the same critic phase restores the saved EMA.
+
+`scripts/data/convert_120k_action_checkpoint.py` is an explicit one-time export
+for the archived actor. The existing export is action-only; its newly initialized
+world/critic heads are not trained. The legacy forward, `SegmentMap` and
+`build_attention_bias` have been removed; MAC reuses the base modules/helpers.
+Conversion is checked against CPU outputs recorded before that removal.

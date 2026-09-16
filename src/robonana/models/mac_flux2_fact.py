@@ -66,7 +66,11 @@ class MacFlux2FACTModel(Flux2FACTModel):
         value_dim: int = 1,
         dino_dim: int | None = None,
         expert_hidden_dim: int | None = None,
+        world_conditioning: str = "fixed48",
     ) -> None:
+        if world_conditioning not in {"fixed48", "rope_prefix"}:
+            raise ValueError("world_conditioning must be fixed48 or rope_prefix")
+        self.world_conditioning = world_conditioning
         if int(chunk_horizon) != 48:
             raise ValueError("mac_mot_v2 requires chunk_horizon=48")
         if int(reward_dim) != int(chunk_horizon):
@@ -184,6 +188,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
         guidance: Tensor | None = None,
         critic_kind: str | None = None,
         condition_cache: FrozenFluxKVCache | None = None,
+        world_horizon: Tensor | None = None,
     ) -> Flux2FACTOutput | Tensor:
         if critic_kind is not None:
             if critic_kind == "both":
@@ -241,6 +246,14 @@ class MacFlux2FACTModel(Flux2FACTModel):
             torch.all(chunk_horizon == self.chunk_horizon)
         ):
             raise ValueError("mac_mot_v2 actor/world forward requires chunk_horizon=48")
+        if world_horizon is None:
+            world_horizon = chunk_horizon
+        if tuple(world_horizon.shape) != (batch,) or world_horizon.dtype not in (torch.int32, torch.int64):
+            raise ValueError("world_horizon must be an integer tensor with shape [B]")
+        if bool(torch.any((world_horizon < 1) | (world_horizon > 48))):
+            raise ValueError("world_horizon must lie in [1,48]")
+        if self.world_conditioning == "fixed48" and not bool(torch.all(world_horizon == 48)):
+            raise ValueError("fixed48 requires world_horizon=48")
         del chunk_horizon, noisy_reward, noisy_q
         if noisy_future_dino is not None or dino_ids is not None:
             raise ValueError("mac_mot_v2 does not accept DINO future tokens")
@@ -250,6 +263,10 @@ class MacFlux2FACTModel(Flux2FACTModel):
             raise ValueError("current_ids must have shape [B, image_tokens, 4]")
         if future_ids.shape != (*noisy_future_latents.shape[:2], 4):
             raise ValueError("future_ids must have shape [B, image_tokens, 4]")
+        if self.world_conditioning == "rope_prefix" and not bool(torch.all(
+            future_ids[..., 0] == world_horizon.to(future_ids.device)[:, None]
+        )):
+            raise ValueError("future image RoPE time must match world_horizon")
         for name, value, width in (
             ("state", state, self.state_dim),
             ("noisy_future_state", noisy_future_state, self.state_dim),
@@ -297,15 +314,16 @@ class MacFlux2FACTModel(Flux2FACTModel):
         id_dtype = current_ids.dtype
         action_time = torch.arange(1, noisy_pred_action.shape[1] + 1, device=device, dtype=id_dtype)[None].expand(batch, -1)
         clean_time = torch.arange(1, gt_action_cond.shape[1] + 1, device=device, dtype=id_dtype)[None].expand(batch, -1)
+        world_time = world_horizon.to(device=device, dtype=id_dtype)[:, None] if self.world_conditioning == "rope_prefix" else None
         ids = torch.cat(
             [
                 self._robot_ids(batch_size=batch, length=state.shape[1], segment_id=1, device=device, dtype=id_dtype),
                 current_ids.to(device=device),
                 self._robot_ids(batch_size=batch, length=noisy_pred_action.shape[1], segment_id=3, device=device, dtype=id_dtype, time_ids=action_time),
                 self._robot_ids(batch_size=batch, length=gt_action_cond.shape[1], segment_id=4, device=device, dtype=id_dtype, time_ids=clean_time),
-                self._robot_ids(batch_size=batch, length=1, segment_id=5, device=device, dtype=id_dtype),
-                self._robot_ids(batch_size=batch, length=1, segment_id=6, device=device, dtype=id_dtype),
-                self._robot_ids(batch_size=batch, length=noisy_future_state.shape[1], segment_id=7, device=device, dtype=id_dtype),
+                self._robot_ids(batch_size=batch, length=1, segment_id=5, device=device, dtype=id_dtype, time_ids=world_time),
+                self._robot_ids(batch_size=batch, length=1, segment_id=6, device=device, dtype=id_dtype, time_ids=world_time),
+                self._robot_ids(batch_size=batch, length=noisy_future_state.shape[1], segment_id=7, device=device, dtype=id_dtype, time_ids=None if world_time is None else world_time.expand(-1, noisy_future_state.shape[1])),
                 future_ids.to(device=device),
             ],
             dim=1,
@@ -318,6 +336,8 @@ class MacFlux2FACTModel(Flux2FACTModel):
             dtype=dtype,
             device=device,
             context_mask=context_mask,
+            world_conditioning=self.world_conditioning,
+            world_horizon=world_horizon if self.world_conditioning == "rope_prefix" else None,
         )
 
         zero = torch.zeros_like(wm_timestep)
@@ -479,7 +499,10 @@ class MacFlux2FACTModel(Flux2FACTModel):
         if condition_cache.prefix_length != segments.clean_action.start:
             raise ValueError("world cache condition length mismatch")
         bias = build_mac_attention_bias(segments, batch_size=batch,
-            dtype=self.img_in.weight.dtype, device=device, context_mask=context_mask)
+            dtype=self.img_in.weight.dtype, device=device, context_mask=context_mask,
+            world_conditioning=self.world_conditioning,
+            world_horizon=torch.full((batch,), 48, device=device, dtype=torch.long)
+                if self.world_conditioning == "rope_prefix" else None)
         embed = self.actor_world_segment_embed.weight
         hidden = torch.cat((self.action_in(clean_action) + embed[3],
             self.reward_token.weight[None].expand(batch, 1, -1) + embed[4],
@@ -487,8 +510,9 @@ class MacFlux2FACTModel(Flux2FACTModel):
         def robot(length, segment, time_ids=None):
             return self._robot_ids(batch_size=batch, length=length, segment_id=segment,
                 device=device, dtype=torch.long, time_ids=time_ids)
+        world_time = torch.full((batch, 1), 48, device=device, dtype=torch.long) if self.world_conditioning == "rope_prefix" else None
         ids = torch.cat((robot(48, 4, torch.arange(1, 49, device=device)[None].expand(batch, -1)),
-                         robot(1, 5), robot(1, 6)), dim=1)
+                         robot(1, 5, world_time), robot(1, 6, world_time)), dim=1)
         stop = segments.future_state.start
         hidden, kv = self._world_suffix(condition_cache, hidden, ids,
             torch.zeros(batch, device=device), bias[:, :, segments.clean_action.start:stop, :stop],
@@ -507,8 +531,11 @@ class MacFlux2FACTModel(Flux2FACTModel):
             raise ValueError("world cache future shape mismatch")
         hidden = torch.cat((self.state_in(noisy_future_state) + self.actor_world_segment_embed.weight[6],
                             self.img_in(noisy_future_latents) + self.actor_world_segment_embed.weight[7]), dim=1)
+        if self.world_conditioning == "rope_prefix" and not bool(torch.all(future_ids[..., 0] == 48)):
+            raise ValueError("cached world inference requires target frame 48")
+        world_time = torch.full((batch, length), 48, device=hidden.device, dtype=future_ids.dtype) if self.world_conditioning == "rope_prefix" else None
         ids = torch.cat((self._robot_ids(batch_size=batch, length=length, segment_id=7,
-            device=hidden.device, dtype=future_ids.dtype), future_ids), dim=1)
+            device=hidden.device, dtype=future_ids.dtype, time_ids=world_time), future_ids), dim=1)
         hidden, _ = self._world_suffix(cache.kv, hidden, ids, wm_timestep, cache.future_bias, capture=False)
         vec = self._condition_vec(wm_timestep.expand(batch), None)
         return Flux2FACTOutput(

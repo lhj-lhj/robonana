@@ -209,6 +209,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         action_dim: int = 14,
         max_horizon: int = 48,
         fixed_horizon: int = 0,
+        world_conditioning: str = "fixed48",
         latent_cache_size: int = 4,
         language_cache_size: int = 8,
         hdf5_cache_size: int = 4,
@@ -232,6 +233,9 @@ class RoboTwinHDF5Dataset(BaseDataset):
         self.action_dim = int(action_dim)
         self.max_horizon = int(max_horizon)
         self.fixed_horizon = int(fixed_horizon)
+        self.world_conditioning = str(world_conditioning)
+        if self.world_conditioning not in {"fixed48", "rope_prefix"}:
+            raise ValueError("world_conditioning must be fixed48 or rope_prefix")
         self.latent_cache_size = int(latent_cache_size)
         self.language_cache_size = int(language_cache_size)
         self.hdf5_cache_size = int(hdf5_cache_size)
@@ -437,20 +441,24 @@ class RoboTwinHDF5Dataset(BaseDataset):
         return self.records[episode_pos], int(index - self.episode_starts[episode_pos])
 
     def _sample_horizon(self) -> int:
+        if self.world_conditioning == "rope_prefix":
+            return int(torch.randint(1, self.action_chunk + 1, ()).item())
         return self.action_chunk
 
     def _get_data(self, index: int) -> dict[str, Any]:
         record, frame_index = self._locate(int(index))
-        chunk_horizon = self._sample_horizon()
-        future_index = min(frame_index + chunk_horizon, record.length - 1)
+        world_horizon = self._sample_horizon()
+        future_index = min(frame_index + world_horizon, record.length - 1)
         transition_valid = self._episode_transition_valid(record)
-        delta_steps = int(transition_valid[frame_index:future_index].sum())
+        chunk_end = min(frame_index + self.action_chunk, record.length - 1)
+        chunk_delta = int(transition_valid[frame_index:chunk_end].sum())
         expected_delta = min(self.action_chunk, record.length - 1 - frame_index)
-        if delta_steps != expected_delta or (not record.success and delta_steps != self.action_chunk):
+        if chunk_delta != expected_delta or (not record.success and chunk_delta != self.action_chunk):
             raise RuntimeError(
                 "MAC window contains missing transitions or an incomplete failure chunk: "
-                f"{record.source}, frame={frame_index}, delta={delta_steps}"
+                f"{record.source}, frame={frame_index}, delta={chunk_delta}"
             )
+        delta_steps = int(transition_valid[frame_index:future_index].sum())
         reward_h = discounted_chunk_reward(
             delta_steps,
             discount=self.discount,
@@ -479,7 +487,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
             )
         state_raw = vector[frame_index]
         action_raw = policy_action[action_indices]
-        # The state target is the observation at t+48, clipped only for a
+        # The state target is the observation at t+h, clipped only for a
         # successful terminal suffix that is padded with absorbing frames.
         future_state_raw = vector[future_index]
 
@@ -505,7 +513,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
                 f"{record.length}: {record.source}"
         )
         current_latent, future_latent = select_current_future_latents(
-            frame_latents, frame_index, chunk_horizon
+            frame_latents, frame_index, world_horizon
         )
         context = self._context(record)
         success_terminal_h = bool(record.success and future_index == record.length - 1)
@@ -514,6 +522,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
             success_terminal=success_terminal_h,
             chunk_horizon=self.action_chunk,
         )
+        reward_chunk_mask[world_horizon:] = 0
         direct_reward_h = self.reward_goal if success_terminal_h else self.reward_non_goal
         time_limit_truncated_h = bool(
             not record.success
@@ -545,7 +554,9 @@ class RoboTwinHDF5Dataset(BaseDataset):
             "reward_h": torch.tensor([reward_h], dtype=torch.float32),
             "success": torch.tensor([float(success_terminal_h)], dtype=torch.float32),
             "q": torch.tensor([q_clean], dtype=torch.float32),
-            "chunk_horizon": torch.tensor(chunk_horizon, dtype=torch.long),
+            "chunk_horizon": torch.tensor(self.action_chunk, dtype=torch.long),
+            "world_horizon": torch.tensor(world_horizon, dtype=torch.long),
+            "world_prefix_causal": torch.tensor(self.world_conditioning == "rope_prefix"),
             "delta": torch.tensor(delta_steps, dtype=torch.long),
             "delta_steps": torch.tensor(delta_steps, dtype=torch.long),
             "terminal_h": torch.tensor(float(success_terminal_h), dtype=torch.float32),

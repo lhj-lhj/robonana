@@ -1,4 +1,10 @@
-# Maintained code map (2026-09-08)
+# 代码索引
+
+2026-09-16 更新：当前实验见 [实验文档](MULTITASK_MBRL_PROTOCOL.md)。旧
+`SegmentMap`、`WorldBlockMap`、`build_attention_bias` 与基类旧 forward 已删除；
+`Flux2FACTModel` 仅提供 MAC 继承的模块/helper。旧 actor 转换仍保留，并用删除前的
+CPU 输出做回归。两组world消融已接入现有 `build_mac_attention_bias`，通过
+`--world-conditioning fixed48|rope_prefix` 选择，尚未启动实验。
 
 This map and README describe current behavior. Dated experiment reports record
 historical behavior; do not reconstruct legacy branches from those reports.
@@ -12,7 +18,8 @@ historical behavior; do not reconstruct legacy branches from those reports.
   No FP32-only execution wrapper or global BF16 reduction override remains.
 - Architecture: `models/mac_flux2_fact.py` implements the fixed-48 MAC model; FACT
   and FLUX supply upstream blocks. Keep deterministic MoT Q/V and Value-only
-  EMA; no architecture/attention/loss changes were made by this cleanup.
+  EMA. The default mask is unchanged; `rope_prefix` optionally makes world clean
+  actions causal and limits all world queries to the first h actions.
 - Training: `training/robotwin_trainer.py`, config `robotwin_flux2_4b_mac`.
   `critic_continuation` edits a copy of a saved configuration, preserving the
   saved run. Every new pool uses A, including when the saved run used B.

@@ -57,6 +57,42 @@ def test_bounded_checkpoint_probe(monkeypatch):
     assert config["train"]["checkpoint_keeps"] == []
 
 
+def test_two_world_arms_keep_the_same_training_budget_and_data(monkeypatch):
+    from robonana.configs.multitask_mbrl import build_protocol_config
+    from robonana.configs.robotwin_flux2 import config as base
+    monkeypatch.setenv("ROBONANA_WORLD_CONDITIONING", "fixed48")
+    a = build_protocol_config(base, "pretrain")
+    monkeypatch.setenv("ROBONANA_WORLD_CONDITIONING", "rope_prefix")
+    b = build_protocol_config(base, "pretrain")
+    assert a["optimizers"] == b["optimizers"] and a["schedulers"] == b["schedulers"]
+    assert a["models"]["checkpoint"] == b["models"]["checkpoint"]
+    assert a["train"]["max_steps"] == b["train"]["max_steps"] == 120000
+    for cfg, mode in ((a, "fixed48"), (b, "rope_prefix")):
+        assert cfg["models"]["world_conditioning"] == mode
+        loader = cfg["dataloaders"]["train"]
+        assert loader["data_or_config"]["world_conditioning"] == mode
+        assert loader["data_or_config"]["action_chunk"] == 48
+        assert loader["batch_size_per_gpu"] == 16
+    assert a["dataloaders"]["train"]["data_or_config"]["task_globs"] == b["dataloaders"]["train"]["data_or_config"]["task_globs"]
+
+
+@pytest.mark.parametrize("mode", ["fixed48", "rope_prefix"])
+def test_world_ablation_cli_only_prints_plan(tmp_path, mode):
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+    entry = Path(__file__).resolve().parents[1] / "scripts/run_multitask_mbrl.py"
+    output = tmp_path / mode
+    result = subprocess.run([sys.executable, str(entry), "train", "--phase", "pretrain",
+        "--world-conditioning", mode, "--output", str(output)], capture_output=True, text=True, check=True)
+    config = json.loads(result.stdout)
+    assert config["models"]["world_conditioning"] == mode
+    assert config["dataloaders"]["train"]["data_or_config"]["world_conditioning"] == mode
+    assert config["train"]["seed"] == 6666
+    assert not output.exists()
+
+
 def test_missing_source_rejected(monkeypatch):
     from robonana.configs.multitask_mbrl import build_protocol_config
     from robonana.configs.robotwin_flux2 import config as base

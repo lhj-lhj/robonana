@@ -1,3 +1,5 @@
+> 历史记录。这里只保留当时的实验结果和操作；当前状态与计划见 [当前实验](../MULTITASK_MBRL_PROTOCOL.md)。
+
 # Image input audit, 2026-09-08
 
 ## Historical training evidence

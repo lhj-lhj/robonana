@@ -26,13 +26,15 @@ def test_flow_noise_preserves_sigma_and_unrounded_velocity_target():
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_bf16_stage1_full_world_policy_backward(device):
+@pytest.mark.parametrize("world_conditioning", ["fixed48", "rope_prefix"])
+def test_bf16_stage1_full_world_policy_backward(device, world_conditioning):
     from types import SimpleNamespace
     import robonana.training.robotwin_trainer as training
     RoboNanaTrainer = training.RoboNanaTrainer
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA integration requires a GPU")
     model, inputs = model_and_inputs()
+    model.world_conditioning = world_conditioning
     model.to(device=device, dtype=torch.bfloat16).set_training_phase("world_policy")
     trainer = object.__new__(RoboNanaTrainer)
     trainer._models = [model]
@@ -40,6 +42,7 @@ def test_bf16_stage1_full_world_policy_backward(device):
     trainer.mixed_precision = "bf16"
     trainer.grid_height, trainer.grid_width, trainer.flow_shift = 1, 2, 1.
     trainer._posttrain_metrics = {}
+    trainer.world_conditioning = world_conditioning
     batch = dict(context=inputs["context"], context_mask=inputs["context_mask"],
                  current_latents=inputs["current_latents"], future_latents=torch.randn(2, 2, 8),
                  state=inputs["state"][:, 0], future_state=torch.randn(2, 6),
@@ -47,6 +50,9 @@ def test_bf16_stage1_full_world_policy_backward(device):
                  action_loss_mask=torch.tensor([1., 0.]), action_valid_mask=torch.ones(2, 48),
                  reward_chunk=torch.zeros(2, 48), reward_chunk_mask=torch.ones(2, 48),
                  success=torch.tensor([1., 0.]))
+    batch["world_horizon"] = torch.tensor([1, 32]) if world_conditioning == "rope_prefix" else batch["chunk_horizon"]
+    batch["world_prefix_causal"] = torch.full((2,), world_conditioning == "rope_prefix")
+    batch["reward_chunk_mask"] *= torch.arange(48)[None] < batch["world_horizon"][:, None]
     sigma = torch.tensor([.999, .37], device=device)
     trainer._sample_timestep = lambda batch_size: sigma
     constructed = []
@@ -62,6 +68,7 @@ def test_bf16_stage1_full_world_policy_backward(device):
             patch.object(training, "masked_action_mse", wraps=training.masked_action_mse) as action_loss:
         losses = trainer._forward_step_mac_world_policy(batch)
     model_inputs = forward.call_args.kwargs
+    assert torch.equal(model_inputs["future_ids"][..., 0].cpu(), batch["world_horizon"][:, None].expand(-1, 2))
     for (clean, noisy, target), source, field in zip(
             constructed, (batch["action"], batch["future_latents"], batch["future_state"][:, None]),
             ("noisy_pred_action", "noisy_future_latents", "noisy_future_state"), strict=True):

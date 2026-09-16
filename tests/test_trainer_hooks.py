@@ -163,3 +163,17 @@ def test_critic_resume_rejects_missing_value_ema_files(monkeypatch, tmp_path):
 
     with pytest.raises(FileNotFoundError, match="critic resume checkpoint is incomplete"):
         trainer.load_model_hook([], str(tmp_path))
+
+
+def test_resume_rejects_changed_world_conditioning(monkeypatch, tmp_path):
+    import robonana.inference_contract as contracts
+    trainer = object.__new__(RoboNanaTrainer)
+    trainer.model_name = "transformer"
+    trainer.inference_contract = {}
+    trainer.world_conditioning = "rope_prefix"
+    (tmp_path / "transformer").mkdir()
+    (tmp_path / "transformer/weights.bin").write_bytes(b"fixture")
+    monkeypatch.setattr(contracts, "read_contract", lambda path: {"world_conditioning": "fixed48"})
+    monkeypatch.setattr(Trainer, "load_model_hook", lambda *args: pytest.fail("Must reject before restore"))
+    with pytest.raises(ValueError, match="world_conditioning"):
+        trainer.load_model_hook([], str(tmp_path))

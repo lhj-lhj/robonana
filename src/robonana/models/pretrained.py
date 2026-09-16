@@ -139,6 +139,7 @@ def load_flux2_fact_trained_checkpoint(
             value_dim=config.value_dim,
             dino_dim=config.dino_dim,
             expert_hidden_dim=config.expert_hidden_dim,
+            world_conditioning=config.world_conditioning,
         ).to(dtype=dtype)
     incompatible = model.load_state_dict(state_dict, strict=True, assign=True)
     if incompatible.missing_keys or incompatible.unexpected_keys:

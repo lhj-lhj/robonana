@@ -1,4 +1,4 @@
-from .attention_mask import SegmentMap, WorldBlockMap, build_attention_bias
+from .attention_mask import MacSegmentMap, build_mac_attention_bias
 from .checkpoint_config import RoboNanaCheckpointConfig, resolve_checkpoint_config
 from .flux2_fact import Flux2FACTModel, Flux2FACTOutput
 from .pretrained import (
@@ -13,9 +13,8 @@ __all__ = [
     "Flux2FACTOutput",
     "PretrainedLoadReport",
     "RoboNanaCheckpointConfig",
-    "SegmentMap",
-    "WorldBlockMap",
-    "build_attention_bias",
+    "MacSegmentMap",
+    "build_mac_attention_bias",
     "configure_trainable_parameters",
     "load_flux2_fact_trained_checkpoint",
     "robot_parameter_names",

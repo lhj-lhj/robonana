@@ -1,3 +1,5 @@
+> 历史记录。这里只保留当时的实验结果和操作；当前状态与计划见 [当前实验](../MULTITASK_MBRL_PROTOCOL.md)。
+
 # Stage 2 四卡续训与两个独立实验 / Four-GPU continuation and isolated probes
 
 ## 边界 / Boundaries
