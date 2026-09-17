@@ -27,6 +27,20 @@ def atomic_json(path, value):
     temporary.replace(path)
 
 
+def load_expert_jobs(root, task, task_config, episodes):
+    """Consume a completed external harvest; never run expert checks here."""
+    from robonana.sim.collection_pool import validate_jobs
+    path = root / f"{task}__{task_config}" / "expert_manifest.json"
+    manifest = json.loads(path.read_text())
+    if (manifest.get("task_name"), manifest.get("task_config"), manifest.get("expert_validated")) != (task, task_config, True):
+        raise ValueError(f"Expert manifest identity/validation mismatch: {path}")
+    jobs = manifest["jobs"]
+    validate_jobs(jobs, 1)
+    if len(jobs) < episodes:
+        raise ValueError(f"Incomplete expert manifest: {path}: {len(jobs)}/{episodes}")
+    return [dict(job) for job in jobs[:episodes]]
+
+
 def run_bounded(command, *, env, log, timeout):
     """中文：给每个候选 seed 独立墙钟上限，清理自己启动的进程组。
     English: Reuse the isolated evaluator's process-group cleanup, including SIGTERM
@@ -149,7 +163,7 @@ def collect_lane(opts, pairs, lane):
     lane_root.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, PYTHONUNBUFFERED="1", CUDA_VISIBLE_DEVICES=str(opts.gpus[lane]),
                ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE="32", FACT_ROBOTWIN_EVAL_VIDEO_LOG="0")
-    sim_gpu = opts.gpus[lane + len(opts.gpus)//2]
+    sim_gpu = opts.gpus[lane] if getattr(opts, "shared_gpus", False) else opts.gpus[lane + len(opts.gpus)//2]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=opts.robotwin, text=True).strip()
     with (lane_root / "server.log").open("w") as log:
         server = subprocess.Popen(server_command(server_opts, lane_root), cwd=ROOT, env=env,
@@ -157,14 +171,22 @@ def collect_lane(opts, pairs, lane):
         try:
             for task, task_config in pairs:
                 task_root = opts.output / task / task_config
+                expert_jobs = getattr(opts, "expert_jobs", None)
+                locked = None
+                if expert_jobs is not None:
+                    shard = opts.shard_offset + lane
+                    jobs = expert_jobs[f"{task}__{task_config}"][shard::opts.shard_count]
+                    if not jobs:
+                        continue
+                    locked = dict(jobs=jobs)
+                    task_root = task_root / f"shard_{shard:02d}"
                 task_root.mkdir(parents=True, exist_ok=True)
                 ledger_path = task_root / "ledger.json"
                 ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else []
                 if any(row.get("result", {}).get("replay_verified") is False for row in ledger):
                     raise RuntimeError("Unresolved scout/replay mismatch in existing ledger; no automatic scene filtering")
                 accepted = [r["job"] for r in ledger if r["status"] == "evaluated"]
-                locked = None
-                if opts.command == "eval":
+                if opts.command == "eval" and expert_jobs is None:
                     locked = json.loads((opts.manifests / task / task_config / "seeds.json").read_text())
                     if locked["robotwin_commit"] != revision or locked["task_config_sha256"] != sha256_file(opts.robotwin / "task_config" / f"{task_config}.yml"):
                         raise ValueError("Locked scenes do not match simulator revision/config")
@@ -185,7 +207,7 @@ def collect_lane(opts, pairs, lane):
                     if server.poll() is not None:
                         raise RuntimeError("Policy server exited; refusing to consume/reject scene seeds")
                     if locked:
-                        job = locked["jobs"][attempts-1]
+                        job = dict(locked["jobs"][attempts-1])
                     else:
                         prepare = [str(opts.sim_python), str(ROOT / "scripts/internal/collect_robotwin_pool_worker.py"),
                                    "--prepare-seeds", "1", "--candidate-limit", "1", "--seed-start", str(seed),
@@ -214,7 +236,7 @@ def collect_lane(opts, pairs, lane):
                                "--model-config", str(opts.model_config), "--initial-dataset", str(opts.initial_dataset),
                                "--output", str(attempt / "rollout"), "--port", str(server_opts.port),
                                "--external-server", "--inference-mode", server_opts.inference_mode,
-                               "--capture-mode", "scout_replay" if not locked else "scout",
+                               "--capture-mode", "scout_replay" if opts.command == "collect" else "scout",
                                "--candidate-batch-size", "32", "--timeout-seconds",
                                str(max(1, int(opts.seed_timeout - (time.monotonic()-seed_started))))]
                     rc = run_bounded(command, env=env, log=attempt / "rollout.log",
@@ -224,7 +246,7 @@ def collect_lane(opts, pairs, lane):
                         result = json.loads((attempt / "rollout/summary.json").read_text())
                         row.update(status="evaluated", result=result["episodes"][0])
                         accepted.append(job)
-                        if not locked and not row["result"]["success"] and row["result"].get("replay_verified"):
+                        if opts.command == "collect" and not row["result"]["success"] and row["result"].get("replay_verified"):
                             # Publish an accepted-only dataset view. Rejected attempts and
                             # orphaned artifacts can never leak into Stage1 via a broad glob.
                             source = Path(row["result"]["hdf5"]).parent.parent.resolve()
@@ -237,7 +259,7 @@ def collect_lane(opts, pairs, lane):
                     if rc == 0 and result["replay_mismatches"]:
                         # Do not select scenes based on replay reproducibility/outcome.
                         raise RuntimeError("Scout/replay mismatch: preserve outcome, block failure dataset publication")
-                if not locked:
+                if not locked or expert_jobs is not None:
                     atomic_json(task_root / "seeds.json", dict(
                         task_name=task, task_config=task_config, jobs=accepted, expert_validated=True,
                         robotwin_commit=revision, task_config_sha256=sha256_file(opts.robotwin / "task_config" / f"{task_config}.yml"),
@@ -260,12 +282,36 @@ def collection(opts):
             raise ValueError("Unknown task in bounded probe")
         tasks = opts.tasks
     pairs = [(task, cfg) for task in tasks for cfg in ("demo_clean", "demo_randomized")]
-    if len(opts.gpus) < 2 or len(opts.gpus) % 2 or len(set(opts.gpus)) != len(opts.gpus):
+    if len(set(opts.gpus)) != len(opts.gpus) or not opts.gpus or any(g < 0 for g in opts.gpus):
+        raise ValueError("Use distinct nonnegative GPU ids")
+    if not opts.shared_gpus and (len(opts.gpus) < 2 or len(opts.gpus) % 2):
         raise ValueError("Use distinct GPU pairs; default 4 policy + 4 simulator GPUs")
     if opts.episodes <= 0 or opts.seed_timeout <= 0 or opts.seed_start < 0 or opts.candidate_multiplier <= 0:
         raise ValueError("Invalid episode count, seed or timeout")
-    if opts.command == "eval" and not opts.manifests:
+    if opts.command == "eval" and not opts.manifests and not opts.expert_seed_cache:
         raise ValueError("Paired evaluation requires locked collection --manifests")
+    lanes = len(opts.gpus) if opts.shared_gpus else len(opts.gpus)//2
+    if opts.shared_gpus and not opts.expert_seed_cache:
+        raise ValueError("Shared per-seed lanes require --expert-seed-cache")
+    if opts.expert_seed_cache and opts.manifests:
+        raise ValueError("Choose external expert cache or locked collection manifests")
+    opts.expert_jobs = None
+    if opts.expert_seed_cache:
+        opts.shard_count = opts.shard_count or lanes
+        if opts.shard_offset < 0 or opts.shard_count < opts.shard_offset + lanes:
+            raise ValueError("Shard range must include every local lane")
+        opts.expert_jobs = {}
+        ready = []
+        for task, cfg in pairs:
+            path = opts.expert_seed_cache / f"{task}__{cfg}" / "expert_manifest.json"
+            if opts.ready_only and (not path.exists() or len(json.loads(path.read_text()).get("jobs", [])) < opts.episodes):
+                print(f"Pending expert cache: {task}/{cfg}")
+                continue
+            opts.expert_jobs[f"{task}__{cfg}"] = load_expert_jobs(opts.expert_seed_cache, task, cfg, opts.episodes)
+            ready.append((task, cfg))
+        pairs = ready
+        if not pairs:
+            raise ValueError("No completed expert manifests are ready")
     print(json.dumps(dict(pairs=pairs, episodes_per_config=opts.episodes, gpus=opts.gpus,
                           mode=opts.command, execute=opts.execute), indent=2))
     if not opts.execute:
@@ -276,6 +322,9 @@ def collection(opts):
                      mode=opts.command, pairs=pairs, episodes=opts.episodes, seed_start=opts.seed_start,
                      manifests=str(opts.manifests.resolve()) if opts.manifests else None)
     signature = json.loads(json.dumps(signature))
+    if opts.expert_jobs is not None:
+        signature.update(expert_jobs=opts.expert_jobs, shard_count=opts.shard_count,
+                         shard_offset=opts.shard_offset, lanes=lanes, shared_gpus=opts.shared_gpus)
     path = opts.output / "protocol.json"
     signature["robotwin_commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=opts.robotwin, text=True).strip()
     signature["task_config_sha256"] = {cfg:sha256_file(opts.robotwin / "task_config" / f"{cfg}.yml")
@@ -283,9 +332,9 @@ def collection(opts):
     if path.exists() and json.loads(path.read_text()) != signature:
         raise ValueError("Output belongs to a different collection/eval protocol")
     atomic_json(path, signature)
-    lanes = len(opts.gpus)//2
     with ThreadPoolExecutor(max_workers=lanes) as pool:
-        futures = [pool.submit(collect_lane, opts, pairs[lane::lanes], lane) for lane in range(lanes)]
+        futures = [pool.submit(collect_lane, opts, pairs if opts.expert_jobs is not None else pairs[lane::lanes], lane)
+                   for lane in range(lanes)]
         for future in futures:
             future.result()
 
@@ -318,6 +367,11 @@ def main():
     parser.add_argument("--candidate-multiplier", type=int, default=20, help="Maximum candidates per requested episode; lower for probes")
     parser.add_argument("--port", type=int, default=8400)
     parser.add_argument("--manifests", type=Path)
+    parser.add_argument("--expert-seed-cache", type=Path, help="Use harvested task__config/expert_manifest.json; skip expert preparation")
+    parser.add_argument("--shared-gpus", action="store_true", help="One policy+sim lane on each GPU, split expert seeds across lanes")
+    parser.add_argument("--shard-count", type=int, help="Global seed shards across hosts; defaults to local lane count")
+    parser.add_argument("--shard-offset", type=int, default=0, help="First shard owned by this host")
+    parser.add_argument("--ready-only", action="store_true", help="Run only configs with a completed expert seed manifest")
     opts = parser.parse_args()
     sources = [str(ROOT / path) for path in
         ("src", "third_party/FACT", "third_party/flux2/src", "third_party/flux2_official/src")]

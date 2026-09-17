@@ -87,6 +87,7 @@ def main():
                     finally:
                         task.close_env()
                 except Exception as seed_exc:
+                    print(json.dumps({'seed': seed, 'expert_error': repr(seed_exc)}), flush=True)
                     try:
                         task.close_env()
                     except Exception:

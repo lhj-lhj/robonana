@@ -198,3 +198,59 @@ def test_seed_timeout_replaced_but_locked_eval_not_replaced(tmp_path, monkeypatc
     assert len(eval_commands)==1 and locked_path.read_bytes()==locked
     summary=json.loads((opts.output/"hanging_mug/demo_clean/summary.json").read_text())
     assert summary==dict(evaluated=0,errors=1,successes=0,paired_scene_count=1)
+
+
+def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monkeypatch):
+    import importlib.util
+    import json
+    from pathlib import Path
+    import sys
+    from types import SimpleNamespace
+    path = Path(__file__).resolve().parents[1] / "scripts/run_multitask_mbrl.py"
+    spec = importlib.util.spec_from_file_location("expert_cache_launcher", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setitem(sys.modules, "benchmark_robotwin_collection_pool", SimpleNamespace(server_command=lambda *a: ["server"]))
+    monkeypatch.setitem(sys.modules, "eval_robotwin_task_isolated", SimpleNamespace(terminate_process_group=lambda *a, **k: None))
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(module.subprocess, "check_output", lambda *a, **k: "revision\n")
+    task, cfg = "place_dual_shoes", "demo_clean"
+    jobs = [dict(seed=s, instruction=f"instruction {s}") for s in range(100)]
+    cache = tmp_path / "cache"
+    manifest = cache / f"{task}__{cfg}" / "expert_manifest.json"
+    module.atomic_json(manifest, dict(task_name=task, task_config=cfg, expert_validated=True, jobs=jobs))
+    loaded = module.load_expert_jobs(cache, task, cfg, 100)
+    seen = []
+    opts = SimpleNamespace(command="collect", output=tmp_path/"run", robotwin=tmp_path/"robotwin",
+        checkpoint=tmp_path/"model.bin", model_config=tmp_path/"config.json", gpus=list(range(8)), port=8400,
+        episodes=100, seed_timeout=60, seed_start=300000, candidate_multiplier=20, sim_python=Path(sys.executable),
+        initial_dataset=tmp_path/"initial", manifests=None, expert_jobs={f"{task}__{cfg}": loaded},
+        shared_gpus=True, shard_count=8, shard_offset=0)
+    (opts.robotwin / "task_config").mkdir(parents=True)
+    (opts.robotwin / f"task_config/{cfg}.yml").write_text("config")
+    def rollout(command, **kwargs):
+        assert "--prepare-seeds" not in command
+        assert command[command.index("--capture-mode")+1] == "scout_replay"
+        assert command[command.index("--sim-gpus")+1] == command[command.index("--server-gpu")+1]
+        job = json.loads(Path(command[command.index("--jobs-json")+1]).read_text())["jobs"][0]
+        seen.append(job["seed"])
+        assert job["sampling_seed_base"] == job["seed"] * 1000003
+        output = Path(command[command.index("--output")+1])
+        hdf5 = output/"dataset"/task/"robonana_rollout/data/episode0.hdf5"
+        hdf5.parent.mkdir(parents=True)
+        hdf5.touch()
+        module.atomic_json(output/"summary.json", dict(replay_mismatches=0, episodes=[dict(
+            seed=job["seed"], success=False, replay_verified=True, hdf5=str(hdf5))]))
+        return 0
+    monkeypatch.setattr(module, "run_bounded", rollout)
+    for lane in range(8):
+        module.collect_lane(opts, [(task,cfg)], lane)
+    assert sorted(seen) == list(range(100))
+    assert len(list((opts.output/"failure_dataset").glob(f"*/{task}/robonana_rollout"))) == 100
+    assert jobs == loaded  # Scheduling never mutates the frozen input manifests.
+    with pytest.raises(ValueError, match="Incomplete"):
+        module.load_expert_jobs(cache, task, cfg, 101)
+    duplicate = dict(task_name=task, task_config=cfg, expert_validated=True, jobs=[jobs[0],jobs[0]])
+    module.atomic_json(manifest, duplicate)
+    with pytest.raises(ValueError, match="duplicate"):
+        module.load_expert_jobs(cache, task, cfg, 2)
