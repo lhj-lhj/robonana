@@ -27,7 +27,7 @@ def atomic_json(path, value):
     temporary.replace(path)
 
 
-def load_expert_jobs(root, task, task_config, episodes):
+def load_expert_jobs(root, task, task_config, episodes, *, allow_partial=False):
     """Consume a completed external harvest; never run expert checks here."""
     from robonana.sim.collection_pool import validate_jobs
     path = root / f"{task}__{task_config}" / "expert_manifest.json"
@@ -36,7 +36,7 @@ def load_expert_jobs(root, task, task_config, episodes):
         raise ValueError(f"Expert manifest identity/validation mismatch: {path}")
     jobs = manifest["jobs"]
     validate_jobs(jobs, 1)
-    if len(jobs) < episodes:
+    if len(jobs) < episodes and not allow_partial:
         raise ValueError(f"Incomplete expert manifest: {path}: {len(jobs)}/{episodes}")
     return [dict(job) for job in jobs[:episodes]]
 
@@ -297,6 +297,8 @@ def collection(opts):
         raise ValueError("Choose external expert cache or locked collection manifests")
     opts.expert_jobs = None
     if opts.expert_seed_cache:
+        if opts.allow_partial_expert_seeds and not opts.tasks:
+            raise ValueError("Partial expert manifests require an explicit bounded task subset")
         opts.shard_count = opts.shard_count or lanes
         if opts.shard_offset < 0 or opts.shard_count < opts.shard_offset + lanes:
             raise ValueError("Shard range must include every local lane")
@@ -307,7 +309,8 @@ def collection(opts):
             if opts.ready_only and (not path.exists() or len(json.loads(path.read_text()).get("jobs", [])) < opts.episodes):
                 print(f"Pending expert cache: {task}/{cfg}")
                 continue
-            opts.expert_jobs[f"{task}__{cfg}"] = load_expert_jobs(opts.expert_seed_cache, task, cfg, opts.episodes)
+            opts.expert_jobs[f"{task}__{cfg}"] = load_expert_jobs(
+                opts.expert_seed_cache, task, cfg, opts.episodes, allow_partial=opts.allow_partial_expert_seeds)
             ready.append((task, cfg))
         pairs = ready
         if not pairs:
@@ -372,6 +375,7 @@ def main():
     parser.add_argument("--shard-count", type=int, help="Global seed shards across hosts; defaults to local lane count")
     parser.add_argument("--shard-offset", type=int, default=0, help="First shard owned by this host")
     parser.add_argument("--ready-only", action="store_true", help="Run only configs with a completed expert seed manifest")
+    parser.add_argument("--allow-partial-expert-seeds", action="store_true", help="Bounded probes only: evaluate available seeds and report the actual denominator")
     opts = parser.parse_args()
     sources = [str(ROOT / path) for path in
         ("src", "third_party/FACT", "third_party/flux2/src", "third_party/flux2_official/src")]

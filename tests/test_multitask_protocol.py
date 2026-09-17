@@ -250,6 +250,7 @@ def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monk
     assert jobs == loaded  # Scheduling never mutates the frozen input manifests.
     with pytest.raises(ValueError, match="Incomplete"):
         module.load_expert_jobs(cache, task, cfg, 101)
+    assert len(module.load_expert_jobs(cache, task, cfg, 101, allow_partial=True)) == 100
     duplicate = dict(task_name=task, task_config=cfg, expert_validated=True, jobs=[jobs[0],jobs[0]])
     module.atomic_json(manifest, duplicate)
     with pytest.raises(ValueError, match="duplicate"):
