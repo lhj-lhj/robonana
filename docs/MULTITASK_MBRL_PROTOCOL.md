@@ -1,6 +1,6 @@
 # 当前实验：50 任务 MBRL
 
-最后整理：2026-09-16。这里记录当前进度、实验参数和下一步；旧的逐次排错日志见 [历史记录](archive/MULTITASK_MBRL_RUN_LOG_20260911_14.md)。
+最后整理：2026-09-17。这里记录当前进度、实验参数和下一步；旧的逐次排错日志见 [历史记录](archive/MULTITASK_MBRL_RUN_LOG_20260911_14.md)。
 
 ## 当前到哪一步
 
@@ -160,6 +160,29 @@ CPU验证覆盖mask、跨层梯度泄漏、目标帧与RoPE、成功吸收尾段
 未启动正式训练或RoboTwin eval，未改71运行中的源码；这些结果验证训练目标和代码回归，不代表成功率已恢复。
 
 ## 原定完整实验参数
+
+### 追加吸收态适配：120k → 140k（2026-09-17）
+
+用户已授权在190八卡续训20k；这是原成功演示上的吸收态修复适配，不是混入失败回放的Stage1，也不启用rope_prefix。
+
+- 来源：上文 `pretrain119k_8gpu` 的完整120000 checkpoint，恢复权重、八卡ZeRO Adam、随机状态及全局步数。
+- 输出：`experiments/multitask_mbrl_v1/absorbing_fixed48_120k_to140k_8gpu_20260917`，原120k不改。
+- 原参数保持：fixed48、每卡16×8×累积1=128、BF16、无梯度重计算、原Clean+Randomized成功演示和A统计、原loss权重、每1000步保存。
+- 原scheduler保存的LR为0，不能直接原样续到140k。用户确认保持原峰值和LR模块：FLUX `2e-5`、机器人 `1e-4`，复用FACT WarmupCosine；新增20k以本地步数0..20000运行、warmup500，Adam和全局步数不重置。曲线起点120000写入配置，后续中断恢复不重新warmup。
+- 入口：`world_policy_resume.config` 增加可选 `ROBONANA_ADDITIONAL_STEPS=20000`，默认0仍是原样恢复。
+
+```bash
+cd /data3/hongjia/robonana
+export ROBONANA_PYTHON=/data3/hongjia/conda/envs/robonana/bin/python
+export ROBONANA_RESUME_CONFIG="$PWD/experiments/multitask_mbrl_v1/pretrain119k_8gpu/config.json"
+export ROBONANA_RESUME_CHECKPOINT="$PWD/experiments/multitask_mbrl_v1/pretrain119k_8gpu/models/checkpoint_epoch_3_step_120000"
+export ROBONANA_PROJECT_DIR="$PWD/experiments/multitask_mbrl_v1/absorbing_fixed48_120k_to140k_8gpu_20260917"
+export ROBONANA_ADDITIONAL_STEPS=20000
+export ROBONANA_GRADIENT_CHECKPOINTING=0
+NCCL_NVLS_ENABLE=0 bash scripts/run_robotwin_train.sh --config robonana.configs.world_policy_resume.config
+```
+
+续训恢复专项回归已在190通过24项，包含原FACT曲线峰值、终点、Adam不变以及中途保存恢复。启动状态待核对实际日志，不能以此命令存在判断已经运行。
 
 | 阶段 | 数据/初始化 | 更新步数 | 有效 batch |
 |---|---|---:|---:|

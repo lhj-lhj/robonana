@@ -9,7 +9,7 @@
 - 消融验收目录：`/data3/hongjia/robonana_worktrees/world_rope_prefix_20260916`，代码 `f2be651` 已在190通过251项测试。用户随后明确要求合入main：原审阅分支 `76edb7f` 已合入GitHub main并同步190主checkout。71运行中的源码未更新。
 - 71 checkout：`/raid/hongjia/robonana`；共享GPU的Round0在容器中，修改源码可能影响新启动子进程，不能无条件同步到正在运行的71。
 - 本地 checkout 因机器不同而变化；不要照搬历史的 Windows 路径。
-- 190 GPU当前被占用。用户要求先整理文档、准备对照入口；没有授权现在启动新实验。
+- 2026-09-17用户明确授权190八卡从最新120k续训20k，使用吸收态修复、fixed48及原batch等配置。保留Adam状态，原峰值LR与FACT WarmupCosine模块，新增20k重新走500步warmup；具体启动状态见当前实验。
 
 ## 修改和部署
 
@@ -31,6 +31,6 @@
 
 ## 验证
 
-用户最新要求：后续验证全部在190进行，不在本地运行测试。允许占GPU跑测试，但不启动正式训练或正式eval。使用190现有环境验证默认mask等价、前缀隔离、目标帧/RoPE一致、配置默认值、旧actor转换和脚本参数；小模型GPU forward/backward选空余显存足够的卡。文档中的计划、单元测试通过、真实实验完成要明确区分。
+后续验证全部在190进行，不在本地运行测试。2026-09-17已授权上述fixed48吸收态20k正式续训；这不代表授权启动其他消融或正式eval。文档中的计划、单元测试通过、真实实验完成要明确区分。
 
 现行细节见 [技术说明](TECHNICAL_REFERENCE.md)、[代码索引](CURRENT_CODE_MAP.md) 和 [脚本导航](../scripts/README.md)。历史训练、恢复和图像审计保留在archive；不要把某次单任务pilot的默认checkpoint当成50任务实验的初始化。
