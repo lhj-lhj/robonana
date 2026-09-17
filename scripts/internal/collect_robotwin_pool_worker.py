@@ -71,20 +71,28 @@ def main():
             start_seed = int(payload['jobs'][0]['seed'])
             for seed in range(start_seed, start_seed + (opts.candidate_limit or opts.prepare_seeds * 20)):
                 try:
-                    task.setup_demo(now_ep_num=0, seed=seed, is_test=True, **args)
-                    episode = task.play_once()
-                    valid = bool(task.plan_success and task.check_success())
-                finally:
-                    task.close_env()
-                if not valid:
+                    try:
+                        task.setup_demo(now_ep_num=0, seed=seed, is_test=True, **args)
+                        episode = task.play_once()
+                        valid = bool(task.plan_success and task.check_success())
+                    finally:
+                        task.close_env()
+                    if not valid:
+                        continue
+                    try:
+                        task.setup_demo(now_ep_num=0, seed=seed, is_test=True, **args)
+                        descriptions = namespace['generate_episode_descriptions'](
+                            args['task_name'], [episode['info']], opts.prepare_seeds)
+                        instruction = str(np.random.choice(descriptions[0]['seen']))
+                    finally:
+                        task.close_env()
+                except Exception as seed_exc:
+                    try:
+                        task.close_env()
+                    except Exception:
+                        pass
+                    # Skip problematic seed gracefully (e.g., UnStableError, NoneType grasp pose)
                     continue
-                try:
-                    task.setup_demo(now_ep_num=0, seed=seed, is_test=True, **args)
-                    descriptions = namespace['generate_episode_descriptions'](
-                        args['task_name'], [episode['info']], opts.prepare_seeds)
-                    instruction = str(np.random.choice(descriptions[0]['seen']))
-                finally:
-                    task.close_env()
                 accepted.append(dict(seed=seed, instruction=instruction,
                                      source='official_expert_check'))
                 manifest = dict(task_name=payload['task_name'], task_config=payload['task_config'],
