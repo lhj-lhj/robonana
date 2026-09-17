@@ -6,6 +6,8 @@
 
 预训练已完成：从原八卡 119000 保存点续到 120000。Round0 原本在 190 和 71 各跑 25 个任务，190 已按用户要求停止，71 上次检查仍在运行。Stage1、Stage2 尚未启动。
 
+2026-09-17 16:04（北京时间）已在190启动吸收态修复后的fixed48续训，120k→140k，八卡总batch128；16:07核对已更新到120060，详见下面的追加适配记录。
+
 | 分片 | 最近核对的有效 episode | 成功 | 状态 |
 |---|---:|---:|---|
 | 190_a | 615 | 394 | 已停止 |
@@ -182,7 +184,16 @@ export ROBONANA_GRADIENT_CHECKPOINTING=0
 NCCL_NVLS_ENABLE=0 bash scripts/run_robotwin_train.sh --config robonana.configs.world_policy_resume.config
 ```
 
-续训恢复专项回归已在190通过24项，包含原FACT曲线峰值、终点、Adam不变以及中途保存恢复。启动状态待核对实际日志，不能以此命令存在判断已经运行。
+续训恢复专项回归已在190通过24项，完整CPU回归260项通过、4项CUDA测试跳过。测试包含原FACT曲线峰值、终点、Adam不变以及中途保存恢复；本地未跑测试。日志：190 `/tmp/robonana_fixed48_20k_20260917_pytest.log`。
+
+实际启动与核对：
+
+- 启动代码 `78101cd`（核心续训适配 `963f5bc`），190 main；tmux会话 `rn_absorbing_fixed48_20k_20260917`。
+- 启动时间2026-09-17 08:04:44 UTC（北京时间16:04:44），正式日志 `<输出目录>/logs/train_20260917T080444Z.log`。
+- [W&B运行 a5tjqsuk](https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/a5tjqsuk)。
+- 日志确认原120k的DeepSpeed模型、优化器、scheduler和自定义进度恢复成功；`WORLD CONTINUATION VERIFIED` 显示step120000、max_steps140000、scheduler_start120000。最初LR为原FACT warmup首点：FLUX `2e-5/501`，机器人 `1e-4/501`。
+- 八个训练rank、总batch128；16:07核对已到120060，action_loss约0.0093、total_loss约0.4843，BC样本比例1.0，无非有限值错误。实际约0.93秒/步，初步预计5–6小时完成新增20k（保存开销和后续速度可能改变）。
+- 原120k权重SHA256重新校验一致；原数据/优化器/八卡配置逐项比对一致。此记录是启动快照，不代表训练已经完成或成功率恢复。
 
 | 阶段 | 数据/初始化 | 更新步数 | 有效 batch |
 |---|---|---:|---:|

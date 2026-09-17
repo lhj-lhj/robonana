@@ -9,7 +9,7 @@
 - 消融验收目录：`/data3/hongjia/robonana_worktrees/world_rope_prefix_20260916`，代码 `f2be651` 已在190通过251项测试。用户随后明确要求合入main：原审阅分支 `76edb7f` 已合入GitHub main并同步190主checkout。71运行中的源码未更新。
 - 71 checkout：`/raid/hongjia/robonana`；共享GPU的Round0在容器中，修改源码可能影响新启动子进程，不能无条件同步到正在运行的71。
 - 本地 checkout 因机器不同而变化；不要照搬历史的 Windows 路径。
-- 2026-09-17用户明确授权190八卡从最新120k续训20k，使用吸收态修复、fixed48及原batch等配置。保留Adam状态，原峰值LR与FACT WarmupCosine模块，新增20k重新走500步warmup；具体启动状态见当前实验。
+- 2026-09-17用户明确授权的190八卡120k→140k续训已启动：吸收态修复、fixed48及原batch128。保留Adam状态，原峰值LR与FACT WarmupCosine模块，新增20k重新走500步warmup。启动代码78101cd，tmux `rn_absorbing_fixed48_20k_20260917`，W&B `a5tjqsuk`；16:07核对更新到120060，实时状态需查日志。不要停止或改动这次训练，具体路径见当前实验。
 
 ## 修改和部署
 
