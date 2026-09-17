@@ -4,6 +4,30 @@
 
 ## 当前到哪一步
 
+### 最新：140k缓存seed预评测（2026-09-17）
+
+用户确认合并71本地的 `51a18fb`（此前没推GitHub）；已保留作者合入main，并补充expert异常日志。新评测代码 `cac490d` 已同步190，缓存seed/八卡分片/失败保存共23项回归在190通过。71为独立checkout，不修改正在采集seed的原目录。
+
+140k在13:36 UTC完成全部更新，13:37保存权重；进程清理时发生SIGSEGV。已验证完整权重可加载、392个tensor/5,002,609,664参数、step140000且fixed48，推理服务也已成功加载。权重SHA256为 `b951e9a3d7e2ce9c2b0717e025247d247eaf8198e1d12c29501f9571b508f095`，71传输后哈希一致。
+
+seed实际情况与用户提供的概述不同：71 `expert_seed_cache` 的一些manifest只有新增部分，双鞋目录尚未建立。用户明确允许合并旧Round0已验收seed+instruction，不重新采集。冻结清单合并71新manifest、71旧accepted jobs、190旧ledger及已有prepare/accepted_seeds.json，按(task,config,seed)去重并保留manifest_source。不能重复seed凑100，不能根据模型成败挑seed。
+
+| 预检task | Clean实际seed | Randomized实际seed | 旧新120k成功率（已完成样本） |
+|---|---:|---:|---|
+| blocks_ranking_size | 92 | 98 | 12/57；2/11 |
+| place_dual_shoes | 100 | 100 | 22/100；31/100 |
+
+旧actor的Clean参考分别44/50和用户报告约86%；不同seed/样本量不能直接当严格配对。汇总新成绩时同时统计与旧120k重合的seed。缺少的积木8+2条需从后续完成的缓存或其他已有验收记录补齐；禁止启动新expert采集。
+
+- 190预检：`/data3/hongjia/robonana_rollouts/absorbing140k_probe_20260917_r2`，启动日志同路径加 `.launch.log`；8个共享GPU通道，端口8700–8707，action_only、scout_replay，只发布校验通过的失败数据。
+- 冻结seed：190 `/data3/hongjia/expert_seed_cache_140k_20260917`，71 `/raid/hongjia/expert_seed_cache_140k_20260917`。预检协议文件保存实际jobs与分片；不要在运行中修改清单或protocol。
+- 190系统nvidia-smi缺失但CUDA正常，已将71真实查询工具复制到 `/data3/hongjia/opt/nvidia-tools/nvidia-smi`；启动时把此目录加入PATH。未改系统驱动。首轮 `absorbing140k_probe_20260917` 无有效结果，保留排错。
+- 71：代码 `/raid/hongjia/robonana_eval140k`，权重/配置 `/raid/hongjia/robonana_deploy/absorbing140k/{transformer/diffusion_pytorch_model.bin,config.json}`，容器 `robonana-eval140k-ready-71` 已就绪（尚未启动全量评测）。镜像 `robonana-eval:20260915`，必须加 `--runtime=nvidia`；映射 `/raid/hongjia` 到容器的同路径和 `/data3/hongjia`，保留原图像/归一化路径。
+
+后续已获授权：预检完成后判断两项任务是否恢复，并确认无渲染/回放异常；正常则启动两机全量，先跑齐100条的task/config。使用 `collect --expert-seed-cache ... --shared-gpus --ready-only`（collect代表action-only及失败采集，eval子命令是Stage2 Q筛选，不能混用）。两机各8通道时 `--shard-count 16`，190 offset0、71 offset8，配同一冻结jobs，避免重复。已预检两task应复用结果，剩余任务单独启动；后续新齐的配置使用新wave输出，不能改已运行协议。全量不能用 `--allow-partial-expert-seeds`。
+
+预检尚未完成；早期完成样本有“成功快、失败回放慢”的偏差，不要把早期完成SR当最终结果。全量尚未启动。
+
 预训练已完成：从原八卡 119000 保存点续到 120000。Round0 原本在 190 和 71 各跑 25 个任务，190 已按用户要求停止，71 上次检查仍在运行。Stage1、Stage2 尚未启动。
 
 2026-09-17 16:04（北京时间）已在190启动吸收态修复后的fixed48续训，120k→140k，八卡总batch128；16:07核对已更新到120060，详见下面的追加适配记录。
