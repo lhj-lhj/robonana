@@ -10,6 +10,7 @@ _module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "src/robonana
 build_critic_continuation = _module["build_critic_continuation"]
 rebase_loaded_scheduler = _module["rebase_loaded_scheduler"]
 build_world_policy_resume = _module["build_world_policy_resume"]
+offset_scheduler_clock = _module["offset_scheduler_clock"]
 
 
 @pytest.mark.parametrize("initialization", ["trained", "flux_backbone"])
@@ -122,3 +123,72 @@ def test_scheduler_rebase_does_not_advance_progress_or_replace_optimizer():
     scheduler.lr_lambdas = [lambda step: 0.0]
     with pytest.raises(ValueError, match="invalid"):
         rebase_loaded_scheduler(scheduler, 5000)
+
+
+def test_world_extension_preserves_original_training_configuration(tmp_path):
+    import copy
+    source = dict(models=dict(train_mode="world_policy"),
+                  launch=dict(gpu_ids=list(range(8))),
+                  dataloaders=dict(train=dict(batch_size_per_gpu=16, data_or_config={"fixed_horizon": 48})),
+                  optimizers=dict(lr=2e-5, robot_lr=1e-4),
+                  schedulers=dict(type="WarmupCosineScheduler", warmup_steps=500, decay_steps=120000),
+                  train=dict(max_steps=120000, gradient_accumulation_steps=1,
+                             posttrain=dict(phase="world_policy"),
+                             tracker_init_kwargs=dict(wandb={})))
+    before = copy.deepcopy(source)
+    kwargs = dict(checkpoint=tmp_path / "old/models/step120000", source_config=tmp_path / "old/config.json",
+                  project_dir=tmp_path / "new", additional_steps=20000)
+    config = build_world_policy_resume(source, **kwargs)
+    assert source == before
+    for key in ("dataloaders", "launch", "optimizers"):
+        assert config[key] == source[key]
+    assert config["train"]["max_steps"] == 140000
+    assert config["train"]["world_policy_scheduler_restart_step"] == 120000
+    assert config["train"]["gradient_accumulation_steps"] == 1
+    assert config["schedulers"] == dict(type="WarmupCosineScheduler", warmup_steps=500, decay_steps=20000)
+    with pytest.raises(ValueError, match="exceed"):
+        build_world_policy_resume(source, **{**kwargs, "additional_steps": 500})
+
+
+def test_world_lr_restart_reuses_fact_and_resumes_without_resetting_adam():
+    import copy
+    import torch
+    from fact_train import build_scheduler
+
+    def make(decay, restart=None):
+        params = [torch.nn.Parameter(torch.ones(1)), torch.nn.Parameter(torch.ones(1))]
+        opt = torch.optim.AdamW([{"params": [params[0]], "lr": 2e-5},
+                                {"params": [params[1]], "lr": 1e-4}])
+        sched = build_scheduler(dict(type="WarmupCosineScheduler", warmup_steps=500, decay_steps=decay),
+                                optimizer=opt, epoch_size=1, max_epochs=140000, max_steps=140000)
+        if restart is not None:
+            offset_scheduler_clock(sched, restart)
+        return params, opt, sched
+
+    params, old_opt, old_sched = make(120000)
+    sum(p.sum() for p in params).backward()
+    old_opt.step()
+    for state in old_opt.state.values():
+        state["step"].fill_(120000)
+    old_sched.last_epoch = 120000
+    old_sched._last_lr = [0., 0.]
+    for group in old_opt.param_groups:
+        group["lr"] = 0.
+    _, opt, sched = make(20000, 120000)
+    opt.load_state_dict(copy.deepcopy(old_opt.state_dict()))
+    sched.load_state_dict(old_sched.state_dict())
+    moments = [(s["step"].clone(), s["exp_avg"].clone(), s["exp_avg_sq"].clone()) for s in opt.state.values()]
+    assert rebase_loaded_scheduler(sched, 120000) == pytest.approx([2e-5/501, 1e-4/501])
+    assert [fn(120500) * base for fn, base in zip(sched.lr_lambdas, sched.base_lrs)] == pytest.approx([2e-5, 1e-4])
+    assert [fn(140000) for fn in sched.lr_lambdas] == [0., 0.]
+    for state, expected in zip(opt.state.values(), moments):
+        for key, value in zip(("step", "exp_avg", "exp_avg_sq"), expected):
+            torch.testing.assert_close(state[key], value)
+    # A later interruption resumes the same local curve, not another warmup.
+    sched.last_epoch = 125000
+    expected = rebase_loaded_scheduler(sched, 125000)
+    _, opt2, sched2 = make(20000, 120000)
+    opt2.load_state_dict(opt.state_dict())
+    sched2.load_state_dict(sched.state_dict())
+    assert rebase_loaded_scheduler(sched2, 125000) == expected
+    assert sched2.last_epoch == 125000

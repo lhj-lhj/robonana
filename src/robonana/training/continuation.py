@@ -17,13 +17,15 @@ def restore_config_tuples(value):
 
 
 def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
-                             gradient_checkpointing=False, single_checkpoint_stride=1):
+                             gradient_checkpointing=False, single_checkpoint_stride=1,
+                             additional_steps=0):
     """中文：用当前 BF16 精度续训 Stage 1；不重置优化器或学习率。
 
     English: Resume Stage 1 using the maintained FACT BF16 precision.
     Reuse FACT restore and the existing model toggle. Preserve data, batch,
-    GPU topology and the original schedule/budget; never use the
-    critic continuation's schedule extension or two-GPU defaults here.
+    GPU topology and, by default, the original schedule/budget. An explicit
+    additional_steps budget restarts the same FACT curve after the old budget,
+    while retaining global step and Adam moments.
     """
     config = restore_config_tuples(copy.deepcopy(source))
     if type(single_checkpoint_stride) is not int or single_checkpoint_stride < 1:
@@ -53,11 +55,35 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
         allow_uncertified_pretrain=False, activation_checkpointing=False,
         checkpoint_save_optimizer=True, mixed_precision="bf16",
     )
+    if type(additional_steps) is not int or additional_steps < 0:
+        raise ValueError("additional_steps must be a nonnegative integer")
+    if additional_steps:
+        if config["schedulers"].get("type") != "WarmupCosineScheduler":
+            raise ValueError("world continuation requires FACT WarmupCosineScheduler")
+        if additional_steps <= config["schedulers"]["warmup_steps"]:
+            raise ValueError("additional_steps must exceed warmup_steps")
+        # Keep global/Adam progress; only the original FACT LR curve uses a
+        # local clock. Persist its origin so later resumes do not restart it.
+        start = config["train"]["max_steps"]
+        config["train"].update(max_steps=start + additional_steps,
+                               world_policy_scheduler_restart_step=start)
+        config["schedulers"]["decay_steps"] = additional_steps
     tracker = config["train"]["tracker_init_kwargs"]["wandb"]
     tracker.pop("id", None)
     tracker.pop("resume", None)
     tracker["name"] = project_dir.name
     return config
+
+
+def offset_scheduler_clock(wrapped, start_step):
+    """Reuse FACT's existing LR functions with a persisted global-step offset."""
+    scheduler = getattr(wrapped, "scheduler", wrapped)
+    if type(start_step) is not int or start_step < 0:
+        raise ValueError("scheduler restart step must be a nonnegative integer")
+    scheduler.lr_lambdas = [
+        (lambda step, fn=fn: fn(max(0, step - start_step)))
+        for fn in scheduler.lr_lambdas
+    ]
 
 
 def build_critic_continuation(source, *, checkpoint, source_config, project_dir, max_steps,

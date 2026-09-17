@@ -29,7 +29,7 @@ from robonana.sampling import (
     generate_mac_imaginary_rollout_h1,
 )
 from robonana.training.checkpointing import full_deepspeed_checkpoint
-from robonana.training.continuation import rebase_loaded_scheduler
+from robonana.training.continuation import offset_scheduler_clock, rebase_loaded_scheduler
 from robonana.training.losses import (
     deterministic_return_loss,
     masked_action_mse,
@@ -203,6 +203,16 @@ class RoboNanaTrainer(Trainer):
         # replaces this copy with the target saved by the same critic run.
         self.target_value_ema.exact_copy_from(self.models[0].value_expert)
         self.target_value_ema.update_count = 0
+
+    def get_schedulers(self, schedulers: Any) -> list[Any]:
+        schedulers = super().get_schedulers(schedulers)
+        start = self.kwargs.get("world_policy_scheduler_restart_step")
+        if start is not None:
+            if self.mac_phase != "world_policy" or not self.kwargs.get("resume", False):
+                raise ValueError("world LR restart requires world_policy resume")
+            for scheduler in schedulers:
+                offset_scheduler_clock(scheduler, start)
+        return schedulers
 
     def prepare(self, dataloaders: Any, models: Any, optimizers: Any, schedulers: Any) -> None:
         super().prepare(dataloaders, models, optimizers, schedulers)
@@ -478,6 +488,16 @@ class RoboNanaTrainer(Trainer):
             self.logger.info("UNIVERSAL ADAM VERIFIED: step=%d groups=%s EMA=%d LR=%s",
                              self.cur_step, counts, self.target_value_ema.update_count,
                              self._get_logged_lrs())
+        start = self.kwargs.get("world_policy_scheduler_restart_step")
+        if start is not None:
+            if self.mac_phase != "world_policy" or not start <= self.cur_step < self.max_steps:
+                raise ValueError("world continuation requires a restored step within its new budget")
+            rates = [rebase_loaded_scheduler(scheduler, self.cur_step) for scheduler in self.schedulers]
+            if self.is_main_process:
+                self.logger.info("WORLD CONTINUATION VERIFIED: source=%s step=%d max_steps=%d "
+                                 "scheduler_start=%d LR=%s; Adam state retained",
+                                 checkpoint, self.cur_step, self.max_steps, start, rates)
+            return
         if not self.kwargs.get("rebase_scheduler_on_resume", False):
             return
         if checkpoint is None or not 0 < self.cur_step < self.max_steps:

@@ -177,3 +177,29 @@ def test_resume_rejects_changed_world_conditioning(monkeypatch, tmp_path):
     monkeypatch.setattr(Trainer, "load_model_hook", lambda *args: pytest.fail("Must reject before restore"))
     with pytest.raises(ValueError, match="world_conditioning"):
         trainer.load_model_hook([], str(tmp_path))
+
+
+def test_world_continuation_resume_rebases_lr_after_fact_restore(monkeypatch):
+    from fact_train import build_scheduler
+    trainer = object.__new__(RoboNanaTrainer)
+    trainer.mac_phase = "world_policy"
+    trainer.kwargs = dict(resume=True, resume_from="source", world_policy_scheduler_restart_step=120000)
+    trainer._max_steps = 140000
+    trainer._by_epoch = False
+    trainer.accelerator = SimpleNamespace(is_main_process=False)
+    trainer.get_checkpoint = lambda: None
+    trainer._get_deepspeed_config = lambda: {}
+    opt = torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))], lr=2e-5)
+    sched = build_scheduler(dict(type="WarmupCosineScheduler", warmup_steps=500, decay_steps=20000),
+                            optimizer=opt, epoch_size=1, max_epochs=140000, max_steps=140000)
+    monkeypatch.setattr(Trainer, "get_schedulers", lambda self, config: [sched])
+    trainer._schedulers = trainer.get_schedulers({})
+    def restore(self, checkpoint):
+        assert checkpoint == "source"
+        self._cur_step = 120000
+        sched.last_epoch = 120000
+        opt.param_groups[0]["lr"] = 0.
+    monkeypatch.setattr(Trainer, "resume", restore)
+    trainer.resume()
+    assert opt.param_groups[0]["lr"] == pytest.approx(2e-5 / 501)
+    assert trainer.cur_step == sched.last_epoch == 120000
