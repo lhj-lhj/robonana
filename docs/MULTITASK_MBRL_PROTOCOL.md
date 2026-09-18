@@ -126,7 +126,7 @@ EVAL_VIDEO_LOG=0 bash scripts/eval_robotwin_all_tasks_parallel.sh demo_clean 50
 
 这里的 h 是训练样本里的整数目标帧偏移，不是新增的模型 token。输入、目标和 RoPE 必须对应同一个 h；只修改位置编码而仍监督 t+48 不构成这个实验。
 
-已确认并实现：每样本均匀抽 h∈[1,48]，image/future-state/success 对齐 t+h，reward 只监督前 h 步。所有 world 分支都受前缀限制，避免信息经 reward/success 或 clean action 间接泄漏。动作 BC 仍监督完整有效 48 步。成功尾段继续沿用吸收态规则，失败尾段不补造 transition。数据先检查完整48步窗口，再选择world目标，不因h变短放过缺失transition。
+已确认并实现：每样本均匀抽 h∈[1,48]，image/future-state/success 对齐 t+h，reward 独立监督完整48步（包括成功吸收尾段），RoPE时间为0。U/S'/I'受前缀限制且禁止读取R，避免完整chunk动作经reward间接泄漏；clean action仍causal。动作 BC 仍监督完整有效 48 步。成功尾段继续沿用吸收态规则，失败尾段不补造 transition。数据先检查完整48步窗口，再选择world目标，不因h变短放过缺失transition。
 
 消融代码只在现有 `build_mac_attention_bias` 加开关，沿用 `MacSegmentMap` 和当前 FLUX wrapper。旧 `build_attention_bias`、`SegmentMap` 及仅服务于旧 forward 的依赖已清理，不再维护两套 mask。
 
@@ -145,7 +145,7 @@ python scripts/run_multitask_mbrl.py train --phase pretrain \
 
 两组均从原始FLUX初始化，seed=6666、有效batch128、120k更新；只比较上述联合改动。若改成从同一120k继续适配，使用 `--phase stage1 --checkpoint <同一权重> --model-config <同一配置> --replay-root <同一失败池>`，两组都运行相同60k预算；不要把只追加训练的新分支直接与未追加的旧120k当作严格对照。
 
-开关写入 `models.world_conditioning` 和各训练数据池；保存后由checkpoint配置恢复。旧配置缺少该字段时按 `fixed48` 读取，推理不会自动换语义。新分支的图像RoPE使用现有图像时间轴，reward/success/future-state使用现有robot时间轴；没有新增token或参数。动作only推理不受h影响；world缓存推理目前仍查询h=48，和完整forward保持一致。此消融入口仅支持pretrain/Stage1，Stage2新协议不在本次范围。
+开关写入 `models.world_conditioning` 和各训练数据池；保存后由checkpoint配置恢复。旧配置缺少该字段时按 `fixed48` 读取，推理不会自动换语义。新分支的图像RoPE使用现有图像时间轴，success/future-state使用现有robot时间轴，reward时间固定0；没有新增token或参数。动作only推理不受h影响；world缓存推理目前仍查询h=48，和完整forward保持一致。此消融入口仅支持pretrain/Stage1，Stage2新协议不在本次范围。
 
 CPU验证覆盖mask、跨层梯度泄漏、目标帧与RoPE、成功吸收尾段、失败完整窗口、默认行为、旧actor转换、保存配置和BF16训练backward。真实GPU训练和RoboTwin评测等待卡空闲后再运行；CPU通过不等于训练消融已有结论。
 
@@ -230,3 +230,9 @@ NCCL_NVLS_ENABLE=0 bash scripts/run_robotwin_train.sh --config robonana.configs.
 FLUX/机器人 LR：Pretrain 2e-5/1e-4，Stage1 2e-5/2e-5，Stage2 冻结/1e-4。各阶段新建优化器时钟，warmup500。VAE FP32，FLUX BF16，Value EMA FP32；统一 A 统计与 latents_v2 输入缓存。
 
 常用计划入口：`python scripts/run_multitask_mbrl.py train --phase pretrain --output <新目录>`。默认只打印计划，`--execute` 才启动。`audit` 会读取实际数据和缓存做 CPU 检查。完整旧命令与验收记录在历史文档中；其中撤回的四卡续训方案不是当前操作步骤。
+
+### 2026-09-18 rope_prefix 解耦验收
+
+R读取完整G，U/S'/I'禁止读取R并只读取G前h步；R的训练与缓存RoPE时间均为0。reward标签由chunk_delta生成，与h独立，成功吸收后缀全部监督。success的>=写法与原先clipped future_index判定等价，原实现并未漏掉越过终点的正标签。fixed48保留原有拓扑及数值语义。
+
+190独立worktree `rope_dense_reward_20260918`：专项16项通过（原14项加两项边界/固定模式回归）；相关回归结果见后续记录。主checkout评测进程未更新，未启动训练。

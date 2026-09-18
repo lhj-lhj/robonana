@@ -22,7 +22,7 @@
 
 默认模型 `MacFlux2FACTModel`，动作48步；Stage1训练actor/world，Stage2冻结FLUX训练Q/V。Value独有FP32 EMA。统计文件固定A，缓存/在线输入统一走latents_v2链路。
 
-默认 `build_mac_attention_bias` 的 predicted action 和 clean action 都是双向。用户已确认两组对照及具体实现：`fixed48` 基线，以及 `rope_prefix`（均匀抽h∈[1,48]，不加horizon token，RoPE标记t+h，clean action causal，所有world分支只看动作前h步，reward只监督前h步、success对齐t+h）。只在现有mask函数增加开关；数据、trainer与保存配置使用同一模式。动作chunk仍48，去噪动作仍双向。这条最新指令优先于历史“不允许idx_h”的说明。已准备代码不代表获准启动GPU实验。
+默认 `build_mac_attention_bias` 的 predicted action 和 clean action 都是双向。用户已确认两组对照及具体实现：`fixed48` 基线，以及 `rope_prefix`（均匀抽h∈[1,48]，不加horizon token，RoPE标记t+h，clean action causal，U/S'/I'只看动作前h步且不读取R；R独立读取完整48步动作并监督完整chunk，RoPE时间为0；success对齐t+h）。只在现有mask函数增加开关；数据、trainer与保存配置使用同一模式。动作chunk仍48，去噪动作仍双向。这条最新指令优先于历史“不允许idx_h”的说明。已准备代码不代表获准启动GPU实验。
 
 旧 `SegmentMap/build_attention_bias` 及其旧forward引用已按用户要求清理；保留MAC实际继承的FLUX模块/helper。旧actor转换测试与删除前保存的CPU输出比较，不再依赖旧mask代码。
 

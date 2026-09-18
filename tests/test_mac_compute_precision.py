@@ -52,7 +52,6 @@ def test_bf16_stage1_full_world_policy_backward(device, world_conditioning):
                  success=torch.tensor([1., 0.]))
     batch["world_horizon"] = torch.tensor([1, 32]) if world_conditioning == "rope_prefix" else batch["chunk_horizon"]
     batch["world_prefix_causal"] = torch.full((2,), world_conditioning == "rope_prefix")
-    batch["reward_chunk_mask"] *= torch.arange(48)[None] < batch["world_horizon"][:, None]
     sigma = torch.tensor([.999, .37], device=device)
     trainer._sample_timestep = lambda batch_size: sigma
     constructed = []

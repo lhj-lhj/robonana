@@ -103,7 +103,7 @@ def build_mac_attention_bias(
     The graph is intentionally stronger than an ordinary causal mask.  The
     fixed48 world model uses the cascade ``R -> U -> S' -> I'``;
     rope_prefix isolates dense R from the horizon-conditioned U/S'/I'. The
-    the noisy policy track is an isolated sink.  Q and Value live outside this
+    noisy policy track is an isolated sink.  Q and Value live outside this
     sequence and consume frozen-prefix K/V only.
     """
 
