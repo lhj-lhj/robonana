@@ -248,7 +248,7 @@ def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monk
         module.collect_lane(opts, [(task,cfg)], lane)
     assert sorted(seen) == list(range(100))
     assert len(list((opts.output/"failure_dataset").glob(f"*/{task}/robonana_rollout"))) == 99
-    first_ledger = json.loads((opts.output/task/cfg/"ledger_lane0.json").read_text())
+    first_ledger = json.loads((opts.output/task/cfg/"shard_00/ledger.json").read_text())
     assert first_ledger[0]["status"] == "evaluated"
     assert first_ledger[0]["result"]["replay_verified"] is False
     assert jobs == loaded  # Scheduling never mutates the frozen input manifests.

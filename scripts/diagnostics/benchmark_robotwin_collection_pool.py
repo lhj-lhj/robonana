@@ -171,9 +171,16 @@ def main():
                     raise RuntimeError("server/worker failed; inspect independent logs")
                 if time.perf_counter() - start > opts.timeout_seconds:
                     raise TimeoutError("collection probe exceeded its bounded deadline")
-                sample = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu",
-                    "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10)
-                gpu_log.write(json.dumps({"elapsed": time.perf_counter() - start, "gpus": sample.stdout}) + "\n")
+                try:
+                    sample = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu",
+                        "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10)
+                    gpu_sample = sample.stdout
+                    gpu_error = None if sample.returncode == 0 else sample.stderr.strip()
+                except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+                    # Telemetry must never invalidate an otherwise healthy rollout.
+                    gpu_sample, gpu_error = "", type(exc).__name__
+                gpu_log.write(json.dumps({"elapsed": time.perf_counter() - start,
+                                          "gpus": gpu_sample, "error": gpu_error}) + "\n")
                 time.sleep(2)
         if any(worker.returncode != 0 for worker in workers):
             raise RuntimeError("worker exited with failure")
