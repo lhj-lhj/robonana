@@ -235,4 +235,4 @@ FLUX/机器人 LR：Pretrain 2e-5/1e-4，Stage1 2e-5/2e-5，Stage2 冻结/1e-4�
 
 R读取完整G，U/S'/I'禁止读取R并只读取G前h步；R的训练与缓存RoPE时间均为0。reward标签由chunk_delta生成，与h独立，成功吸收后缀全部监督。success的>=写法与原先clipped future_index判定等价，原实现并未漏掉越过终点的正标签。fixed48保留原有拓扑及数值语义。
 
-190独立worktree `rope_dense_reward_20260918`：专项16项通过（原14项加两项边界/固定模式回归）；相关回归结果见后续记录。主checkout评测进程未更新，未启动训练。
+190独立worktree `rope_dense_reward_20260918`：专项16项通过（原14项加两项边界/固定模式回归）；数据合同、loss、world/prefix缓存和CPU/CUDA BF16反传等相关回归合计51项全部通过（14.47秒，无跳过）。主checkout评测进程未更新，未启动训练。
