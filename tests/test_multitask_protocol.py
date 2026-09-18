@@ -259,3 +259,20 @@ def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monk
     module.atomic_json(manifest, duplicate)
     with pytest.raises(ValueError, match="duplicate"):
         module.load_expert_jobs(cache, task, cfg, 2)
+
+
+@pytest.mark.parametrize("gpus", ["0,1,2,3", "4,5,6,7"])
+def test_four_gpu_protocol_preserves_global_batch(monkeypatch, gpus):
+    from robonana.configs.robotwin_flux2 import config as base
+    from robonana.configs.multitask_mbrl import build_protocol_config
+    monkeypatch.setenv("ROBONANA_PROTOCOL_GPUS", gpus)
+    monkeypatch.setenv("ROBONANA_PROTOCOL_ACCUMULATION", "2")
+    monkeypatch.setenv("ROBONANA_GRADIENT_CHECKPOINTING", "1")
+    config = build_protocol_config(base, "pretrain")
+    assert config["launch"]["gpu_ids"] == list(map(int, gpus.split(",")))
+    assert config["dataloaders"]["train"]["batch_size_per_gpu"] == 16
+    assert config["train"]["gradient_accumulation_steps"] == 2
+    assert config["models"]["gradient_checkpointing"]
+    monkeypatch.setenv("ROBONANA_PROTOCOL_ACCUMULATION", "1")
+    with pytest.raises(ValueError, match="128"):
+        build_protocol_config(base, "pretrain")

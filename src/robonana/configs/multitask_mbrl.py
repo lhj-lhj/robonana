@@ -50,9 +50,14 @@ def build_protocol_config(base, phase):
     # Eight B200s, batch16 BF16: verified 101.21 GiB allocated / 107.29 GiB reserved.
     # Full-data cache certification is a separate gate; no precision/batch reduction.
     result["models"]["gradient_checkpointing"] = os.environ.get("ROBONANA_GRADIENT_CHECKPOINTING", "0") == "1"
-    result["launch"]["gpu_ids"] = list(range(8))
+    gpu_ids = [int(value) for value in os.environ.get("ROBONANA_PROTOCOL_GPUS", "0,1,2,3,4,5,6,7").split(",")]
+    accumulation = int(os.environ.get("ROBONANA_PROTOCOL_ACCUMULATION", "1"))
+    if (not gpu_ids or len(set(gpu_ids)) != len(gpu_ids) or min(gpu_ids) < 0
+            or accumulation < 1 or len(gpu_ids) * 16 * accumulation != 128):
+        raise ValueError("Protocol requires distinct GPUs and 16 * GPU count * accumulation = 128")
+    result["launch"]["gpu_ids"] = gpu_ids
     loader["batch_size_per_gpu"] = 16
-    train.update(max_steps=milestones[-1], gradient_accumulation_steps=1,
+    train.update(max_steps=milestones[-1], gradient_accumulation_steps=accumulation,
                  resume=False, allow_uncertified_pretrain=False, mixed_precision="bf16",
                  checkpoint_interval=1000, early_checkpoint_steps=(), checkpoint_keeps=list(milestones),
                  checkpoint_total_limit=2, checkpoint_save_optimizer=True, disable_checkpointing=False)
