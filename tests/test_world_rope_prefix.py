@@ -37,7 +37,10 @@ def test_mask_has_only_two_modes_and_blocks_all_world_suffix_paths():
     for b, horizon in enumerate(h.tolist()):
         clean = torch.isfinite(new[b, 0, s.clean_action, s.clean_action])
         assert torch.equal(clean, torch.ones(48, 48, dtype=torch.bool).tril())
-        world = new[b, 0, s.reward.start:, s.clean_action]
+        world = new[b, 0, s.success.start:, s.clean_action]
+        assert torch.isfinite(new[b, 0, s.reward, s.clean_action]).all()
+        assert torch.isneginf(new[b, 0, s.success.start:, s.reward]).all()
+        assert torch.isfinite(base[b, 0, s.success.start:, s.reward]).all()
         assert torch.isfinite(world[:, :horizon]).all()
         assert torch.isneginf(world[:, horizon:]).all()
         assert torch.isneginf(new[b, 0, s.clean_condition, s.clean_action]).all()
@@ -59,9 +62,13 @@ def test_full_multilayer_world_has_no_suffix_action_value_or_gradient_leak():
     for b, horizon in enumerate(h.tolist()):
         changed[b, horizon:] += 100
     other = model(**{**kwargs, "gt_action_cond": changed})
-    for field in ("image", "future_state", "reward", "success", "action"):
+    for field in ("image", "future_state", "success", "action"):
         torch.testing.assert_close(getattr(other, field), getattr(output, field), atol=0, rtol=0)
-    loss = sum(getattr(output, field).square().sum() for field in ("image", "future_state", "reward", "success"))
+    assert not torch.equal(other.reward, output.reward)
+    reward_grad = torch.autograd.grad(output.reward.square().sum(), kwargs["gt_action_cond"], retain_graph=True)[0]
+    for b, horizon in enumerate(h.tolist()):
+        assert reward_grad[b, horizon:].abs().sum() > 0
+    loss = sum(getattr(output, field).square().sum() for field in ("image", "future_state", "success"))
     loss.backward()
     grad = kwargs["gt_action_cond"].grad
     for b, horizon in enumerate(h.tolist()):
@@ -81,7 +88,8 @@ def test_rope_coordinates_match_h_without_new_parameters():
     hook.remove()
     ids = coordinates[0]
     offset = inputs["context"].shape[1]
-    for part in (out.segments.reward, out.segments.success, out.segments.future_state):
+    assert torch.count_nonzero(ids[:, out.segments.reward.start-offset:out.segments.reward.stop-offset, 1]) == 0
+    for part in (out.segments.success, out.segments.future_state):
         assert torch.equal(ids[:, part.start-offset:part.stop-offset, 1], kwargs["world_horizon"][:, None])
     assert torch.equal(ids[:, -2:, 0], kwargs["world_horizon"][:, None].expand(-1, 2))
     assert set(model.state_dict()) == before
@@ -132,8 +140,8 @@ def test_dataset_targets_and_bc_lengths(success, h):
     assert torch.all(row["future_latents"] == 2 + h)
     assert row["action"].shape == (48, 6) and row["action_valid_mask"].all()
     assert row["action_loss_mask"].item() == float(success)
-    assert row["reward_chunk_mask"].sum().item() == h
-    assert row["reward_chunk_mask"][h:].sum() == 0
+    assert row["reward_chunk_mask"].sum().item() == 48
+    assert torch.count_nonzero(row["reward_chunk"]) == 0
     assert row["success"].item() == 0
 
 
@@ -143,9 +151,9 @@ def test_absorbing_success_and_missing_failure_transition_after_h():
         row = ds._get_data(8)
     assert row["future_index"].item() == 10 and row["success"].item() == 1
     assert row["action_valid_mask"].all()
-    assert row["reward_chunk_mask"].sum().item() == 6
+    assert row["reward_chunk_mask"].sum().item() == 48
     assert row["reward_chunk"][:2].sum() == 0
-    assert torch.all(row["reward_chunk"][2:6] == 1)
+    assert torch.all(row["reward_chunk"][2:] == 1)
     ds, valid = make_dataset(success=False)
     valid[30] = False  # h=1 must not hide an invalid full BC/action window.
     with patch.object(ds, "_sample_horizon", return_value=1), pytest.raises(RuntimeError, match="missing transitions"):
@@ -184,3 +192,40 @@ def test_saved_checkpoint_restores_mode_and_legacy_defaults(tmp_path):
     (tmp_path / "inference_contract.json").write_text(json.dumps({"world_conditioning": "fixed48"}))
     with pytest.raises(ValueError, match="world_conditioning disagree"):
         load_flux2_fact_trained_checkpoint(ckpt, device="cpu", dtype=torch.float32)
+
+
+def test_reward_is_independent_of_h_and_success_tracks_absorbing_boundary():
+    ds, _ = make_dataset(length=61)
+    rows = []
+    for h in (1, 39, 40, 48):
+        with patch.object(ds, "_sample_horizon", return_value=h):
+            row = ds._get_data(20)
+        rows.append(row)
+        terminal = float(20 + h >= 60)
+        for key in ("success", "terminal_h", "success_terminal_h"):
+            assert row[key].item() == terminal
+        assert row["reward"].item() == (ds.reward_goal if terminal else ds.reward_non_goal)
+        assert row["delta_steps"].item() == min(h, 40)
+        assert row["reward_chunk_mask"].sum() == 48
+        assert torch.count_nonzero(row["reward_chunk"][:40]) == 0
+        assert torch.all(row["reward_chunk"][40:] == 1)
+    for row in rows[1:]:
+        torch.testing.assert_close(row["reward_chunk"], rows[0]["reward_chunk"], atol=0, rtol=0)
+    with patch.object(ds, "_sample_horizon", return_value=1):
+        terminal = ds._get_data(60)
+    assert terminal["success"].item() == 1 and terminal["delta_steps"].item() == 0
+    assert torch.all(terminal["reward_chunk"] == 1)
+    assert torch.all(terminal["reward_chunk_mask"] == 1)
+
+
+def test_fixed48_dataset_reward_matches_original_formula():
+    from robonana.data.robotwin_hdf5 import mac_binary_chunk_targets
+    for success in (True, False):
+        ds, _ = make_dataset(success=success, mode="fixed48")
+        for frame in ((0, 12, 20, 60) if success else (0, 12)):
+            row = ds._get_data(frame)
+            future = min(frame + 48, 60)
+            reward, mask = mac_binary_chunk_targets(
+                delta_steps=future-frame, success_terminal=success and future == 60)
+            torch.testing.assert_close(row["reward_chunk"], reward, atol=0, rtol=0)
+            torch.testing.assert_close(row["reward_chunk_mask"], mask, atol=0, rtol=0)

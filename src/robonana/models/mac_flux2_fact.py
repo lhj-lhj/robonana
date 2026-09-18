@@ -321,7 +321,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
                 current_ids.to(device=device),
                 self._robot_ids(batch_size=batch, length=noisy_pred_action.shape[1], segment_id=3, device=device, dtype=id_dtype, time_ids=action_time),
                 self._robot_ids(batch_size=batch, length=gt_action_cond.shape[1], segment_id=4, device=device, dtype=id_dtype, time_ids=clean_time),
-                self._robot_ids(batch_size=batch, length=1, segment_id=5, device=device, dtype=id_dtype, time_ids=world_time),
+                self._robot_ids(batch_size=batch, length=1, segment_id=5, device=device, dtype=id_dtype, time_ids=None),
                 self._robot_ids(batch_size=batch, length=1, segment_id=6, device=device, dtype=id_dtype, time_ids=world_time),
                 self._robot_ids(batch_size=batch, length=noisy_future_state.shape[1], segment_id=7, device=device, dtype=id_dtype, time_ids=None if world_time is None else world_time.expand(-1, noisy_future_state.shape[1])),
                 future_ids.to(device=device),
@@ -512,7 +512,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
                 device=device, dtype=torch.long, time_ids=time_ids)
         world_time = torch.full((batch, 1), 48, device=device, dtype=torch.long) if self.world_conditioning == "rope_prefix" else None
         ids = torch.cat((robot(48, 4, torch.arange(1, 49, device=device)[None].expand(batch, -1)),
-                         robot(1, 5, world_time), robot(1, 6, world_time)), dim=1)
+                         robot(1, 5, None), robot(1, 6, world_time)), dim=1)
         stop = segments.future_state.start
         hidden, kv = self._world_suffix(condition_cache, hidden, ids,
             torch.zeros(batch, device=device), bias[:, :, segments.clean_action.start:stop, :stop],

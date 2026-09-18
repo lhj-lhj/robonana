@@ -520,13 +520,14 @@ class RoboTwinHDF5Dataset(BaseDataset):
             frame_latents, frame_index, world_horizon
         )
         context = self._context(record)
-        success_terminal_h = bool(record.success and future_index == record.length - 1)
+        success_terminal_h = bool(record.success and frame_index + world_horizon >= record.length - 1)
+        # Reward describes the complete action chunk independently of target h.
+        chunk_success_terminal = bool(record.success and frame_index + self.action_chunk >= record.length - 1)
         reward_chunk, reward_chunk_mask = mac_binary_chunk_targets(
-            delta_steps=delta_steps,
-            success_terminal=success_terminal_h,
+            delta_steps=chunk_delta,
+            success_terminal=chunk_success_terminal,
             chunk_horizon=self.action_chunk,
         )
-        reward_chunk_mask[world_horizon:] = 0
         direct_reward_h = self.reward_goal if success_terminal_h else self.reward_non_goal
         time_limit_truncated_h = bool(
             not record.success

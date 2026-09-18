@@ -101,7 +101,8 @@ def build_mac_attention_bias(
     """Build the explicit fixed-chunk MAC dependency graph.
 
     The graph is intentionally stronger than an ordinary causal mask.  The
-    learned world model is the requested cascade ``R -> U -> S' -> I'`` and
+    fixed48 world model uses the cascade ``R -> U -> S' -> I'``;
+    rope_prefix isolates dense R from the horizon-conditioned U/S'/I'. The
     the noisy policy track is an isolated sink.  Q and Value live outside this
     sequence and consume frozen-prefix K/V only.
     """
@@ -143,10 +144,12 @@ def build_mac_attention_bias(
         if g.stop - g.start not in (0, 48):
             raise ValueError("rope_prefix requires an empty or 48-step clean action chunk")
         # C cannot read actions, A is an isolated sink, and G is causal.
-        # Restrict every world query, including R/U, to avoid indirect leaks.
+        # Dense R sees the full chunk. U/S'/I' must never read R,
+        # otherwise R would carry suffix actions across transformer layers.
+        allowed[:, u.start:i.stop, r] = False
         _allow_causal(allowed, g)
         visible = torch.arange(g.stop - g.start, device=device)[None, :] < h[:, None]
-        allowed[:, r.start:i.stop, g] &= visible[:, None, :]
+        allowed[:, u.start:i.stop, g] &= visible[:, None, :]
 
     if context_mask is not None:
         expected = (batch_size, segments.language.stop - segments.language.start)
