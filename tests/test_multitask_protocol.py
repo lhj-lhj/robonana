@@ -239,14 +239,18 @@ def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monk
         hdf5 = output/"dataset"/task/"robonana_rollout/data/episode0.hdf5"
         hdf5.parent.mkdir(parents=True)
         hdf5.touch()
-        module.atomic_json(output/"summary.json", dict(replay_mismatches=0, episodes=[dict(
-            seed=job["seed"], success=False, replay_verified=True, hdf5=str(hdf5))]))
+        mismatch = job["seed"] == 0
+        module.atomic_json(output/"summary.json", dict(replay_mismatches=int(mismatch), episodes=[dict(
+            seed=job["seed"], success=False, replay_verified=not mismatch, hdf5=str(hdf5))]))
         return 0
     monkeypatch.setattr(module, "run_bounded", rollout)
     for lane in range(8):
         module.collect_lane(opts, [(task,cfg)], lane)
     assert sorted(seen) == list(range(100))
-    assert len(list((opts.output/"failure_dataset").glob(f"*/{task}/robonana_rollout"))) == 100
+    assert len(list((opts.output/"failure_dataset").glob(f"*/{task}/robonana_rollout"))) == 99
+    first_ledger = json.loads((opts.output/task/cfg/"ledger_lane0.json").read_text())
+    assert first_ledger[0]["status"] == "evaluated"
+    assert first_ledger[0]["result"]["replay_verified"] is False
     assert jobs == loaded  # Scheduling never mutates the frozen input manifests.
     with pytest.raises(ValueError, match="Incomplete"):
         module.load_expert_jobs(cache, task, cfg, 101)

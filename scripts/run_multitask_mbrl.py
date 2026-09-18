@@ -256,9 +256,10 @@ def collect_lane(opts, pairs, lane):
                                 link.symlink_to(source, target_is_directory=True)
                     ledger.append(row)
                     atomic_json(ledger_path, ledger)
-                    if rc == 0 and result["replay_mismatches"]:
-                        # Do not select scenes based on replay reproducibility/outcome.
-                        raise RuntimeError("Scout/replay mismatch: preserve outcome, block failure dataset publication")
+                    # A replay mismatch invalidates only that failure artifact.  The
+                    # evaluated scout outcome stays in the ledger, while the
+                    # replay_verified guard above keeps the artifact out of the
+                    # published failure dataset.  Continue the remaining jobs.
                 if not locked or expert_jobs is not None:
                     atomic_json(task_root / "seeds.json", dict(
                         task_name=task, task_config=task_config, jobs=accepted, expert_validated=True,
