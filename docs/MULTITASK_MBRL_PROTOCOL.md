@@ -4,6 +4,22 @@
 
 ## 当前到哪一步
 
+### 2026-09-18：四卡双组120k消融已启动
+
+用户确认从同一原始FLUX初始化，两组各训练120000步。启动代码 `885b49a`，独立目录 `/data3/hongjia/robonana_worktrees/rope_dense_reward_20260918`，包含dense Reward解耦修复；190主checkout未替换。
+
+| 模式 | GPU | tmux | W&B |
+|---|---|---|---|
+| rope_prefix | 0–3 | rn_rope_prefix_120k_4gpu | fy3rcid9 |
+| fixed48 | 4–7 | rn_fixed48_120k_4gpu | um4fhyb2 |
+
+共同参数：每卡16、累积2、global batch128、BF16、gradient checkpointing、seed6666；原始FLUX骨干加相同seed初始化的机器人头，全新optimizer。峰值LR为FLUX 2e-5/机器人1e-4，warmup500、120k衰减；成功演示Clean+Randomized、A统计、成功吸收态修复；每1000步保存。唯一算法差异为已确认的world-conditioning两组设定。
+
+输出根目录 `/data3/hongjia/robonana/experiments/world_ablation_4gpu_20260918/{rope_prefix,fixed48}/pretrain`。启动脚本 `/data3/hongjia/launch_world_ablation_4gpu_20260918.sh <mode>`；已有输出不能直接重跑覆盖。正式启动北京时间18:29，18:31两组均确认4个rank和batch128。18:32两组均到step10，loss有限、reward_valid_fraction=1；rope_prefix约6.72秒/更新，fixed48约6.43秒/更新，初始ETA约9天（仅10步，未计稳定后变化及保存开销）。GPU尚余约56–59GiB。后续进度以日志为准。
+
+全量缓存核验：27500 episodes、6075103帧全部通过。四卡配置14项测试通过；rope_prefix四卡两步显存短测通过。启动时各卡已有约82GiB其他任务占用，GPU算力共享，耗时不能套用独占八卡速度。未设置定时。
+
+
 ### 最新：140k缓存seed预评测（2026-09-17）
 
 用户确认合并71本地的 `51a18fb`（此前没推GitHub）；已保留作者合入main，并补充expert异常日志。新评测代码 `cac490d` 已同步190，缓存seed/八卡分片/失败保存共23项回归在190通过。71为独立checkout，不修改正在采集seed的原目录。

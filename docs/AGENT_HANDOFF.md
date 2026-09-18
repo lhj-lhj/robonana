@@ -4,6 +4,8 @@
 
 ## 工作位置
 
+- 2026-09-18新增：用户明确授权并已启动原始FLUX双组120k消融，rope_prefix卡0–3、fixed48卡4–7，每卡16×累积2、global128、GC开启。代码885b49a位于独立worktree `rope_dense_reward_20260918`；会话/输出见当前实验。不得把此前“未授权训练”的历史记录用于否定此次授权。
+
 - 仓库：https://github.com/lhj-lhj/robonana ，分支 main。
 - 190 checkout：`/data3/hongjia/robonana`；本次 eval 已由用户要求停止。
 - 消融验收目录：`/data3/hongjia/robonana_worktrees/world_rope_prefix_20260916`，代码 `f2be651` 已在190通过251项测试。用户随后明确要求合入main：原审阅分支 `76edb7f` 已合入GitHub main并同步190主checkout。71运行中的源码未更新。
