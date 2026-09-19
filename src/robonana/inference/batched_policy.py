@@ -20,6 +20,10 @@ from robonana.inference.robotwin_policy import (
 from robonana.sampling import QRejectionSample, sample_flux2_action, sample_q_rejection
 from world_action_model.pipeline.utils import normalize_state
 
+'''
+把多个并行运行的仿真环境（比如 8 个子环境）发来的观测（RGB 图像、机械臂状态、语言指令），打包成一个批次（Batch），
+用 FLUX.2 大模型一次性批量生成动作，再把动作解包拆开还给各自的环境。
+'''
 
 class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
     """Reuse the trained policy while batching independent Stage-1 rollouts.
@@ -31,6 +35,7 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
 
     supports_true_batch = True
 
+    # 只在ACTION_ONLY和ACTION_Q_REJECTION下触发。
     def _validate_action_only_batch(self) -> None:
         if self.inference_mode not in {
             InferenceMode.ACTION_ONLY,
@@ -41,12 +46,15 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
     def _batched_context(
         self, observations: Sequence[dict[str, Any]]
     ) -> tuple[Tensor, Tensor]:
+        # 这里不应该有回退
         instructions = [
             str(observation.get("instruction", observation.get("prompt", ""))).strip()
             for observation in observations
         ]
         if any(not instruction for instruction in instructions):
             raise ValueError("instruction is empty")
+
+        # 查找当前的instruction是否有未存储cache的
         missing = list(
             dict.fromkeys(
                 instruction
@@ -54,7 +62,11 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
                 if instruction not in self._context_cache
             )
         )
+
+        # 把未见过的instruction加入_contect_cache
         if missing:
+            # 这里加个print，看下是否真的都能命中，以及新的未命中的print下
+            print("missing_instructions: ", missing)
             if self._text_embedder is None:
                 self._text_embedder = LocalQwen3Embedder(
                     self.flux_checkpoint_dir,
@@ -68,6 +80,7 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
                 )
             for instruction, context in zip(missing, encoded, strict=True):
                 self._context_cache[instruction] = context.detach().cpu().contiguous()
+
         contexts = [
             self._context_cache[instruction].to(
                 device=self.model_device,
@@ -100,6 +113,7 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
     def _batched_current_image_tokens(
         self, observations: Sequence[dict[str, Any]]
     ) -> Tensor:
+        # tokenize observations
         if self.main_view_size != MAIN_VIEW_SIZE:
             raise ValueError("Unified image pipeline requires main view 256x192")
         tokens = encode_robotwin_observations(self.vae, observations)
@@ -189,6 +203,8 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
     def inference_batch(
         self, observations: Sequence[dict[str, Any]]
     ) -> list[dict[str, Any]]:
+        # observations 是一个由字典组成的列表，长度为当前动态批处理凑到的请求数（比如 B = 8）
+        # {"observation.state", "observation.images.head_camera", "instruction", "sampling_seed"}
         """Infer one action chunk per observation in a single FLUX flow batch."""
 
         self._validate_action_only_batch()
@@ -211,6 +227,11 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
         )
         if raw_states.shape[-1] != self.state_dim:
             raise ValueError(f"expected state_dim={self.state_dim}, got {raw_states.shape[-1]}")
+        normalized_state = normalize_state(
+            raw_states,
+            self.normalization,
+            mode="zscore",
+        ).to(dtype=self.dtype)[:, None]
 
         start = time.perf_counter()
         current = self._batched_current_image_tokens(observations)
@@ -220,11 +241,7 @@ class BatchedRoboNanaRobotWinPolicy(RoboNanaRobotWinPolicy):
         start = time.perf_counter()
         context, context_mask = self._batched_context(observations)
         language_encode_ms = (time.perf_counter() - start) * 1000.0
-        normalized_state = normalize_state(
-            raw_states,
-            self.normalization,
-            mode="zscore",
-        ).to(dtype=self.dtype)[:, None]
+
         sampling_seeds = [
             None
             if observation.get("sampling_seed") is None

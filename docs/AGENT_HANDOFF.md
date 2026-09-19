@@ -4,6 +4,8 @@
 
 ## 工作位置
 
+- 2026-09-19更新：rope_prefix四卡已按用户要求停止，最新ckpt11000；多h图像诊断30组已完成。原fixed48 batch128仍运行，新fixed48 batch256（0–3卡，每卡32×累积2，GC）短测通过后启动。新任务使用隔离worktree `horizon_batch256_20260919` 和用户目录610驱动库；详见当前实验最新记录，不要重启系统驱动。
+
 - 2026-09-18新增：用户明确授权并已启动原始FLUX双组120k消融，rope_prefix卡0–3、fixed48卡4–7，每卡16×累积2、global128、GC开启。代码885b49a位于独立worktree `rope_dense_reward_20260918`；会话/输出见当前实验。不得把此前“未授权训练”的历史记录用于否定此次授权。
 
 - 仓库：https://github.com/lhj-lhj/robonana ，分支 main。

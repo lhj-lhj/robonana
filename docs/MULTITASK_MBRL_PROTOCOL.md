@@ -4,6 +4,19 @@
 
 ## 当前到哪一步
 
+### 2026-09-19：停止rope_prefix并查看多h预测；准备fixed48 batch256
+
+用户要求停止rope_prefix四卡训练，已只中断 `rn_rope_prefix_120k_4gpu` 并确认该组四rank退出。停止前日志到11650，最新完整保存点为11000；原4–7卡fixed48 batch128继续运行（核对到12020）。
+
+使用rope_prefix step11000生成训练集world拟合诊断：`Clean/blocks_ranking_size` episode0与 `Clean/place_dual_shoes` episode49，各早/中/终点3个窗口，h=1/8/16/32/48，共30组。真实动作条件、20步纯噪声采样、同窗口不同h共享随机噪声；每行当前图/预测t+h/目标t+h均为VAE解码，不是在线策略成功率。修复旧探针默认采样48却读取随机h目标的问题：显式传h，非48自动走完整前向；h48继续用缓存。
+
+图像及指标在190 `/data3/hongjia/robonana/outputs/rope11000_horizon_images_20260919`，本地项目同名outputs目录；可打开index.html。新增采样/配置回归在190独立worktree `horizon_batch256_20260919` 共38项通过，代码c46a612。
+
+用户确认新训练为fixed48，原始FLUX初始化，120k更新，0–3卡，每卡32、累积2、global256、BF16与GC。首轮短测在NCCL初始化失败：系统已将用户态615.71.09库替换进磁盘，但内核仍610.43.02；不是OOM。通过apt下载官方 `libnvidia-compute-610=610.43.02-0ubuntu0.24.04.1` 仅解压到 `/data3/hongjia/opt/nvidia-610-libs/extracted`，新启动脚本设置其用户态库目录至LD_LIBRARY_PATH，未安装系统包或重启驱动。旧fixed48继续使用已加载610库。
+
+新脚本 `/data3/hongjia/run_fixed48_batch256_20260919.sh`，smoke参数执行两步，正式输出 `/data3/hongjia/robonana/experiments/fixed48_batch256_4gpu_20260919/pretrain`；两步短测exit0，峰值allocated40.494GiB/reserved47.908GiB；第二步11.37秒/更新。正式北京时间15:12启动，会话 `rn_fixed48_batch256_120k`，W&B `o50vt88l`，保存配置已确认0–3卡、32×4×2=256、GC、原始FLUX初始化、120k；15:15核对到step10/120000，loss有限，无OOM，global batch256与6075103帧全量数据在日志确认；初始5.09秒/更新、ETA约7天，仅作早期参考。峰值LR保持FLUX2e-5/机器人1e-4，warmup500、seed6666，每1000步保存。
+
+
 ### 2026-09-18：四卡双组120k消融已启动
 
 用户确认从同一原始FLUX初始化，两组各训练120000步。启动代码 `885b49a`，独立目录 `/data3/hongjia/robonana_worktrees/rope_dense_reward_20260918`，包含dense Reward解耦修复；190主checkout未替换。

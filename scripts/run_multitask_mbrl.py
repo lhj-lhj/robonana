@@ -292,8 +292,10 @@ def collection(opts):
     if opts.command == "eval" and not opts.manifests and not opts.expert_seed_cache:
         raise ValueError("Paired evaluation requires locked collection --manifests")
     lanes = len(opts.gpus) if opts.shared_gpus else len(opts.gpus)//2
-    if opts.shared_gpus and not opts.expert_seed_cache:
-        raise ValueError("Shared per-seed lanes require --expert-seed-cache")
+    # A shared lane can either consume frozen expert jobs or run the official
+    # expert check inline.  The latter preserves RoboTwin's canonical candidate
+    # sequence while still colocating one persistent policy server and simulator
+    # on every GPU.
     if opts.expert_seed_cache and opts.manifests:
         raise ValueError("Choose external expert cache or locked collection manifests")
     opts.expert_jobs = None
@@ -366,13 +368,15 @@ def main():
     parser.add_argument("--gpus", type=int, nargs="+", default=list(range(8)))
     parser.add_argument("--tasks", nargs="+", help="Bounded smoke subset only; omit for full 50")
     parser.add_argument("--episodes", type=int, default=100, help="Per task AND per clean/random config")
-    parser.add_argument("--seed-start", type=int, default=300000)
+    parser.add_argument("--seed-start", type=int, default=100000,
+                        help="First official expert-check candidate (RoboTwin seed: 0 starts at 100000)")
     parser.add_argument("--seed-timeout", type=int, default=1200)
     parser.add_argument("--candidate-multiplier", type=int, default=20, help="Maximum candidates per requested episode; lower for probes")
     parser.add_argument("--port", type=int, default=8400)
     parser.add_argument("--manifests", type=Path)
     parser.add_argument("--expert-seed-cache", type=Path, help="Use harvested task__config/expert_manifest.json; skip expert preparation")
-    parser.add_argument("--shared-gpus", action="store_true", help="One policy+sim lane on each GPU, split expert seeds across lanes")
+    parser.add_argument("--shared-gpus", action="store_true",
+                        help="One persistent policy+sim lane per GPU; supports inline official expert checks or frozen jobs")
     parser.add_argument("--shard-count", type=int, help="Global seed shards across hosts; defaults to local lane count")
     parser.add_argument("--shard-offset", type=int, default=0, help="First shard owned by this host")
     parser.add_argument("--ready-only", action="store_true", help="Run only configs with a completed expert seed manifest")
