@@ -4,6 +4,12 @@
 
 ## 当前到哪一步
 
+### 2026-09-20：140k 官方 seed=0 口径的 50×2 全任务评测
+
+用户将协议改为与 RoboTwin 官方 `seed: 0` 完全一致：每个 task/config 从候选 seed 100000 开始，先跑官方 expert check，不可解候选递增跳过，直到 Clean 和 Randomized 分别得到 50 个实际评测 episode；不再使用此前 expert seed cache。共享 GPU 入口现支持 inline expert check，仍保留一张卡一个持久策略服务、低频 scout、仅失败完整回放保存的加速逻辑。聚焦回归在190通过2项，提交 `e39eb4d`。
+
+正式评测已在71容器 `robonana-eval140k-ready-71` 启动，代码 `/raid/hongjia/robonana_eval140k`，输出 `/raid/hongjia/robonana_rollouts/absorbing140k_official_seed0_50_20260920`，主日志 `/raid/hongjia/robonana_deploy/eval140k_official_seed0_50_20260920.log`。使用八张H200、端口9900–9907、140k权重SHA256 `b951e9a3d7e2ce9c2b0717e025247d247eaf8198e1d12c29501f9571b508f095`。低成功率任务排在队首；启动核对为1个主进程、8个策略服务、8个expert worker，八卡均进入计算且未OOM。不要混入旧seed结果或修改冻结的 `protocol.json`。
+
 ### 2026-09-19：停止rope_prefix并查看多h预测；准备fixed48 batch256
 
 用户要求停止rope_prefix四卡训练，已只中断 `rn_rope_prefix_120k_4gpu` 并确认该组四rank退出。停止前日志到11650，最新完整保存点为11000；原4–7卡fixed48 batch128继续运行（核对到12020）。
