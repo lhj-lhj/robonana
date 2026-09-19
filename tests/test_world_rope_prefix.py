@@ -229,3 +229,22 @@ def test_fixed48_dataset_reward_matches_original_formula():
                 delta_steps=future-frame, success_terminal=success and future == 60)
             torch.testing.assert_close(row["reward_chunk"], reward, atol=0, rtol=0)
             torch.testing.assert_close(row["reward_chunk_mask"], mask, atol=0, rtol=0)
+
+
+def test_sampler_horizon_reaches_model_and_changes_future_rope():
+    model, inputs = model_and_inputs()
+    model.world_conditioning = "rope_prefix"
+    kwargs = dict(model=model, **sampling_inputs(inputs), clean_action=torch.randn(2,48,6),
+        future_noise=torch.randn(2,2,8), future_state_noise=torch.randn(2,1,6),
+        schedule=torch.linspace(1,0,3), grid_height=1, grid_width=2,
+        world_horizon=torch.tensor([1,17]))
+    with patch.object(model, "forward", wraps=model.forward) as forward:
+        auto = sample_mac_world(**kwargs)
+    for call in forward.call_args_list:
+        assert torch.equal(call.kwargs["world_horizon"], kwargs["world_horizon"])
+        assert torch.equal(call.kwargs["future_ids"][:,:,0], kwargs["world_horizon"][:,None].expand(-1,2))
+    full = sample_mac_world(**kwargs, use_cache=False)
+    torch.testing.assert_close(auto.future, full.future, atol=0, rtol=0)
+    model.world_conditioning = "fixed48"
+    with pytest.raises(ValueError, match="fixed48"):
+        sample_mac_world(**kwargs)

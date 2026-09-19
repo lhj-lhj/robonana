@@ -52,11 +52,14 @@ def build_protocol_config(base, phase):
     result["models"]["gradient_checkpointing"] = os.environ.get("ROBONANA_GRADIENT_CHECKPOINTING", "0") == "1"
     gpu_ids = [int(value) for value in os.environ.get("ROBONANA_PROTOCOL_GPUS", "0,1,2,3,4,5,6,7").split(",")]
     accumulation = int(os.environ.get("ROBONANA_PROTOCOL_ACCUMULATION", "1"))
+    microbatch = int(os.environ.get("ROBONANA_PROTOCOL_MICROBATCH", "16"))
+    global_batch = int(os.environ.get("ROBONANA_PROTOCOL_GLOBAL_BATCH", "128"))
     if (not gpu_ids or len(set(gpu_ids)) != len(gpu_ids) or min(gpu_ids) < 0
-            or accumulation < 1 or len(gpu_ids) * 16 * accumulation != 128):
-        raise ValueError("Protocol requires distinct GPUs and 16 * GPU count * accumulation = 128")
+            or accumulation < 1 or microbatch < 1 or global_batch < 1
+            or len(gpu_ids) * microbatch * accumulation != global_batch):
+        raise ValueError("Protocol requires distinct GPUs and microbatch * GPU count * accumulation = configured global batch (default 128)")
     result["launch"]["gpu_ids"] = gpu_ids
-    loader["batch_size_per_gpu"] = 16
+    loader["batch_size_per_gpu"] = microbatch
     train.update(max_steps=milestones[-1], gradient_accumulation_steps=accumulation,
                  resume=False, allow_uncertified_pretrain=False, mixed_precision="bf16",
                  checkpoint_interval=1000, early_checkpoint_steps=(), checkpoint_keeps=list(milestones),

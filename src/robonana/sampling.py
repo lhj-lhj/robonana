@@ -276,6 +276,7 @@ def sample_mac_world(
     grid_width: int,
     condition_cache: FrozenFluxKVCache | None = None,
     use_cache: bool = True,
+    world_horizon: Tensor | None = None,
 ) -> MacWorldSample:
     """Generate one fixed-chunk transition with invariant-prefix reuse.
 
@@ -305,11 +306,22 @@ def sample_mac_world(
     horizon = torch.full(
         (batch_size,), int(model_spec.chunk_horizon), device=device, dtype=torch.long
     )
+    if world_horizon is None:
+        world_horizon = horizon
+    if (world_horizon.shape != (batch_size,) or world_horizon.dtype not in (torch.int32, torch.int64)
+            or bool(torch.any((world_horizon < 1) | (world_horizon > 48)))):
+        raise ValueError("world_horizon must be integer [B] in [1,48]")
+    world_horizon = world_horizon.to(device)
+    if getattr(model_spec, "world_conditioning", "fixed48") == "fixed48" and not bool(torch.all(world_horizon == 48)):
+        raise ValueError("fixed48 requires world_horizon=48")
+    # Cached world prefixes currently encode h=48. Other horizons use the
+    # maintained full forward so neither RoPE nor attention can be stale.
+    use_cache = use_cache and bool(torch.all(world_horizon == 48))
     future_ids = image_position_ids(
         batch_size,
         grid_height=grid_height,
         grid_width=grid_width,
-        time_coord=horizon,
+        time_coord=world_horizon,
         device=device,
     )
     empty_action = clean_action.new_empty(batch_size, 0, clean_action.shape[-1])
@@ -346,6 +358,7 @@ def sample_mac_world(
             noisy_pred_action=empty_action,
             gt_action_cond=clean_action,
             chunk_horizon=horizon,
+            world_horizon=world_horizon,
             noisy_future_state=sampled_state,
             noisy_reward=empty_scalar,
             noisy_q=empty_scalar,

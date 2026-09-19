@@ -276,3 +276,14 @@ def test_four_gpu_protocol_preserves_global_batch(monkeypatch, gpus):
     monkeypatch.setenv("ROBONANA_PROTOCOL_ACCUMULATION", "1")
     with pytest.raises(ValueError, match="128"):
         build_protocol_config(base, "pretrain")
+
+
+def test_four_gpu_batch256(monkeypatch):
+    from robonana.configs.robotwin_flux2 import config as base
+    from robonana.configs.multitask_mbrl import build_protocol_config
+    for key, value in {"GPUS":"0,1,2,3", "MICROBATCH":"32", "ACCUMULATION":"2", "GLOBAL_BATCH":"256"}.items():
+        monkeypatch.setenv("ROBONANA_PROTOCOL_"+key,value)
+    c=build_protocol_config(base,"pretrain")
+    assert c["dataloaders"]["train"]["batch_size_per_gpu"] == 32
+    assert c["train"]["gradient_accumulation_steps"] == 2
+    assert c["train"]["max_steps"] == 120000

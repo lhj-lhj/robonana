@@ -13,6 +13,7 @@ and predictions so that failures cannot be hidden by a mixed-pool mean.
 import argparse
 import json
 import html
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -75,7 +76,10 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--episodes", type=int, default=4)
     parser.add_argument("--render", action="store_true", help="Decode input/prediction/target VAE latents into an HTML report")
+    parser.add_argument("--horizons", type=int, nargs="+", default=[48])
     args = parser.parse_args()
+    if any(h < 1 or h > 48 for h in args.horizons):
+        parser.error("horizons must lie in [1,48]")
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=False)  # Never overwrite an earlier probe.
     if args.episodes < 1:
@@ -104,8 +108,9 @@ def main():
     for pool in configured_pools(config):
         cls = RoboTwinLeRobotDataset if pool["_class_name"] == "RoboTwinLeRobotDataset" else RoboTwinHDF5Dataset
         dataset = cls.load(pool)
-        for index in probe_indices(dataset, args.episodes):
-            item = dataset[index]
+        for index, h in ((index, h) for index in probe_indices(dataset, args.episodes) for h in args.horizons):
+            with patch.object(dataset, "_sample_horizon", return_value=h):
+                item = dataset[index]
             # Reset noise by pool/index, independent of checkpoint load RNG use.
             torch.manual_seed(args.seed + int(item["pool_id"]) * 100000 + index)
             def batch(key):
@@ -118,11 +123,12 @@ def main():
                 future_state_noise=torch.randn_like(state),
                 schedule=schedule,
                 grid_height=12, grid_width=24,
+                world_horizon=torch.tensor([h], device=args.device),
             )
             metrics = world_metrics(sampled, item)
             if not all(np.isfinite(value) for value in metrics.values()):
                 raise FloatingPointError(f"nonfinite world probe: {pool['pool_name']} {index}")
-            row = dict(pool=pool["pool_name"], index=index,
+            row = dict(pool=pool["pool_name"], index=index, horizon=h,
                        observation_id=item["observation_id"], **metrics)
             rows.append(row)
             if vae is not None:
@@ -137,12 +143,12 @@ def main():
                 for panel in panels:
                     canvas.paste(panel, (offset, 0))
                     offset += panel.width
-                canvas.save(output / f"{pool['pool_name']}_{index}.png")
+                canvas.save(output / f"{pool['pool_name']}_{index}_h{h}.png")
             torch.save(dict(predicted_latent=sampled.future.cpu(),
                             predicted_state=sampled.future_state.cpu(),
                             target_latent=item["future_latents"], target_state=item["future_state"],
                             reward_logits=sampled.reward_logits.cpu(), success_logit=sampled.success_logit.cpu()),
-                       output / f"{pool['pool_name']}_{index}.pt")
+                       output / f"{pool['pool_name']}_{index}_h{h}.pt")
             print(json.dumps(row), flush=True)
         dataset.close()
     summary = {
@@ -159,9 +165,9 @@ def main():
         cards = []
         for row in rows:
             label = html.escape(str(row["observation_id"]))
-            filename = f"{row['pool']}_{row['index']}.png"
-            cards.append(f'<section><h3>{label}</h3><p>success: {row["success_probability"]:.2%}; GT: {row["success_target"]:.0f}; latent MSE: {row["future_latent_mse"]:.4f}; persistence: {row["persistence_latent_mse"]:.4f}</p><img src="{filename}" width="1152"></section>')
-        (output / "index.html").write_text('<!doctype html><meta charset="utf-8"><title>World model reconstruction</title><style>body{font-family:sans-serif;margin:24px;background:#eee}section{background:white;padding:16px;margin:16px 0}img{max-width:100%;height:auto}</style><h1>60k world-model sample report</h1><p>Training-set fit; real action; pure-noise future generation. Left: current VAE decode | middle: predicted t+48 | right: target VAE decode. Not raw RGB or policy success evaluation.</p>' + ''.join(cards), encoding="utf-8")
+            filename = f"{row['pool']}_{row['index']}_h{row['horizon']}.png"
+            cards.append(f'<section><h3>{label} | h={row["horizon"]}</h3><p>success: {row["success_probability"]:.2%}; GT: {row["success_target"]:.0f}; latent MSE: {row["future_latent_mse"]:.4f}; persistence: {row["persistence_latent_mse"]:.4f}</p><img src="{filename}" width="1152"></section>')
+        (output / "index.html").write_text('<!doctype html><meta charset="utf-8"><title>World model reconstruction</title><style>body{font-family:sans-serif;margin:24px;background:#eee}section{background:white;padding:16px;margin:16px 0}img{max-width:100%;height:auto}</style><h1>World-model horizon reconstruction</h1><p>Training-set fit; real action; pure-noise future generation. Left: current VAE decode | middle: predicted t+h | right: target VAE decode. Not raw RGB or policy success evaluation.</p>' + ''.join(cards), encoding="utf-8")
 
 
 if __name__ == "__main__":
