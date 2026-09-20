@@ -20,6 +20,9 @@ def launcher():
 @pytest.mark.parametrize("failed_task", [False, True])
 def test_two_workers_share_one_model_and_claim_each_task_once(tmp_path, monkeypatch, failed_task):
     m = launcher()
+    lane_root = tmp_path / "lane_0"
+    lane_root.mkdir()
+    (lane_root / "batch_metrics.jsonl").write_text("old telemetry")
     monkeypatch.setitem(sys.modules, 'robotwin_eval_pool', SimpleNamespace(server_command=lambda *a: ['fake']))
     monkeypatch.setitem(sys.modules, 'eval_robotwin_task_isolated', SimpleNamespace(terminate_process_group=lambda *a, **kw: None))
     servers = []
@@ -48,6 +51,8 @@ def test_two_workers_share_one_model_and_claim_each_task_once(tmp_path, monkeypa
     else:
         m.collect_lane(opts, [], 0)
     assert len(servers) == 1 and peak == 2
+    archived = list(lane_root.glob("batch_metrics_*.jsonl"))
+    assert len(archived) == 1 and archived[0].read_text() == "old telemetry"
     assert len(set(seen)) == len(seen) == 12
     assert queue.unfinished_tasks == 0
 

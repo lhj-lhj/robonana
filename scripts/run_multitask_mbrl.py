@@ -316,6 +316,10 @@ def collect_lane(opts, pairs, lane):
                ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE="32", FACT_ROBOTWIN_EVAL_VIDEO_LOG="0")
     sim_gpu = opts.gpus[lane] if getattr(opts, "shared_gpus", False) else opts.gpus[lane + len(opts.gpus)//2]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=opts.robotwin, text=True).strip()
+    # 遥测组件拒绝覆盖文件；每次重启归档旧遥测，保留历史而不阻断模型启动。
+    metrics = lane_root / 'batch_metrics.jsonl'
+    if metrics.exists():
+        metrics.rename(lane_root / f'batch_metrics_{time.time_ns()}.jsonl')
     with (lane_root / "server.log").open("a") as log:
         server = subprocess.Popen(server_command(server_opts, lane_root), cwd=ROOT, env=env,
                                   stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
