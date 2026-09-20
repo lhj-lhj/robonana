@@ -361,6 +361,24 @@ def collect_lane(opts, pairs, lane):
             terminate_process_group(server, grace_seconds=10)
 
 
+def write_results(opts, pairs):
+    """从同一份 ledger 导出旧比较脚本使用的 CSV；expert 拒绝不进入 SR 分母。"""
+    import csv
+    target = opts.output / 'results.csv'
+    temporary = target.with_suffix('.csv.tmp')
+    with temporary.open('w', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=['task', 'task_config', 'success', 'total', 'success_rate'])
+        writer.writeheader()
+        for task, config in pairs:
+            root = opts.output / task / config
+            paths = [root / 'ledger.json'] if (root / 'ledger.json').exists() else sorted(root.glob('shard_*/ledger.json'))
+            rows = [row for path in paths for row in json.loads(path.read_text()) if row['status'] == 'evaluated']
+            successes = sum(bool(row['result']['success']) for row in rows)
+            writer.writerow(dict(task=task, task_config=config, success=successes, total=len(rows),
+                                 success_rate=successes/len(rows) if rows else 'ERROR'))
+    temporary.replace(target)
+
+
 def collection(opts):
     if not opts.execute:
         return _collection(opts)
@@ -464,6 +482,7 @@ def _collection(opts):
                    for lane in range(lanes)]
         for future in futures:
             future.result()
+    write_results(opts, pairs)
     if getattr(opts, "export_dataset", None):
         export_dataset(opts, pairs)
 

@@ -108,3 +108,17 @@ def test_full_capture_export_is_idempotent_and_refuses_overwrite(tmp_path):
     target.unlink(); target.write_bytes(b'unrelated')
     with pytest.raises(FileExistsError):
         m.export_dataset(opts, [('task','demo_clean')])
+
+
+def test_legacy_results_csv_uses_evaluated_denominator(tmp_path):
+    import csv
+    m = launcher()
+    opts = SimpleNamespace(output=tmp_path)
+    m.atomic_json(tmp_path/'task/demo_clean/ledger.json', [
+        dict(status='candidate_rejected', seed=100000),
+        dict(status='evaluated', seed=100001, result=dict(success=True)),
+        dict(status='evaluated', seed=100002, result=dict(success=False))])
+    m.write_results(opts, [('task', 'demo_clean')])
+    with (tmp_path/'results.csv').open() as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows == [dict(task='task', task_config='demo_clean', success='1', total='2', success_rate='0.5')]
