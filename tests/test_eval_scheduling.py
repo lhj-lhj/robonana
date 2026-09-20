@@ -67,3 +67,31 @@ def test_retry_exhaustion_retains_separate_artifacts(tmp_path, monkeypatch):
                          stage='rollout', timeout=1, retries=2)
     assert len({argv[-1] for argv in seen}) == 3
     assert len(list(tmp_path.glob('*_status.json'))) == 3
+
+
+def test_output_lock_rejects_second_supervisor(tmp_path, monkeypatch):
+    m = launcher()
+    opts = SimpleNamespace(output=tmp_path, execute=True)
+    def inside(_):
+        with pytest.raises(RuntimeError, match='Another evaluator'):
+            m.collection(opts)
+    monkeypatch.setattr(m, '_collection', inside)
+    m.collection(opts)
+    monkeypatch.setattr(m, '_collection', lambda _: 'released')
+    assert m.collection(opts) == 'released'
+
+
+def test_full_capture_export_is_idempotent_and_refuses_overwrite(tmp_path):
+    m = launcher()
+    opts = SimpleNamespace(output=tmp_path/'run', export_dataset=tmp_path/'dataset')
+    source = tmp_path/'source.hdf5'; source.write_bytes(b'verified')
+    m.atomic_json(opts.output/'task/demo_clean/ledger.json', [
+        dict(status='candidate_rejected', seed=100000),
+        dict(status='evaluated', seed=100001, result=dict(hdf5=str(source)))])
+    m.export_dataset(opts, [('task','demo_clean')])
+    target = opts.export_dataset/'task/robonana_rollout/data/episode100001.hdf5'
+    assert target.samefile(source)
+    m.export_dataset(opts, [('task','demo_clean')])
+    target.unlink(); target.write_bytes(b'unrelated')
+    with pytest.raises(FileExistsError):
+        m.export_dataset(opts, [('task','demo_clean')])

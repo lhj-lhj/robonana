@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # 中文：旧诊断命令仅转发到统一评测组件；不维护第二套仿真或推理循环。
+# English: Compatibility wrapper around the shared evaluator.
+# 调用 / Invocation: Same probe arguments as internal/robotwin_eval_pool.py.
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "internal"))

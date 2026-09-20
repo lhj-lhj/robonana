@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# 中文：旧 shell 参数适配，复用统一评测入口。
+# English: Legacy arguments only, with no evaluation loop.
+# 调用 / Invocation: Called by eval_robotwin_all_tasks_parallel.sh.
 """旧 shell 的参数适配器；不启动服务、不实现评测循环。"""
 import os
 from pathlib import Path
@@ -9,7 +12,9 @@ def arguments(config, episodes, env):
     def get(key, default):
         return env.get(key) or default
     checkpoint = Path(env['ROBONANA_TRAINED_CHECKPOINT'])
-    model_config = get('ROBONANA_MODEL_CONFIG', str(checkpoint.parent.parent / 'config.json'))
+    model_config = get('ROBONANA_MODEL_CONFIG', str(next(
+        (parent / 'config.json' for parent in checkpoint.parents if (parent / 'config.json').is_file()),
+        checkpoint.parent.parent / 'config.json')))
     server = get('ROBONANA_EVAL_SERVER_GPUS', '0,1,2,3').split(',')
     sim = get('ROBONANA_EVAL_SIM_GPUS', '4,5,6,7').split(',')
     if len(server) != len(sim):

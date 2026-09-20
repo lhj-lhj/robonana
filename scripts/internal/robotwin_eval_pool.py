@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # 中文：统一评测的内部组件：管理仿真进程、共享推理服务与轨迹验收。
+# English: Internal shared evaluation supervisor.
+# 调用 / Invocation: run_multitask_mbrl.py owns production runs; this component also accepts bounded probes.
 # 正式任务使用 run_multitask_mbrl.py；诊断工具也转发到这里，不复制评测循环。
 """Shared simulator supervisor used by the public evaluation pipeline and probes."""
 import argparse
@@ -26,8 +28,8 @@ def server_command(opts, output):
     """中文：正式多任务入口复用同一服务参数。 English: Shared server argv, no second inference path."""
     return [sys.executable, str(ROOT / "scripts/services/inference_server_robotwin_batched.py"),
         "--checkpoint", str(opts.checkpoint.resolve()), "--model-config", str(opts.model_config.resolve()),
-        "--flux-checkpoint-dir", str(ROOT / "checkpoints/FLUX.2-klein-base-4B"),
-        "--stats-path", str(A_STATS_PATH),
+        "--flux-checkpoint-dir", str(os.environ.get("ROBONANA_FLUX_CHECKPOINT_DIR") or ROOT / "checkpoints/FLUX.2-klein-base-4B"),
+        "--stats-path", str(os.environ.get("ROBONANA_STATS_PATH") or A_STATS_PATH),
         "--model-device", "cuda:0", "--vae-device", "cuda:0", "--text-encoder-device", "cuda:0",
         "--inference-mode", opts.inference_mode, "--port", str(opts.port),
         "--max-batch-size", str(opts.inference_batch_size),

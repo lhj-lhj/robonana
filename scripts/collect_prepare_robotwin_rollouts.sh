@@ -118,7 +118,8 @@ env \
   bash "${isolated_eval}" "${task_config}" "${test_num}"
 
 episode_count=$(count_dataset_episodes)
-expected_episode_count=$((episode_count_before + expected_new_episodes))
+# 统一入口可补齐已验收 ledger 的硬链接，因此计数按本次完整预算检查。
+expected_episode_count=${test_num}
 if [[ ${episode_count} -ne ${expected_episode_count} ]]; then
   echo "isolated collection has ${episode_count} episodes; expected " \
     "${episode_count_before} existing + ${expected_new_episodes} resumed/new" >&2

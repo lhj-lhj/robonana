@@ -191,7 +191,7 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
     ledger_path = task_root / "ledger.json"
     ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else []
     if any(row.get("result", {}).get("replay_verified") is False for row in ledger):
-        raise RuntimeError("Unresolved scout/replay mismatch in existing ledger; no automatic scene filtering")
+        print(f"Warning: {task_root}: retaining scout SR; unverified replays remain excluded", flush=True)
     accepted = [r["job"] for r in ledger if r["status"] == "evaluated"]
     if opts.manifests and expert_jobs is None:
         locked = json.loads((opts.manifests / task / task_config / "seeds.json").read_text())
@@ -205,7 +205,12 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
             raise RuntimeError("Candidate budget exhausted; partial ledger retained, no false completion")
         attempt = task_root / f"attempt_{attempts:05d}"
         if attempt.exists():
-            raise FileExistsError(f"Uncommitted attempt requires inspection, refusing overwrite: {attempt}")
+            if not getattr(opts, 'resume_interrupted', False):
+                raise FileExistsError(f"Uncommitted attempt requires inspection, refusing overwrite: {attempt}")
+            # 持有全局运行锁后才允许归档；不删除、不把半成品记为失败、不跳 seed。
+            archive = task_root / 'interrupted' / f'{attempt.name}_{time.time_ns()}'
+            archive.parent.mkdir(exist_ok=True)
+            attempt.rename(archive)
         # Seed numbers may repeat across tasks/configs; identity is the full tuple.
         seed = locked["jobs"][attempts]["seed"] if locked else opts.seed_start + attempts
         row = dict(seed=seed, status="infrastructure_error", task=task, task_config=task_config)
@@ -250,6 +255,8 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
             timeout=opts.seed_timeout + 60, retries=getattr(opts, "infra_retries", 2))
         row["returncode"] = 0
         result = json.loads((rollout / "summary.json").read_text())
+        if len(result['episodes']) != 1 or int(result['episodes'][0]['seed']) != seed:
+            raise ValueError(f"Rollout result does not match assigned seed {seed}: {rollout}")
         row.update(status="evaluated", result=result["episodes"][0])
         accepted.append(job)
         if opts.command == "collect" and not row["result"]["success"] and row["result"].get("replay_verified"):
@@ -344,6 +351,20 @@ def collect_lane(opts, pairs, lane):
 
 
 def collection(opts):
+    if not opts.execute:
+        return _collection(opts)
+    # 两个 supervisor 不能同时写同一套 ledger；重启前旧进程必须已退出。
+    import fcntl
+    opts.output.mkdir(parents=True, exist_ok=True)
+    with (opts.output / '.eval.lock').open('a') as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError('Another evaluator owns this output directory') from exc
+        return _collection(opts)
+
+
+def _collection(opts):
     import re
     tasks = re.findall(r"^([a-z0-9_]+):", (opts.robotwin / "task_config/_eval_step_limit.yml").read_text(), re.M)
     if len(tasks) != 50 or len(set(tasks)) != 50:
@@ -466,6 +487,8 @@ def main():
                         help="Explicit policy mode; historical collect/eval defaults remain compatible")
     parser.add_argument("--capture-mode", choices=("scout", "scout_replay", "full"),
                         help="scout=SR only; scout_replay=save verified failures; full=save every episode")
+    parser.add_argument("--resume-interrupted", action="store_true",
+                        help="Archive incomplete attempts and retry the same seed; requires exclusive run lock")
     parser.add_argument("--export-dataset", type=Path, help="Full-capture compatibility view for rollout preparation")
     parser.add_argument("--infra-retries", type=int, default=2,
                         help="Retry the same seed on infrastructure errors; never silently replace it")
