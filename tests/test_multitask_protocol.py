@@ -67,7 +67,8 @@ def test_seed_timeout_retries_same_seed_and_locked_eval_stops(tmp_path, monkeypa
     opts=SimpleNamespace(command="collect",output=tmp_path/"collect",robotwin=simulator,
         checkpoint=tmp_path/"model.bin",model_config=tmp_path/"model.json",gpus=[0,1],port=8400,
         episodes=1,seed_timeout=60,seed_start=300000,candidate_multiplier=20,sim_python=Path(sys.executable),
-        initial_dataset=tmp_path/"initial",manifests=None, capture_mode="scout_replay", inference_mode="action_only",
+        initial_dataset=tmp_path/"initial",manifests=None, shared_gpus=False, workers_per_gpu=[1],
+        infra_retries=2, resume_interrupted=False, capture_mode="scout_replay", inference_mode="action_only",
         candidate_batch_size=32, flux_checkpoint_dir=tmp_path, stats_path=tmp_path/"stats.json")
     prepared=[]
     def fake_run(command,**kwargs):
@@ -132,7 +133,7 @@ def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monk
         checkpoint=tmp_path/"model.bin", model_config=tmp_path/"config.json", gpus=list(range(8)), port=8400,
         episodes=100, seed_timeout=60, seed_start=300000, candidate_multiplier=20, sim_python=Path(sys.executable),
         initial_dataset=tmp_path/"initial", manifests=None, expert_jobs={f"{task}__{cfg}": loaded},
-        shared_gpus=True, shard_count=8, shard_offset=0, capture_mode="scout_replay", inference_mode="action_only",
+        shared_gpus=True, shard_count=8, shard_offset=0, workers_per_gpu=[1], infra_retries=2, resume_interrupted=False, capture_mode="scout_replay", inference_mode="action_only",
         candidate_batch_size=32, flux_checkpoint_dir=tmp_path, stats_path=tmp_path/"stats.json")
     (opts.robotwin / "task_config").mkdir(parents=True)
     (opts.robotwin / f"task_config/{cfg}.yml").write_text("config")

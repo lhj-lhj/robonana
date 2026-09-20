@@ -15,13 +15,15 @@ import time
 
 import h5py
 
+ROOT = Path(__file__).resolve().parents[2]
+sys.path[:0] = [str(ROOT / name) for name in ('src', 'third_party/FACT', 'third_party/flux2/src', 'third_party/flux2_official/src')]
+
 from robonana.sim.collection_pool import EpisodeQueue, validate_jobs
 from robonana.normalization import A_STATS_PATH
 from robonana.inference_contract import sha256_file
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "internal"))
 from robonana.sim.processes import terminate_process_group
 
-ROOT = Path(__file__).resolve().parents[2]
 
 
 def server_command(opts, output):

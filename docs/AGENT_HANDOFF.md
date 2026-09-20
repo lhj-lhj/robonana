@@ -16,6 +16,12 @@
 - 2026-09-17用户明确授权的190八卡120k→140k续训已启动：吸收态修复、fixed48及原batch128。保留Adam状态，原峰值LR与FACT WarmupCosine模块，新增20k重新走500步warmup。启动代码78101cd，tmux `rn_absorbing_fixed48_20k_20260917`，W&B `a5tjqsuk`；16:07核对更新到120060，实时状态需查日志。不要停止或改动这次训练，具体路径见当前实验。
 - 最新：140k已保存且验证可加载；用户授权先八卡评测blocks_ranking_size和place_dual_shoes，恢复正常后自动起190+71全量评测（每task Clean100/Randomized100、只保存失败）。预检在190的 `absorbing140k_probe_20260917_r2` 输出运行，tmux `rn_eval140k_probe`；首轮输出因缺少nvidia-smi而启动失败，不能算模型失败。详见当前实验。71原seed采集checkout不动，评测使用 `/raid/hongjia/robonana_eval140k`。
 
+## 当前启动方式（2026-09-20）
+
+新配置只读完整JSON，入口 `scripts/run_multitask_mbrl.py train|eval|resume --config ...`；无旧环境变量兼容，缺字段/类型错误/batch冲突立即报错。见[脚本配置说明](../scripts/README.md)。7个历史配置模块和单任务轮次入口已删除，旧实验记录的命令只作历史证据。
+
+本次重构在独立分支/worktree验证；不要把它热更新到190正在训练或71正在eval的checkout。运行进程继续使用原有快照。
+
 ## 修改和部署
 
 复用 FACT/FLUX 模块；新逻辑放在现有 adapter、mask、loss、配置和测试内。GitHub是源码同步入口：候选改动先提交推送到工作分支，190拉取验证后再合入main并部署。用户要求不在本地跑测试。遇到未提交修改先检查并保留，不能强制重置。

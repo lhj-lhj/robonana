@@ -178,7 +178,7 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
             raise RuntimeError("Candidate budget exhausted; partial ledger retained, no false completion")
         attempt = task_root / f"attempt_{attempts:05d}"
         if attempt.exists():
-            if not getattr(opts, 'resume_interrupted', False):
+            if not opts.resume_interrupted:
                 raise FileExistsError(f"Uncommitted attempt requires inspection, refusing overwrite: {attempt}")
             # 持有全局运行锁后才允许归档；不删除、不把半成品记为失败、不跳 seed。
             archive = task_root / 'interrupted' / f'{attempt.name}_{time.time_ns()}'
@@ -203,7 +203,7 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
             sim_env = dict(env, CUDA_VISIBLE_DEVICES=str(sim_gpu), OIDN_DEFAULT_DEVICE="cuda",
                            ROBONANA_SAPIEN_RENDER_DEVICE="cuda:0", XDG_RUNTIME_DIR=str(runtime))
             prepared, rejected = run_seed_stage(prepare, env=sim_env, root=attempt,
-                stage="prepare", timeout=opts.seed_timeout, retries=getattr(opts, "infra_retries", 2))
+                stage="prepare", timeout=opts.seed_timeout, retries=opts.infra_retries)
             if rejected:
                 row.update(status="candidate_rejected", reason=json.loads((prepared / "rejected_seed.json").read_text())["reason"])
                 ledger.append(row)
@@ -226,7 +226,7 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
                    "--candidate-batch-size", str(opts.candidate_batch_size), "--timeout-seconds",
                    str(opts.seed_timeout)]
         rollout, _ = run_seed_stage(command, env=env, root=attempt, stage="rollout",
-            timeout=opts.seed_timeout + 60, retries=getattr(opts, "infra_retries", 2))
+            timeout=opts.seed_timeout + 60, retries=opts.infra_retries)
         row["returncode"] = 0
         result = json.loads((rollout / "summary.json").read_text())
         if len(result['episodes']) != 1 or int(result['episodes'][0]['seed']) != seed:
@@ -288,7 +288,7 @@ def collect_lane(opts, pairs, lane):
     lane_root.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, PYTHONUNBUFFERED="1", CUDA_VISIBLE_DEVICES=str(opts.gpus[lane]),
                ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE=str(opts.candidate_batch_size), FACT_ROBOTWIN_EVAL_VIDEO_LOG="0")
-    sim_gpu = opts.gpus[lane] if getattr(opts, "shared_gpus", False) else opts.gpus[lane + len(opts.gpus)//2]
+    sim_gpu = opts.gpus[lane] if opts.shared_gpus else opts.gpus[lane + len(opts.gpus)//2]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=opts.robotwin, text=True).strip()
     # 遥测组件拒绝覆盖文件；每次重启归档旧遥测，保留历史而不阻断模型启动。
     metrics = lane_root / 'batch_metrics.jsonl'
@@ -323,7 +323,7 @@ def collect_lane(opts, pairs, lane):
                             return
                     finally:
                         work.task_done()
-            counts = getattr(opts, "workers_per_gpu", [1])
+            counts = opts.workers_per_gpu
             count = counts[0] if len(counts) == 1 else counts[lane]
             with ThreadPoolExecutor(max_workers=count) as workers:
                 pending = [workers.submit(consume) for _ in range(count)]
@@ -376,12 +376,12 @@ def _collection(opts):
         if not set(opts.tasks) <= set(tasks):
             raise ValueError("Unknown task in bounded probe")
         tasks = opts.tasks
-    pairs = [(task, cfg) for task in tasks for cfg in getattr(opts, "task_configs", ("demo_clean", "demo_randomized"))]
-    if getattr(opts, "export_dataset", None) and (len(opts.task_configs) != 1 or opts.capture_mode != "full"):
+    pairs = [(task, cfg) for task in tasks for cfg in opts.task_configs]
+    if opts.export_dataset and (len(opts.task_configs) != 1 or opts.capture_mode != "full"):
         raise ValueError("Dataset export requires full capture and a single task config")
     if len(set(pairs)) != len(pairs):
         raise ValueError("Duplicate task/config pairs")
-    if getattr(opts, "infra_retries", 2) < 0:
+    if opts.infra_retries < 0:
         raise ValueError("infra-retries must be nonnegative")
     if len(set(opts.gpus)) != len(opts.gpus) or not opts.gpus or any(g < 0 for g in opts.gpus):
         raise ValueError("Use distinct nonnegative GPU ids")
@@ -395,7 +395,7 @@ def _collection(opts):
     # expert check inline.  The latter preserves RoboTwin's canonical candidate
     # sequence while still colocating one persistent policy server and simulator
     # on every GPU.
-    counts = getattr(opts, "workers_per_gpu", [1])
+    counts = opts.workers_per_gpu
     if len(counts) not in (1, lanes) or any(n < 1 or n > 4 for n in counts):
         raise ValueError("workers-per-gpu needs one count or a count per lane, each 1..4")
     if opts.expert_seed_cache and any(n != 1 for n in counts):
@@ -406,7 +406,6 @@ def _collection(opts):
     if opts.expert_seed_cache:
         if opts.allow_partial_expert_seeds and not opts.tasks:
             raise ValueError("Partial expert manifests require an explicit bounded task subset")
-        opts.shard_count = opts.shard_count or lanes
         if opts.shard_offset < 0 or opts.shard_count < opts.shard_offset + lanes:
             raise ValueError("Shard range must include every local lane")
         opts.expert_jobs = {}
@@ -431,8 +430,7 @@ def _collection(opts):
     signature = dict(checkpoint_sha256=sha256_file(opts.checkpoint), model_config_sha256=sha256_file(opts.model_config),
                      mode=opts.command, pairs=pairs, episodes=opts.episodes, seed_start=opts.seed_start,
                      manifests=str(opts.manifests.resolve()) if opts.manifests else None)
-    if getattr(opts, "inference_mode", None) or getattr(opts, "capture_mode", None):
-        signature.update(inference_mode=opts.inference_mode, capture_mode=opts.capture_mode)
+    signature.update(inference_mode=opts.inference_mode, capture_mode=opts.capture_mode)
     signature = json.loads(json.dumps(signature))
     if opts.expert_jobs is not None:
         signature.update(expert_jobs=opts.expert_jobs, shard_count=opts.shard_count,
@@ -444,6 +442,12 @@ def _collection(opts):
     if path.exists() and json.loads(path.read_text()) != signature:
         raise ValueError("Output belongs to a different collection/eval protocol")
     atomic_json(path, signature)
+    from dataclasses import asdict
+    # 用户输入与实际派生的拓扑完整留档，调整并发不能偷偷改变冻结的模型/seed协议。
+    atomic_json(opts.output / 'eval_config.json', dict(
+        requested=json.loads(json.dumps(asdict(opts.options), default=str)),
+        resolved=dict(pairs=pairs, policy_lanes=lanes, inference_batch_size=1,
+                      policy_ports=list(range(opts.port, opts.port+lanes)), workers_per_lane=counts)))
     # 运行参数独立记录：调整并发不能改变冻结的 seed/模型协议。
     atomic_json(opts.output / "execution.json", dict(workers_per_gpu=counts, gpus=opts.gpus,
                 inference_batch_size=1, updated_at=time.time()))
@@ -457,7 +461,7 @@ def _collection(opts):
         for future in futures:
             future.result()
     write_results(opts, pairs)
-    if getattr(opts, "export_dataset", None):
+    if opts.export_dataset:
         export_dataset(opts, pairs)
 
 

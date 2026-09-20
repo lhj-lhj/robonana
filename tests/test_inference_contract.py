@@ -5,14 +5,17 @@ from pathlib import Path
 import pytest
 
 from robonana import inference_contract as contracts
+from dataclasses import replace
+from robonana.configs.schema import load_options
 from robonana.configs.training import TrainOptions, build_training_config
 from robonana.normalization import A_STATS_PATH
 
 
 def _posttrain(tmp_path, **kwargs):
-    return build_training_config(TrainOptions(output=tmp_path, dataset_root=tmp_path,
-        flux_checkpoint_dir=tmp_path, stats_path=A_STATS_PATH, max_steps=120000, lr=2e-5, robot_lr=1e-4,
-        **kwargs))['train']['posttrain']
+    base=load_options(TrainOptions,Path(__file__).resolve().parents[1]/'configs/train.json')
+    return build_training_config(replace(base,output=tmp_path,dataset_root=tmp_path,
+        flux_checkpoint_dir=tmp_path,stats_path=A_STATS_PATH,**kwargs))['train']['posttrain']
+
 
 
 def _saved(tmp_path):

@@ -1,4 +1,5 @@
 """Collection entrypoint wiring is testable without a live simulator."""
+import os
 import subprocess
 import sys
 import importlib.util
@@ -13,7 +14,7 @@ def test_collection_supervisor_and_seed_preflight_help(tmp_path):
         ('scripts/internal/collect_robotwin_pool_worker.py', ('--prepare-seeds', '--seed-start')),
     ):
         result = subprocess.run([sys.executable, str(root / relative), '--help'],
-                                cwd=tmp_path, capture_output=True, text=True, timeout=60)
+                                cwd=tmp_path, env=dict(os.environ,PYTHONPATH=str(tmp_path)), capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, result.stderr
         assert all(flag in result.stdout for flag in required)
 

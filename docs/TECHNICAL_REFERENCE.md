@@ -1,6 +1,6 @@
 # 代码与训练参考
 
-当前实验、模型路径和进度见 [实验文档](MULTITASK_MBRL_PROTOCOL.md)。本文主要描述默认 `fixed48`；下文单任务命令不是当前50任务实验的启动指令。已准备的 `rope_prefix` 消融只改变world训练目标和动作可见范围，尚未运行；以实验文档中的两组命令为准。
+当前实验见[实验文档](MULTITASK_MBRL_PROTOCOL.md)。所有新启动都使用[显式JSON配置](../scripts/README.md)，不再使用历史单任务配置/环境变量。以下算法说明与启动参数分离。
 
 ## Current architecture
 
@@ -56,21 +56,13 @@ ablation; batching/chunking performance knobs do not change the total budget.
 Missing contracts, different VAE/runtime/statistics, and mismatched weight
 fingerprints fail closed. A cache certificate or historical run config does
 **not** certify an old checkpoint. Existing checkpoints are not modified.
-For a deliberately requested new Stage-1 adaptation only,
-`ROBONANA_ALLOW_UNCERTIFIED_PRETRAIN=1` permits initialization from weights with
-no contract; it never bypasses mismatched contracts, critic or resume checks,
-or online checks. New checkpoints are certified only after real training with
-validated inputs; this describes their input protocol, not model convergence
-or historical pretraining parity. No adaptation is started automatically.
+The public training configuration requires certified source checkpoints. Historical
+uncertified adaptation is not silently enabled by environment variables.
 
-The default original-data pool for both phases is **Clean/hanging_mug only**
-(50 demonstrations on 190), loaded by `RoboTwinLeRobotDataset` from
-`/workspace/datasets/fact-robotwin-v2/RoboTwin`. Randomized demonstrations are
-not included by default. Collected replay remains a separate HDF5 data source.
-All pools retain the canonical A normalization statistics; choosing Clean only
-does not recompute statistics or rewrite historical experiment configurations.
+Original data selections are explicit `task_globs`; the supplied multi-task example
+uses Clean and Randomized. Replay is a separate HDF5 source; all pools retain A.
 
-1. Load the 1,000-step checkpoint and collect/prepare fixed-48 replay windows.
+1. Select an explicit certified checkpoint and prepare replay when entering a new phase.
 2. Phase 1 trains the action/world model. BC loss is multiplied by `action_loss_mask`, which is one only for successful trajectories. World losses always run on both success and failure data.
 3. For successful terminal windows, observations after the terminal frame are padded as an absorbing state for the remaining chunk suffix. Failure windows are never padded: their final complete chunk ends exactly at the last recorded observation.
 4. Phase 2 freezes FLUX, creates/loads the online Value and Q experts from the current Phase-1 checkpoint, and initializes the Value EMA by copying the **online Value expert** (never the previous EMA). The EMA is updated after each optimizer step. Q has no target copy.
@@ -90,24 +82,12 @@ Terminal joint targets are `q_final - q_current`, not unconditionally zero: at t
 
 ## Checkpoints and commands
 
-The default source is:
-
-```text
-/data3/hongjia/robonana/experiments/hanging_mug_mac_pilot_20260906/world_policy/
-  models/checkpoint_epoch_1_step_1000/transformer/diffusion_pytorch_model.bin
-```
-
-Run from the repository root:
+There is no default trained checkpoint or historical experiment directory.
+Use the complete JSON files described in [the configuration guide](../scripts/README.md).
 
 ```bash
-bash scripts/run_robotwin_train.sh \
-  --config robonana.configs.robotwin_flux2_4b_mac.config
-```
-
-For a new collection/training round:
-
-```bash
-bash scripts/run_hanging_mug_mac_round.sh
+python scripts/run_multitask_mbrl.py train --config configs/train.json --execute
+python scripts/run_multitask_mbrl.py resume --config configs/resume.json --execute
 ```
 
 Validate a complete checkpoint:
@@ -128,64 +108,24 @@ The loader is intentionally strict: architecture must be `mac_mot_v2`, chunk/rew
 * `src/robonana/data/robotwin_hdf5.py` — success/failure windowing and absorbing-terminal targets.
 * `src/robonana/sampling.py` — action flow, one-chunk world rollout, and Q rejection sampling.
 * `src/robonana/training/robotwin_trainer.py` — two-phase training and Value EMA updates.
-* `scripts/diagnostics/start_mac_world_pilot.py` — bounded world-model pilot and probes.
+* `src/robonana/configs/training.py` — explicit options, validation and one FACT dictionary assembly.
 
 ## Configuration reference
 
-The canonical entry point is `robonana.configs.robotwin_flux2_4b_mac.config`.
-It imports the common FACT/FLUX dimensions and applies the MAC overlay:
+`configs/train.json` is the visible experiment input. All fields are required;
+unknown keys/types and inconsistent batch settings fail before launch. No modules
+read experiment environment variables at import time. `configs/training.py`
+assembles one final FACT config, including synchronized dataset/model horizon,
+training/inference sampling, and max_steps/scheduler/checkpoint endpoints.
 
-| Setting | Current value |
-|---|---:|
-| architecture | `mac_mot_v2` |
-| action/state dimensions | 14 / 14 |
-| action chunk and maximum horizon | 48 / 48 |
-| reward head | `binary_chunk`, 48 logits |
-| Value/Q output | one scalar each |
-| critic candidates (training) | 8 |
-| candidates (environment) | 32 |
-| imagined chunks per critic batch | 1 |
-| Value EMA decay | 0.995 |
-| flow sampling steps | 20 |
-| default training dtype | BF16 FLUX/Q/V; FP32 Value EMA storage/update with BF16 autocast forward; FP32 loss/returns |
-| new trajectories per collection round | 100 total, successes and failures |
-| stage 1 world/policy budget per round | 20,000 optimizer steps |
-| stage 2 Value/Q budget per round | 10,000 optimizer steps |
-| training GPUs / batch per GPU / accumulation | 6,7 / 8 / 1 (effective batch 16) |
+Model constants remain MAC: action/state14, chunk48, reward48 binary logits,
+scalar Q/Value, BF16 FLUX and FP32 VAE/Value EMA storage. These are architecture
+contracts rather than independently overridable experiment fields.
 
-These are defaults for new runs, not overrides of saved continuation configs.
-RoboNana uses FACT's `mixed_precision="bf16"`: FLUX and online Q/V use BF16
-parameters. Value EMA stores/updates FP32 weights and evaluates with BF16
-autocast on the shared BF16 FLUX cache. Saved runs/processes retain
-their original execution until explicitly resumed/restarted. Frozen Qwen and
-the unified VAE/cache preprocessing contract below are unchanged.
-
-The standard round is: collect 100 new trajectories with the current Q-selected
-policy, prepare/cache them and mix with existing replay, train stage 1 for 20k
-steps, then freeze FLUX and train stage 2 for 10k steps. These are additional
-per-phase budgets, not lifetime checkpoint step numbers. Each new phase uses
-a matching learning-rate decay length. Carry forward online model weights;
-initialize Value EMA from online Value at the start of the new critic phase.
-
-`run_hanging_mug_mac_round.sh` consumes the replay already collected for round r,
-trains these two phases, and collects the next 100 trajectories for round r+1.
-`ROBONANA_MAC_COLLECTION_EPISODES`, `ROBONANA_MAC_WORLD_POLICY_STEPS`, and
-`ROBONANA_MAC_CRITIC_STEPS` override these defaults. `ROBONANA_MAX_STEPS` overrides
-the phase budget when loading the canonical training config directly. Evaluation
-episode counts are independent of collection counts. The explicitly named
-historical pilot retains its small experimental budgets.
-
-A critic-only control is an optional diagnostic: keep FLUX and replay fixed and
-continue only Q/Value training, then compare evaluation results. It isolates the
-effect of extra critic updates; it is not an extra stage in the standard round.
-
-Useful overrides are `ROBONANA_MAC_SOURCE_RUN`,
-`ROBONANA_MAC_PRETRAIN_CHECKPOINT`, `ROBONANA_MAC_PRETRAIN_CONFIG`,
-`ROBONANA_MAC_PHASE` (`world_policy` or `critic`),
-`ROBONANA_COLLECTION_ROUND`, `ROBONANA_REPLAY_ROOT`,
-`ROBONANA_MAC_TRAIN_CANDIDATES`, `ROBONANA_MAC_EVAL_CANDIDATES`, and
-`ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE`. The source checkpoint and saved
-`config.json` must describe the same complete MAC model.
+Saved-phase continuation is separate from fresh initialization: it reads the
+explicit source JSON and prints all inherited settings and requested changes.
+See the configuration guide for the batch equation, phase budgets, and files
+saved alongside each run.
 
 ## Exact phase behavior
 
@@ -268,42 +208,16 @@ attend to C and itself; candidates cannot read one another. Candidate groups
 bound peak memory while preserving the full M-way result. The benchmark
 script compares cached and uncached M=1/8/32 execution.
 
-For RoboTwin success-rate evaluation, `scripts/eval_robotwin_all_tasks_parallel.sh`
-uses the fixed-48 action path. The RL ablation compares direct policy sampling
-with deterministic MAC Q rejection without changing the checkpoint:
-
-```bash
-# policy action only (no Q scoring)
-ROBONANA_INFERENCE_MODE=action_only .../eval_robotwin_all_tasks_parallel.sh demo_clean 10
-
-# deterministic Q rejection / argmax
-ROBONANA_INFERENCE_MODE=action_q_rejection \
-  .../eval_robotwin_all_tasks_parallel.sh demo_clean 10
-```
-
-The evaluator defaults to `EVAL_VIDEO_LOG=0`, `LOW_FREQUENCY_RGB=1`,
-`SKIP_ACTION_RENDER_SYNC=1`, `BEST_OF_N=1`, and `ENABLE_VALUE_VIS=0`; these
-remove rendering and duplicate policy work that is not part of a success-rate
-measurement. For visual debugging, enable `EVAL_VIDEO_LOG=1` and
-`ROBONANA_ENABLE_VALUE_VIS=1` as needed, and disable the rendering shortcuts with
-`ROBONANA_LOW_FREQUENCY_RGB=0` / `ROBONANA_SKIP_ACTION_RENDER_SYNC=0`.
-Each episode runs in an isolated RoboTwin process and
-the watchdog aborts a swallowed `error occurs !` retry loop after 32 repeats.
-Set `ROBONANA_Q_DIAGNOSTICS_PATH` to a JSONL path to record selected-Q values
-and success labels for each Q-mode episode.
+RoboTwin evaluation uses `run_multitask_mbrl.py eval --config configs/eval.json`.
+`inference_mode` explicitly chooses direct action or deterministic Q rejection.
+`capture_mode` chooses SR-only, verified-failure replay, or all trajectories.
+All modes share the same worker and preserve checkpoint sampling contracts.
 
 ## Replay collection and selected-policy BC
 
-`scripts/collect_prepare_robotwin_rollouts.sh` runs isolated RoboTwin
-evaluation with the current checkpoint, writes a separate rollout root, and
-then caches FLUX language/image latents. Metadata records checkpoint, policy
-version, round, success, terminal observation, and time-limit truncation.
-The next round mixes these records through the four configured pools.
-
-Only Q-selected successful trajectories contribute action BC. Failed
-trajectories remain replay data and contribute world-model supervision. The
-collection script is resumable by its episode ledger; never merge its output
-into the original demonstration tree manually.
+The same evaluation pipeline writes validated replay artifacts. For full capture,
+`export_dataset` publishes a flat dataset view; `prepare_robotwin_rollouts.py`
+builds the existing index and caches. No second collection launcher is maintained.
 
 ## Validation checklist on 190
 
@@ -320,11 +234,9 @@ python scripts/diagnostics/validate_mac_mot_v2_checkpoint.py \
   --model-config <checkpoint>/config.json --device cuda:0 --smoke-forward
 ```
 
-For a world-only pilot, use `scripts/diagnostics/start_mac_world_pilot.py`. It writes a
-source manifest, probes fixed windows before and after training, and stops at
-`world_complete_review_required`; inspect metrics before starting critic. The
-completed hanging-mug 5,000-step pilot remains in its existing experiment
-directory and must not be overwritten.
+For a bounded world-only probe, explicitly set `smoke_steps` in the training
+JSON and inspect the printed resolved budget before execution. Existing pilot
+outputs remain untouched; their launchers are not maintained separately.
 
 ### W&B credentials on 190
 

@@ -15,10 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def options(tmp_path, **kw):
-    args = dict(output=tmp_path/'run', dataset_root=tmp_path/'data', flux_checkpoint_dir=tmp_path/'flux',
-                stats_path=A_STATS_PATH, max_steps=120000, lr=2e-5, robot_lr=1e-4)
+    base=load_options(TrainOptions,ROOT/'configs/train.json')
+    args=dict(output=tmp_path/'run',dataset_root=tmp_path/'data',flux_checkpoint_dir=tmp_path/'flux',
+              stats_path=A_STATS_PATH,checkpoint_keeps=())
     args.update(kw)
-    return TrainOptions(**args)
+    return replace(base,**args)
+
 
 
 @pytest.mark.parametrize('phase,steps,lr,robot_lr', [('pretrain',120000,2e-5,1e-4),('stage1',60000,2e-5,2e-5),('stage2',20000,1e-4,1e-4)])
@@ -123,3 +125,19 @@ def test_sim_python_keeps_virtualenv_symlink(tmp_path):
     raw['sim_python']='venv/bin/python'
     path=tmp_path/'eval.json';path.write_text(json.dumps(raw))
     assert load_options(EvalOptions,path).sim_python == executable
+
+
+def test_explicit_smoke_updates_budget_scheduler_and_retention(tmp_path):
+    o=options(tmp_path,smoke_steps=3,smoke_save=True,checkpoint_keeps=(10000,120000))
+    c=build_training_config(o)
+    assert c['train']['max_steps']==c['schedulers']['decay_steps']==3
+    assert c['schedulers']['warmup_steps']==1
+    assert c['train']['checkpoint_interval']==1 and c['train']['checkpoint_keeps']==[]
+    assert not c['train']['disable_checkpointing']
+
+
+def test_cli_rejects_legacy_overrides_instead_of_guessing(tmp_path, monkeypatch):
+    monkeypatch.setenv('ROBONANA_BATCH_SIZE','999')
+    result=subprocess.run([sys.executable,str(ROOT/'scripts/run_multitask_mbrl.py'),'train','--config',str(ROOT/'configs/train.json')],capture_output=True,text=True)
+    assert result.returncode!=0
+    assert 'Legacy experiment environment overrides' in result.stderr

@@ -4,7 +4,7 @@
 `SegmentMap`、`WorldBlockMap`、`build_attention_bias` 与基类旧 forward 已删除；
 `Flux2FACTModel` 仅提供 MAC 继承的模块/helper。旧 actor 转换仍保留，并用删除前的
 CPU 输出做回归。两组world消融已接入现有 `build_mac_attention_bias`，通过
-`--world-conditioning fixed48|rope_prefix` 选择，尚未启动实验。
+JSON 中的 `world_conditioning` 选择；运行状态见实验文档。
 
 This map and README describe current behavior. Dated experiment reports record
 historical behavior; do not reconstruct legacy branches from those reports.
@@ -20,8 +20,8 @@ historical behavior; do not reconstruct legacy branches from those reports.
   and FLUX supply upstream blocks. Keep deterministic MoT Q/V and Value-only
   EMA. The default mask is unchanged; `rope_prefix` optionally makes world clean
   actions causal and limits all world queries to the first h actions.
-- Training: `training/robotwin_trainer.py`, config `robotwin_flux2_4b_mac`.
-  `critic_continuation` edits a copy of a saved configuration, preserving the
+- Training: `training/robotwin_trainer.py`, explicit JSON through `configs/training.py`.
+  `configs/resume.py` uses the maintained continuation adapter, preserving the
   saved run. Every new pool uses A, including when the saved run used B.
 - State/action normalization: **only** `normalization.py` and its
   `A_STATS_PATH`. Dataset, online loader and config guards reject other paths.

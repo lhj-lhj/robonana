@@ -12,6 +12,9 @@ import runpy
 import sys
 import time
 
+ROOT = Path(__file__).resolve().parents[2]
+sys.path[:0] = [str(ROOT / name) for name in ('src', 'third_party/FACT', 'third_party/flux2/src', 'third_party/flux2_official/src')]
+
 from robonana.sim import configure_sapien_runtime
 from robonana.sim.collection_pool import EpisodeQueue, RoboNanaSubEnv, load_vector_env, make_vector_env
 # 中文：复用仿真环境适配。 English: reuse the simulator environment bootstrap.

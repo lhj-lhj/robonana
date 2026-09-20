@@ -1,5 +1,5 @@
 """唯一新训练配置：扁平参数 → 一次组装 FACT 字典。无环境变量、无 import 时配置求值。"""
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 import sys
 from .schema import accumulation
@@ -10,9 +10,9 @@ ACTION_DIM = 14
 MODEL_PARAMS = dict(in_channels=128, context_in_dim=7680, hidden_size=3072, num_heads=24,
                     depth=5, depth_single_blocks=20, axes_dim=[32,32,32,32], theta=2000,
                     mlp_ratio=3.0, use_guidance_embed=False)
-MILESTONES = {'pretrain': (10000,30000,60000,120000), 'stage1': (10000,30000,60000), 'stage2': (10000,20000)}
-LOSS_WEIGHTS = dict(image_loss=1., action_loss=10., future_state_loss=.4, reward_loss=.1,
-                    success_loss=.1, value_loss=1., q_loss=1.)
+PHASES = ('pretrain', 'stage1', 'stage2')
+LOSS_FIELDS = frozenset(("image_loss", "action_loss", "future_state_loss", "reward_loss",
+                         "success_loss", "value_loss", "q_loss"))
 
 
 @dataclass(frozen=True)
@@ -22,52 +22,52 @@ class TrainOptions:
     dataset_root: Path
     flux_checkpoint_dir: Path
     stats_path: Path
-    phase: str = 'pretrain'
-    checkpoint: Path | None = None
-    model_config: Path | None = None
-    replay_root: Path | None = None
-    task_globs: tuple[str, ...] = ('Clean/*', 'Randomized/*')
-    replay_task_glob: str = '**/robonana_rollout'
-    collection_round: int = 0
+    phase: str
+    checkpoint: Path | None
+    model_config: Path | None
+    replay_root: Path | None
+    task_globs: tuple[str, ...]
+    replay_task_glob: str
+    collection_round: int
     # 四个量全部可见且必须相互一致；缺信息不能静默猜 batch 或累积次数。
-    gpus: tuple[int, ...] = tuple(range(8))
-    microbatch: int = 16
-    global_batch: int = 128
-    accumulation_steps: int = 1
-    num_workers: int = 4
-    max_steps: int | None = None
-    warmup_steps: int = 500
-    lr: float | None = None
-    robot_lr: float | None = None
-    world_conditioning: str = 'fixed48'
-    gradient_checkpointing: bool = False
-    single_checkpoint_stride: int = 1
-    checkpoint_interval: int = 1000
-    checkpoint_total_limit: int = 2
-    checkpoint_keeps: tuple[int, ...] | None = None
-    seed: int = 6666
-    log_interval: int = 10
-    log_with: str | None = 'wandb'
-    tracker_project: str = 'robonana'
-    tracker_entity: str | None = None
-    run_name: str | None = None
-    discount: float = .999
-    sampling_steps: int = 20
-    flow_shift: float = 1.
-    train_candidates: int = 8
-    eval_candidates: int = 32
-    loss_weights: dict[str, float] = field(default_factory=lambda: dict(LOSS_WEIGHTS))
-    smoke_steps: int = 0
-    smoke_save: bool = False
-    expected_original_episodes: int | None = 27500
-    expected_tasks: int | None = 50
+    gpus: tuple[int, ...]
+    microbatch: int
+    global_batch: int
+    accumulation_steps: int
+    num_workers: int
+    max_steps: int
+    warmup_steps: int
+    lr: float
+    robot_lr: float
+    world_conditioning: str
+    gradient_checkpointing: bool
+    single_checkpoint_stride: int
+    checkpoint_interval: int
+    checkpoint_total_limit: int
+    checkpoint_keeps: tuple[int, ...]
+    seed: int
+    log_interval: int
+    log_with: str | None
+    tracker_project: str
+    tracker_entity: str | None
+    run_name: str | None
+    discount: float
+    sampling_steps: int
+    flow_shift: float
+    train_candidates: int
+    eval_candidates: int
+    loss_weights: dict[str, float]
+    smoke_steps: int
+    smoke_save: bool
+    expected_original_episodes: int | None
+    expected_tasks: int | None
 
     def __post_init__(self):
         if accumulation(self.gpus, self.microbatch, self.global_batch) != self.accumulation_steps:
             raise ValueError("gpus * microbatch * accumulation_steps must equal global_batch")
         if self.max_steps is None or self.lr is None or self.robot_lr is None:
             raise ValueError("max_steps, lr and robot_lr must be explicit")
-        if self.phase not in MILESTONES: raise ValueError('phase must be pretrain/stage1/stage2')
+        if self.phase not in PHASES: raise ValueError('phase must be pretrain/stage1/stage2')
         if self.world_conditioning not in ('fixed48','rope_prefix'): raise ValueError('Invalid world_conditioning')
         if self.phase == 'stage2' and self.world_conditioning != 'fixed48': raise ValueError('Stage2 requires fixed48')
         if self.phase != 'pretrain' and not all((self.checkpoint,self.model_config,self.replay_root)):
@@ -83,9 +83,9 @@ class TrainOptions:
         if self.max_steps is not None and self.max_steps <= 0: raise ValueError('max_steps must be positive')
         if self.warmup_steps < 0 or not self.smoke_steps and self.warmup_steps >= self.steps:
             raise ValueError('warmup_steps must be below max_steps')
-        if set(self.loss_weights) != set(LOSS_WEIGHTS) or any(v < 0 for v in self.loss_weights.values()):
+        if set(self.loss_weights) != LOSS_FIELDS or any(v < 0 for v in self.loss_weights.values()):
             raise ValueError('loss_weights must specify the seven maintained nonnegative weights')
-        if self.checkpoint_keeps and any(s < 1 or s > self.steps for s in self.checkpoint_keeps):
+        if not self.smoke_steps and any(s < 1 or s > self.steps for s in self.checkpoint_keeps):
             raise ValueError('checkpoint_keeps must be inside the training budget')
         if any(v is not None and v <= 0 for v in (self.lr,self.robot_lr)): raise ValueError('Learning rates must be positive')
 
@@ -132,8 +132,7 @@ def build_training_config(o: TrainOptions):
             action_chunk=CHUNK, execute_actions_per_plan=CHUNK))
     from robonana.inference_contract import sampling_contract
     sampling_contract(posttrain)
-    keeps = [] if o.smoke_steps else sorted(set(o.checkpoint_keeps if o.checkpoint_keeps is not None else
-             [s for s in MILESTONES[o.phase] if s<=o.steps]+[o.steps]))
+    keeps = [] if o.smoke_steps else sorted(set((*o.checkpoint_keeps, o.steps)))
     tracker = dict(name=o.run_name or f'multitask-mbrl-loop{o.collection_round}-{o.phase}-{o.world_conditioning}')
     if o.tracker_entity: tracker['entity']=o.tracker_entity
     repo = Path(__file__).resolve().parents[3]

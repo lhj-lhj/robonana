@@ -8,13 +8,13 @@
 - [代码说明](docs/TECHNICAL_REFERENCE.md)：训练、推理、图像管线和模块关系；[代码索引](docs/CURRENT_CODE_MAP.md) 用于找实现。
 - [脚本导航](scripts/README.md)：每个入口的作用和是否会启动GPU任务。
 
-## 当前状态
+## 配置与启动
 
-2026-09-16 最近核对：新预训练120k完成；190上的Round0已停止，71上次检查仍在跑。Stage1/Stage2未开始。实验文档中的数字是带上下文的快照，不是实时监控。
+- [训练配置](configs/train.json)、[评测配置](configs/eval.json)、[续训配置](configs/resume.json)：完整填写后用 `python scripts/run_multitask_mbrl.py <train|eval|resume> --config <文件>` 查看最终计划，`--execute` 才启动。
+- GPU、microbatch、累积次数、global batch、步数和学习率缺项或冲突即报错；不再接受旧环境变量或历史实验fallback。详见[配置说明](scripts/README.md)。
+- 配置解析、训练组装和续训适配在 `src/robonana/configs/`。新阶段一次生成FACT配置；恢复显式读取来源快照。模型、数据、loss、checkpoint合同保持原有语义。
 
-当前默认 MAC 的 clean action 是双向注意力；已加入用户确认的 `rope_prefix` 消融：clean action causal、world 只读前 h 步、RoPE 标记目标帧。代码已准备，尚未启动实验；当前120k仍属于默认基线。
-
-旧120k原始格式需显式转换；已有 actor-preserving 导出可用于 action-only 复测。导出不代表旧模型采用了现在的训练图像管线。不要混用旧、新120k的模型、统计口径或运行结果。
+实验状态请看带时间的实验记录与实际进程，不从仓库默认值推断。代码更新不会自动改变71的运行中eval或190的训练。
 
 ## 文档怎么找
 
