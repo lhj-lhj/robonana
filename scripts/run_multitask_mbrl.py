@@ -79,7 +79,7 @@ def run_seed_stage(command, *, env, root, stage, timeout, retries):
         if stage == "prepare" and rejected.exists():
             record = json.loads(rejected.read_text())
             seed = int(argv[argv.index("--seed-start") + 1])
-            if record == dict(seed=seed, reason="expert_infeasible"):
+            if record.get("seed") == seed and record.get("reason") in ("expert_infeasible", "expert_unstable"):
                 return output, True
         atomic_json(root / f"{output.name}_status.json", dict(
             returncode=rc, elapsed_seconds=time.monotonic()-started, retry=retry))
@@ -232,7 +232,7 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
             prepared, rejected = run_seed_stage(prepare, env=sim_env, root=attempt,
                 stage="prepare", timeout=opts.seed_timeout, retries=getattr(opts, "infra_retries", 2))
             if rejected:
-                row.update(status="candidate_rejected", reason="expert_infeasible")
+                row.update(status="candidate_rejected", reason=json.loads((prepared / "rejected_seed.json").read_text())["reason"])
                 ledger.append(row)
                 atomic_json(ledger_path, ledger)
                 continue
@@ -278,6 +278,7 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
             task_name=task, task_config=task_config, jobs=accepted, expert_validated=True,
             robotwin_commit=revision, task_config_sha256=sha256_file(opts.robotwin / "task_config" / f"{task_config}.yml"),
             sampling_seed_rule="seed * 1000003 + control_step // 48"))
+    (task_root / "blocked.json").unlink(missing_ok=True)
     atomic_json(task_root / "summary.json", dict(
         evaluated=len(accepted), errors=sum(r["status"] != "evaluated" for r in ledger),
         successes=sum(bool(r["result"]["success"]) for r in ledger if r["status"] == "evaluated"),
@@ -315,7 +316,7 @@ def collect_lane(opts, pairs, lane):
                ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE="32", FACT_ROBOTWIN_EVAL_VIDEO_LOG="0")
     sim_gpu = opts.gpus[lane] if getattr(opts, "shared_gpus", False) else opts.gpus[lane + len(opts.gpus)//2]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=opts.robotwin, text=True).strip()
-    with (lane_root / "server.log").open("w") as log:
+    with (lane_root / "server.log").open("a") as log:
         server = subprocess.Popen(server_command(server_opts, lane_root), cwd=ROOT, env=env,
                                   stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
@@ -325,6 +326,7 @@ def collect_lane(opts, pairs, lane):
                 work = Queue()
                 for pair in pairs:
                     work.put(pair)
+            failures = []
             def consume():
                 while not STOP.is_set():
                     try:
@@ -334,10 +336,13 @@ def collect_lane(opts, pairs, lane):
                     try:
                         collect_task(opts, task, task_config, lane, server_opts, server,
                                      env, sim_gpu, revision)
-                    except Exception:
-                        # 一条任务失败就停止新领取；其他 lane 也会关闭自有子进程。
-                        STOP.set()
-                        raise
+                    except Exception as exc:
+                        # 单个场景的重试耗尽不拖停其他配置；它保留为待处理，不计入 SR。
+                        failures.append(exc)
+                        atomic_json(opts.output / task / task_config / 'blocked.json',
+                                    dict(error=repr(exc), lane=lane, time=time.time()))
+                        if server.poll() is not None or STOP.is_set():
+                            return
                     finally:
                         work.task_done()
             counts = getattr(opts, "workers_per_gpu", [1])
@@ -346,6 +351,8 @@ def collect_lane(opts, pairs, lane):
                 pending = [workers.submit(consume) for _ in range(count)]
                 for future in pending:
                     future.result()
+            if failures:
+                raise RuntimeError(f"Lane {lane}: {len(failures)} blocked configs; inspect blocked.json") from failures[0]
         finally:
             terminate_process_group(server, grace_seconds=10)
 

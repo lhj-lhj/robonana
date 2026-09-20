@@ -23,7 +23,7 @@
 - `collect` 默认 action-only + `scout_replay`（只保存通过精确动作回放验收的失败）；`eval` 历史默认 action-Q + `scout`。可显式用 `--inference-mode action_only --capture-mode scout_replay`，避免依赖命令名猜策略。
 - `--shared-gpus --gpus 0 1 2 3 4 5 6 7 --workers-per-gpu 2`：八份模型、最多16个独立仿真进程，推理仍 batch=1。也可逐卡设置数量；默认1，最多4。
 - 公共队列按 task/config 领取，空闲 worker 继续领取下一配置。配置内部仍按官方 seed 顺序检查；默认候选100000，只有 expert 明确不可解才跳过。随机数、物理步数、48步动作、OIDN和失败回放方式保持一致。
-- `--infra-retries 2`：超时/异常原 seed 最多重试两次，单独保留日志；耗尽后报错，不伪造失败率或换 seed。
+- `--infra-retries 2`：超时/异常原 seed 最多重试两次，单独保留日志；耗尽后该配置写 `blocked.json`，其他配置继续执行，最终退出码非零；不伪造失败率或换 seed。
 - `protocol.json` 冻结模型/seed/仿真版本；`execution.json` 记录并发。输出有独占运行锁。旧运行停止后，`--resume-interrupted` 可将未提交 attempt 移到 `interrupted/`，再重试原 seed。旧 ledger 原样保留，历史被超时跳过的 seed 不会自动补回。
 - 已收集 expert manifest、跨机器分片仍复用同一管线；固定分片暂限每卡1 worker，防止重复 seed。
 - 不引入异步视频/PNG编码、另一个模型服务实现或常驻多场景仿真框架；先用小规模实测决定并发数。

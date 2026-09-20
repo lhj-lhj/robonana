@@ -17,7 +17,8 @@ def launcher():
     return module
 
 
-def test_two_workers_share_one_model_and_claim_each_task_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failed_task", [False, True])
+def test_two_workers_share_one_model_and_claim_each_task_once(tmp_path, monkeypatch, failed_task):
     m = launcher()
     monkeypatch.setitem(sys.modules, 'robotwin_eval_pool', SimpleNamespace(server_command=lambda *a: ['fake']))
     monkeypatch.setitem(sys.modules, 'eval_robotwin_task_isolated', SimpleNamespace(terminate_process_group=lambda *a, **kw: None))
@@ -37,8 +38,15 @@ def test_two_workers_share_one_model_and_claim_each_task_once(tmp_path, monkeypa
             active += 1; peak = max(peak, active); seen.append(name)
         time.sleep(.02)
         with lock: active -= 1
+        if failed_task and name == "task0":
+            raise RuntimeError("simulator failure")
     monkeypatch.setattr(m, 'collect_task', task)
-    m.collect_lane(opts, [], 0)
+    if failed_task:
+        with pytest.raises(RuntimeError, match="blocked configs"):
+            m.collect_lane(opts, [], 0)
+        assert (tmp_path/"task0/demo_clean/blocked.json").exists()
+    else:
+        m.collect_lane(opts, [], 0)
     assert len(servers) == 1 and peak == 2
     assert len(set(seen)) == len(seen) == 12
     assert queue.unfinished_tasks == 0

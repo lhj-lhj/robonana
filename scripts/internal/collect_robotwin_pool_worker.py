@@ -100,6 +100,11 @@ def main():
                         pass
                     # 正式评测将异常交给外层重试同一个 seed；历史 harvest 保持兼容。
                     if opts.strict_infra:
+                        # 官方明确的场景不稳定异常属于 seed 不可解；其余异常不可冒充该判定。
+                        if isinstance(seed_exc, namespace['UnStableError']):
+                            (output / 'rejected_seed.json').write_text(json.dumps(
+                                dict(seed=seed, reason='expert_unstable')))
+                            continue
                         raise
                     # Skip problematic seed gracefully (e.g., UnStableError, NoneType grasp pose)
                     continue

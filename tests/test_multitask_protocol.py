@@ -194,7 +194,7 @@ def test_seed_timeout_retries_same_seed_and_locked_eval_stops(tmp_path, monkeypa
         assert command[command.index("--capture-mode")+1]=="scout"
         return 124
     monkeypatch.setattr(module,"run_bounded",error_run)
-    with pytest.raises(RuntimeError, match="infrastructure failure"):
+    with pytest.raises(RuntimeError, match="blocked configs"):
         module.collect_lane(opts,[("hanging_mug","demo_clean")],0)
     assert len(eval_commands)==3 and locked_path.read_bytes()==locked
     assert not (opts.output/"hanging_mug/demo_clean/ledger.json").exists()
