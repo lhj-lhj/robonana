@@ -18,7 +18,9 @@ def restore_config_tuples(value):
 
 def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
                              gradient_checkpointing=False, single_checkpoint_stride=1,
-                             additional_steps=0):
+                             additional_steps=0, gpu_ids=None,
+                             batch_size_per_gpu=None, accumulation_steps=None,
+                             global_batch=None):
     """中文：用当前 BF16 精度续训 Stage 1；不重置优化器或学习率。
 
     English: Resume Stage 1 using the maintained FACT BF16 precision.
@@ -55,6 +57,23 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
         allow_uncertified_pretrain=False, activation_checkpointing=False,
         checkpoint_save_optimizer=True, mixed_precision="bf16",
     )
+    if gpu_ids is not None or batch_size_per_gpu is not None or accumulation_steps is not None:
+        gpu_ids = tuple(config["launch"]["gpu_ids"] if gpu_ids is None else gpu_ids)
+        batch_size_per_gpu = (config["dataloaders"]["train"]["batch_size_per_gpu"]
+                              if batch_size_per_gpu is None else batch_size_per_gpu)
+        accumulation_steps = (config["train"]["gradient_accumulation_steps"]
+                              if accumulation_steps is None else accumulation_steps)
+        if (not gpu_ids or len(set(gpu_ids)) != len(gpu_ids)
+                or any(type(gpu) is not int or gpu < 0 for gpu in gpu_ids)
+                or type(batch_size_per_gpu) is not int or batch_size_per_gpu < 1
+                or type(accumulation_steps) is not int or accumulation_steps < 1):
+            raise ValueError("resume topology requires distinct GPUs and positive batch settings")
+        actual_global_batch = len(gpu_ids) * batch_size_per_gpu * accumulation_steps
+        if global_batch is not None and actual_global_batch != global_batch:
+            raise ValueError("resume topology does not match requested global batch")
+        config["launch"]["gpu_ids"] = list(gpu_ids)
+        config["dataloaders"]["train"]["batch_size_per_gpu"] = batch_size_per_gpu
+        config["train"]["gradient_accumulation_steps"] = accumulation_steps
     if type(additional_steps) is not int or additional_steps < 0:
         raise ValueError("additional_steps must be a nonnegative integer")
     if additional_steps:

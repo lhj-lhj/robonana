@@ -483,10 +483,13 @@ class RoboNanaTrainer(Trainer):
         if self._get_deepspeed_config().get("checkpoint", {}).get("load_universal", False):
             from robonana.training.continuation import validate_universal_adam
             counts = [validate_universal_adam(opt, self.cur_step) for opt in self.optimizers]
-            if self.target_value_ema is None or self.target_value_ema.update_count != self.cur_step:
-                raise ValueError("Universal resume requires matching Value EMA step")
-            self.logger.info("UNIVERSAL ADAM VERIFIED: step=%d groups=%s EMA=%d LR=%s",
-                             self.cur_step, counts, self.target_value_ema.update_count,
+            if self.mac_phase == "critic" and (
+                self.target_value_ema is None or self.target_value_ema.update_count != self.cur_step
+            ):
+                raise ValueError("Universal critic resume requires matching Value EMA step")
+            ema_updates = None if self.target_value_ema is None else self.target_value_ema.update_count
+            self.logger.info("UNIVERSAL ADAM VERIFIED: step=%d groups=%s EMA=%s LR=%s",
+                             self.cur_step, counts, ema_updates,
                              self._get_logged_lrs())
         start = self.kwargs.get("world_policy_scheduler_restart_step")
         if start is not None:

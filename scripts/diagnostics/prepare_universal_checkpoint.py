@@ -26,8 +26,10 @@ def main():
     if source == output or source in output.parents or output in source.parents:
         parser.error("source and output must be separate non-nested directories")
     cfg = json.loads(args.source_config.read_text())
-    for name in ("pytorch_model", "transformer", "scheduler.bin", "custom_checkpoint_0.pkl",
-                 "target_value_expert.safetensors", "value_ema_state.json"):
+    required = ["pytorch_model", "transformer", "scheduler.bin", "custom_checkpoint_0.pkl"]
+    if cfg["train"]["posttrain"]["phase"] == "critic":
+        required += ["target_value_expert.safetensors", "value_ema_state.json"]
+    for name in required:
         if not (source / name).exists():
             raise FileNotFoundError(source / name)
     output.mkdir(parents=True, exist_ok=False)

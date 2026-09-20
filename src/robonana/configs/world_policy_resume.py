@@ -30,4 +30,18 @@ config = build_world_policy_resume(
     gradient_checkpointing=os.environ.get("ROBONANA_GRADIENT_CHECKPOINTING", "0") == "1",
     single_checkpoint_stride=int(os.environ.get("ROBONANA_GRADIENT_CHECKPOINTING_SINGLE_STRIDE", "1")),
     additional_steps=int(os.environ.get("ROBONANA_ADDITIONAL_STEPS", "0")),
+    gpu_ids=tuple(int(value) for value in os.environ["ROBONANA_RESUME_GPUS"].split(","))
+        if "ROBONANA_RESUME_GPUS" in os.environ else None,
+    batch_size_per_gpu=int(os.environ["ROBONANA_RESUME_BATCH_SIZE_PER_GPU"])
+        if "ROBONANA_RESUME_BATCH_SIZE_PER_GPU" in os.environ else None,
+    accumulation_steps=int(os.environ["ROBONANA_RESUME_ACCUMULATION"])
+        if "ROBONANA_RESUME_ACCUMULATION" in os.environ else None,
+    global_batch=int(os.environ["ROBONANA_RESUME_GLOBAL_BATCH"])
+        if "ROBONANA_RESUME_GLOBAL_BATCH" in os.environ else None,
 )
+if os.environ.get("ROBONANA_UNIVERSAL_CHECKPOINT") == "1":
+    checkpoint = Path(os.environ["ROBONANA_RESUME_CHECKPOINT"]).resolve()
+    ds_config = checkpoint / "deepspeed_universal.json"
+    if not ds_config.is_file():
+        raise FileNotFoundError(ds_config)
+    config["launch"]["deepspeed_config"] = {"deepspeed_config_file": str(ds_config)}

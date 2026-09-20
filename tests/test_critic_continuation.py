@@ -51,6 +51,18 @@ def test_world_policy_resume_only_changes_execution_and_restore_paths(tmp_path, 
     assert partial["models"]["gradient_checkpointing_single_stride"] == 2
     assert partial["dataloaders"] == source["dataloaders"]
     assert partial["schedulers"] == source["schedulers"]
+    eight_gpu = build_world_policy_resume(
+        source, **kwargs, gpu_ids=tuple(range(8)), batch_size_per_gpu=32,
+        accumulation_steps=1, global_batch=256,
+    )
+    assert eight_gpu["launch"]["gpu_ids"] == list(range(8))
+    assert eight_gpu["dataloaders"]["train"]["batch_size_per_gpu"] == 32
+    assert eight_gpu["train"]["gradient_accumulation_steps"] == 1
+    with pytest.raises(ValueError, match="global batch"):
+        build_world_policy_resume(
+            source, **kwargs, gpu_ids=tuple(range(8)), batch_size_per_gpu=32,
+            accumulation_steps=1, global_batch=128,
+        )
     with pytest.raises(ValueError, match="positive integer"):
         build_world_policy_resume(source, **kwargs, single_checkpoint_stride=0)
     with pytest.raises(ValueError, match="separate"):
