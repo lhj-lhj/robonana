@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import torch
 
-from robonana.configs.robotwin_flux2_4b_mac_pilot import apply_pilot_config
 
 
 def load_probe():
@@ -13,20 +12,6 @@ def load_probe():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def test_pilot_budget_retains_all_checkpoints_and_uses_warmup():
-    base = {"train": {"posttrain": {"phase": "world_policy"}}, "schedulers": {}, "optimizers": {}}
-    world = apply_pilot_config(base)
-    assert world["train"]["max_steps"] == 5000
-    assert world["train"]["checkpoint_total_limit"] >= 6
-    assert world["train"]["early_checkpoint_steps"] == (500,)
-    assert world["schedulers"]["warmup_steps"] == 250
-    assert "max_steps" not in base["train"]
-    base["train"]["posttrain"]["phase"] = "critic"
-    critic = apply_pilot_config(base)
-    assert critic["train"]["max_steps"] == 500
-    assert critic["optimizers"]["lr"] == 1e-5
 
 
 def test_probe_selects_legal_starts_including_last_window():

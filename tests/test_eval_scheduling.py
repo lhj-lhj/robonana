@@ -24,14 +24,14 @@ def test_two_workers_share_one_model_and_claim_each_task_once(tmp_path, monkeypa
     lane_root.mkdir()
     (lane_root / "batch_metrics.jsonl").write_text("old telemetry")
     monkeypatch.setitem(sys.modules, 'robotwin_eval_pool', SimpleNamespace(server_command=lambda *a: ['fake']))
-    monkeypatch.setitem(sys.modules, 'eval_robotwin_task_isolated', SimpleNamespace(terminate_process_group=lambda *a, **kw: None))
+    monkeypatch.setitem(sys.modules, 'robonana.sim.processes', SimpleNamespace(terminate_process_group=lambda *a, **kw: None))
     servers = []
     monkeypatch.setattr(m.subprocess, 'Popen', lambda *a, **kw: servers.append(a) or SimpleNamespace(poll=lambda:None))
     monkeypatch.setattr(m.subprocess, 'check_output', lambda *a, **kw: 'revision')
     queue = Queue()
     for i in range(12): queue.put((f'task{i}', 'demo_clean'))
     opts = SimpleNamespace(output=tmp_path, gpus=[0], port=9000, command='collect', robotwin=tmp_path,
-                           workers_per_gpu=[2], task_queue=queue, shared_gpus=True)
+                           workers_per_gpu=[2], task_queue=queue, shared_gpus=True, inference_mode="action_only", candidate_batch_size=32)
     active, peak, seen = 0, 0, []
     lock = Lock()
     def task(opts, name, cfg, lane, server_opts, *rest):

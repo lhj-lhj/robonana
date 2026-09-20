@@ -5,102 +5,6 @@ import os
 import pytest
 
 
-@pytest.mark.parametrize("phase,steps,rates,keeps", [
-    ("pretrain",120000,(2e-5,1e-4),[10000,30000,60000,120000]),
-    ("stage1",60000,(2e-5,2e-5),[10000,30000,60000]),
-    ("stage2",20000,(1e-4,1e-4),[10000,20000]),
-])
-def test_protocol_config(monkeypatch, phase, steps, rates, keeps):
-    monkeypatch.setenv("ROBONANA_PROTOCOL_PHASE", "pretrain")
-    monkeypatch.setenv("ROBONANA_MAC_PRETRAIN_CHECKPOINT", "/explicit/source.bin")
-    monkeypatch.setenv("ROBONANA_MAC_PRETRAIN_CONFIG", "/explicit/config.json")
-    monkeypatch.setenv("ROBONANA_REPLAY_ROOT", "/explicit/failures")
-    from robonana.configs.robotwin_flux2 import config as base
-    from robonana.configs.multitask_mbrl import build_protocol_config
-    config = build_protocol_config(base, phase)
-    train, loader = config["train"], config["dataloaders"]["train"]
-    assert config["launch"]["gpu_ids"] == list(range(8))
-    assert loader["batch_size_per_gpu"] * 8 * train["gradient_accumulation_steps"] == 128
-    assert train["max_steps"] == config["schedulers"]["decay_steps"] == steps
-    assert (config["optimizers"]["lr"],config["optimizers"]["robot_lr"]) == rates
-    assert train["checkpoint_keeps"] == keeps
-    assert train["checkpoint_save_optimizer"] and not train["resume"]
-    assert train["mixed_precision"] == "bf16"
-    assert train["posttrain"]["ema"]["target"] == "value_expert_only"
-    if phase == "pretrain":
-        assert loader["data_or_config"]["task_globs"] == ("Clean/*", "Randomized/*")
-        assert config["models"]["initialization"] == "flux_backbone"
-    else:
-        from robonana.data.robotwin_hdf5 import RoboTwinHDF5Dataset
-        from robonana.data.robotwin_lerobot import RoboTwinLeRobotDataset
-        classes = {c.__name__:c for c in (RoboTwinHDF5Dataset,RoboTwinLeRobotDataset)}
-        for pool in loader["data_or_config"]:
-            classes[pool["_class_name"]].load(pool).close()
-        assert loader["sampler"]["pool_weights"] == dict(original_success=.5, collected_success_replay=0.,
-                                                          historical_failure_replay=0., latest_failure=.5)
-    assert base["dataloaders"]["train"]["data_or_config"]["task_globs"] == ("Clean/hanging_mug",)
-
-
-def test_bounded_checkpoint_probe(monkeypatch):
-    from robonana.configs.multitask_mbrl import build_protocol_config
-    from robonana.configs.robotwin_flux2 import config as base
-    monkeypatch.setenv("ROBONANA_PROTOCOL_SMOKE_SAVE", "1")
-    monkeypatch.delenv("ROBONANA_PROTOCOL_SMOKE_STEPS", raising=False)
-    with pytest.raises(ValueError, match="bounded smoke budget"):
-        build_protocol_config(base, "pretrain")
-    monkeypatch.setenv("ROBONANA_PROTOCOL_SMOKE_STEPS", "3")
-    config = build_protocol_config(base, "pretrain")
-    assert config["train"]["max_steps"] == 3
-    assert not config["train"]["disable_checkpointing"]
-    assert config["train"]["checkpoint_interval"] == 1
-    assert config["train"]["checkpoint_save_optimizer"]
-    assert config["train"]["checkpoint_keeps"] == []
-
-
-def test_two_world_arms_keep_the_same_training_budget_and_data(monkeypatch):
-    from robonana.configs.multitask_mbrl import build_protocol_config
-    from robonana.configs.robotwin_flux2 import config as base
-    monkeypatch.setenv("ROBONANA_WORLD_CONDITIONING", "fixed48")
-    a = build_protocol_config(base, "pretrain")
-    monkeypatch.setenv("ROBONANA_WORLD_CONDITIONING", "rope_prefix")
-    b = build_protocol_config(base, "pretrain")
-    assert a["optimizers"] == b["optimizers"] and a["schedulers"] == b["schedulers"]
-    assert a["models"]["checkpoint"] == b["models"]["checkpoint"]
-    assert a["train"]["max_steps"] == b["train"]["max_steps"] == 120000
-    for cfg, mode in ((a, "fixed48"), (b, "rope_prefix")):
-        assert cfg["models"]["world_conditioning"] == mode
-        loader = cfg["dataloaders"]["train"]
-        assert loader["data_or_config"]["world_conditioning"] == mode
-        assert loader["data_or_config"]["action_chunk"] == 48
-        assert loader["batch_size_per_gpu"] == 16
-    assert a["dataloaders"]["train"]["data_or_config"]["task_globs"] == b["dataloaders"]["train"]["data_or_config"]["task_globs"]
-
-
-@pytest.mark.parametrize("mode", ["fixed48", "rope_prefix"])
-def test_world_ablation_cli_only_prints_plan(tmp_path, mode):
-    import json
-    import subprocess
-    import sys
-    from pathlib import Path
-    entry = Path(__file__).resolve().parents[1] / "scripts/run_multitask_mbrl.py"
-    output = tmp_path / mode
-    result = subprocess.run([sys.executable, str(entry), "train", "--phase", "pretrain",
-        "--world-conditioning", mode, "--output", str(output)], capture_output=True, text=True, check=True)
-    config = json.loads(result.stdout)
-    assert config["models"]["world_conditioning"] == mode
-    assert config["dataloaders"]["train"]["data_or_config"]["world_conditioning"] == mode
-    assert config["train"]["seed"] == 6666
-    assert not output.exists()
-
-
-def test_missing_source_rejected(monkeypatch):
-    from robonana.configs.multitask_mbrl import build_protocol_config
-    from robonana.configs.robotwin_flux2 import config as base
-    monkeypatch.delenv("ROBONANA_MAC_PRETRAIN_CHECKPOINT", raising=False)
-    with pytest.raises(ValueError, match="explicit source"):
-        build_protocol_config(base,"stage1")
-
-
 def test_original_flux_loading(tmp_path):
     import torch
     from safetensors.torch import save_file
@@ -153,7 +57,7 @@ def test_seed_timeout_retries_same_seed_and_locked_eval_stops(tmp_path, monkeypa
     spec.loader.exec_module(module)
     monkeypatch.setitem(sys.modules,"robotwin_eval_pool",
                         SimpleNamespace(server_command=lambda *args:["fake-server"]))
-    monkeypatch.setitem(sys.modules,"eval_robotwin_task_isolated",
+    monkeypatch.setitem(sys.modules,"robonana.sim.processes",
                         SimpleNamespace(terminate_process_group=lambda *args,**kw:None))
     monkeypatch.setattr(module.subprocess,"Popen",lambda *args,**kw:SimpleNamespace(poll=lambda:None))
     monkeypatch.setattr(module.subprocess,"check_output",lambda *args,**kw:"revision\n")
@@ -163,7 +67,8 @@ def test_seed_timeout_retries_same_seed_and_locked_eval_stops(tmp_path, monkeypa
     opts=SimpleNamespace(command="collect",output=tmp_path/"collect",robotwin=simulator,
         checkpoint=tmp_path/"model.bin",model_config=tmp_path/"model.json",gpus=[0,1],port=8400,
         episodes=1,seed_timeout=60,seed_start=300000,candidate_multiplier=20,sim_python=Path(sys.executable),
-        initial_dataset=tmp_path/"initial",manifests=None)
+        initial_dataset=tmp_path/"initial",manifests=None, capture_mode="scout_replay", inference_mode="action_only",
+        candidate_batch_size=32, flux_checkpoint_dir=tmp_path, stats_path=tmp_path/"stats.json")
     prepared=[]
     def fake_run(command,**kwargs):
         if "--prepare-seeds" in command:
@@ -185,6 +90,7 @@ def test_seed_timeout_retries_same_seed_and_locked_eval_stops(tmp_path, monkeypa
     assert prepared==[300000,300000]
     assert json.loads(locked)["jobs"][0]["seed"]==300000
     opts.command="eval"
+    opts.capture_mode="scout"
     opts.manifests=opts.output
     opts.output=tmp_path/"eval"
     eval_commands=[]
@@ -212,7 +118,7 @@ def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monk
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.setitem(sys.modules, "robotwin_eval_pool", SimpleNamespace(server_command=lambda *a: ["server"]))
-    monkeypatch.setitem(sys.modules, "eval_robotwin_task_isolated", SimpleNamespace(terminate_process_group=lambda *a, **k: None))
+    monkeypatch.setitem(sys.modules, "robonana.sim.processes", SimpleNamespace(terminate_process_group=lambda *a, **k: None))
     monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: SimpleNamespace(poll=lambda: None))
     monkeypatch.setattr(module.subprocess, "check_output", lambda *a, **k: "revision\n")
     task, cfg = "place_dual_shoes", "demo_clean"
@@ -226,7 +132,8 @@ def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monk
         checkpoint=tmp_path/"model.bin", model_config=tmp_path/"config.json", gpus=list(range(8)), port=8400,
         episodes=100, seed_timeout=60, seed_start=300000, candidate_multiplier=20, sim_python=Path(sys.executable),
         initial_dataset=tmp_path/"initial", manifests=None, expert_jobs={f"{task}__{cfg}": loaded},
-        shared_gpus=True, shard_count=8, shard_offset=0)
+        shared_gpus=True, shard_count=8, shard_offset=0, capture_mode="scout_replay", inference_mode="action_only",
+        candidate_batch_size=32, flux_checkpoint_dir=tmp_path, stats_path=tmp_path/"stats.json")
     (opts.robotwin / "task_config").mkdir(parents=True)
     (opts.robotwin / f"task_config/{cfg}.yml").write_text("config")
     def rollout(command, **kwargs):
@@ -262,29 +169,3 @@ def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monk
         module.load_expert_jobs(cache, task, cfg, 2)
 
 
-@pytest.mark.parametrize("gpus", ["0,1,2,3", "4,5,6,7"])
-def test_four_gpu_protocol_preserves_global_batch(monkeypatch, gpus):
-    from robonana.configs.robotwin_flux2 import config as base
-    from robonana.configs.multitask_mbrl import build_protocol_config
-    monkeypatch.setenv("ROBONANA_PROTOCOL_GPUS", gpus)
-    monkeypatch.setenv("ROBONANA_PROTOCOL_ACCUMULATION", "2")
-    monkeypatch.setenv("ROBONANA_GRADIENT_CHECKPOINTING", "1")
-    config = build_protocol_config(base, "pretrain")
-    assert config["launch"]["gpu_ids"] == list(map(int, gpus.split(",")))
-    assert config["dataloaders"]["train"]["batch_size_per_gpu"] == 16
-    assert config["train"]["gradient_accumulation_steps"] == 2
-    assert config["models"]["gradient_checkpointing"]
-    monkeypatch.setenv("ROBONANA_PROTOCOL_ACCUMULATION", "1")
-    with pytest.raises(ValueError, match="128"):
-        build_protocol_config(base, "pretrain")
-
-
-def test_four_gpu_batch256(monkeypatch):
-    from robonana.configs.robotwin_flux2 import config as base
-    from robonana.configs.multitask_mbrl import build_protocol_config
-    for key, value in {"GPUS":"0,1,2,3", "MICROBATCH":"32", "ACCUMULATION":"2", "GLOBAL_BATCH":"256"}.items():
-        monkeypatch.setenv("ROBONANA_PROTOCOL_"+key,value)
-    c=build_protocol_config(base,"pretrain")
-    assert c["dataloaders"]["train"]["batch_size_per_gpu"] == 32
-    assert c["train"]["gradient_accumulation_steps"] == 2
-    assert c["train"]["max_steps"] == 120000

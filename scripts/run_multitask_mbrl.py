@@ -17,7 +17,9 @@ import threading
 from queue import Queue, Empty
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts/diagnostics"), str(ROOT / "scripts/internal")]
+SOURCES = [str(ROOT / name) for name in ('src','third_party/FACT','third_party/flux2/src','third_party/flux2_official/src')]
+sys.path[:0] = SOURCES + [str(ROOT / 'scripts/internal')]
+os.environ['PYTHONPATH'] = os.pathsep.join(SOURCES) + os.pathsep + os.environ.get('PYTHONPATH','')
 STOP = threading.Event()
 
 
@@ -47,7 +49,7 @@ def run_bounded(command, *, env, log, timeout):
     English: Reuse the isolated evaluator's process-group cleanup, including SIGTERM
     grace for the collector to close its separately-sessioned children.
     """
-    from eval_robotwin_task_isolated import terminate_process_group
+    from robonana.sim.processes import terminate_process_group
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("w") as handle:
         child = subprocess.Popen(command, cwd=ROOT, env=env, stdout=handle,
@@ -90,52 +92,34 @@ def run_seed_stage(command, *, env, root, stage, timeout, retries):
 
 
 def training(opts):
-    # FACT config entry reuses the existing loader, optimizer, scheduler and trainer.
-    os.environ["ROBONANA_PROTOCOL_PHASE"] = opts.phase
-    os.environ["ROBONANA_PROTOCOL_ROOT"] = str(opts.output.resolve())
-    os.environ["ROBONANA_WORLD_CONDITIONING"] = opts.world_conditioning
-    for flag, variable in (("checkpoint", "ROBONANA_MAC_PRETRAIN_CHECKPOINT"),
-                           ("model_config", "ROBONANA_MAC_PRETRAIN_CONFIG"),
-                           ("replay_root", "ROBONANA_REPLAY_ROOT")):
-        if value := getattr(opts, flag):
-            os.environ[variable] = str(value.resolve())
-    os.environ["ROBONANA_GRADIENT_CHECKPOINTING"] = "1" if opts.gradient_checkpointing else "0"
-    if opts.smoke_steps:
-        os.environ["ROBONANA_PROTOCOL_SMOKE_STEPS"] = str(opts.smoke_steps)
-    else:
-        os.environ.pop("ROBONANA_PROTOCOL_SMOKE_STEPS", None)
-    if opts.smoke_task_globs:
-        os.environ["ROBONANA_PROTOCOL_SMOKE_TASK_GLOBS"] = opts.smoke_task_globs
-    else:
-        os.environ.pop("ROBONANA_PROTOCOL_SMOKE_TASK_GLOBS", None)
-    os.environ["ROBONANA_PROTOCOL_SMOKE_SAVE"] = "1" if opts.smoke_save else "0"
-    from robonana.configs.multitask_mbrl import config, MILESTONES
-    if opts.command == "aliases":
-        # No duplicate multi-GB weights. Resolve only actual complete inference exports.
-        from robonana.inference_contract import read_contract
-        for step in MILESTONES[opts.phase]:
-            matches = list((Path(config["project_dir"]) / "models").glob(f"checkpoint_*_step_{step}"))
-            if len(matches) != 1:
-                raise FileNotFoundError(f"Expected exactly one complete milestone {step}: {matches}")
-            checkpoint = matches[0].resolve()
-            contract = read_contract(checkpoint / "transformer/diffusion_pytorch_model.bin")
-            if contract["step"] != step:
-                raise ValueError("Milestone contract step mismatch")
-            name = f"base_ckpt_{step//1000}k" if opts.phase == "pretrain" else f"{opts.phase}_{step//1000}k_ckpt_0"
-            destination = opts.output / name
-            if opts.execute and not destination.exists():
-                destination.symlink_to(checkpoint, target_is_directory=True)
-            print(f"{destination} -> {checkpoint}")
-        if opts.phase == "stage2" and opts.execute:
-            destination = opts.output / "loop_ckpt_0"
-            if not destination.exists():
-                destination.symlink_to(checkpoint, target_is_directory=True)
+    from dataclasses import asdict
+    from robonana.configs.training import build_training_config
+    from robonana.configs.resume import build_resume_config
+    config = build_resume_config(opts.options) if opts.command == 'resume' else build_training_config(opts.options)
+    batch = dict(gpus=len(config['launch']['gpu_ids']), microbatch=config['dataloaders']['train']['batch_size_per_gpu'],
+                 accumulation_steps=config['train']['gradient_accumulation_steps'])
+    batch['global_batch'] = batch['gpus'] * batch['microbatch'] * batch['accumulation_steps']
+    # 用户看到的和实际传给 FACT 的是同一份 resolved config，不再二次 import 覆写。
+    print(json.dumps(dict(requested=asdict(opts.options), batch=batch, resolved=config), indent=2, default=str))
+    if not opts.execute and opts.command != 'audit':
         return
-    print(json.dumps(config, indent=2, default=str))
-    if not opts.execute and opts.command != "audit":
+    if opts.command != 'resume':
+        preflight_training(opts, config)
+    if opts.command == 'audit':
         return
-    # 中文：在占GPU前复用真实数据类和cache契约检查，不只是检查配置字典。
-    # English: Fail on missing/full-data caches before loading eight FLUX replicas.
+    project = Path(config['project_dir'])
+    if project.exists():
+        raise FileExistsError(f'Use a new output directory: {project}')
+    project.mkdir(parents=True)
+    atomic_json(project/'requested.json', json.loads(json.dumps(asdict(opts.options), default=str)))
+    from fact_train import Config, launch_from_config
+    # FACT 原生支持 JSON；训练进程直接读取本次快照，不需要配置模块缓存。
+    resolved = project/'launch_config.json'
+    Config(config).save(str(resolved))
+    launch_from_config(str(resolved))
+
+
+def preflight_training(opts, config):
     from robonana.data.robotwin_hdf5 import RoboTwinHDF5Dataset, RoboTwinPosttrainSampler
     from robonana.data.robotwin_lerobot import RoboTwinLeRobotDataset
     from robonana.image_pipeline import validate_training_image_contracts, validate_episode_caches
@@ -148,12 +132,12 @@ def training(opts):
             child = classes[spec["_class_name"]].load(spec)
             children.append(child)
             child._ensure_index()
-        if not opts.smoke_steps and (len(children[0].records) != 27500 or
-                                    len({r.task_name for r in children[0].records}) != 50):
-            raise ValueError("Full protocol requires exactly 27,500 original episodes across 50 tasks")
+        if not opts.smoke_steps and ((opts.expected_original_episodes is not None and len(children[0].records) != opts.expected_original_episodes) or
+                                    (opts.expected_tasks is not None and len({r.task_name for r in children[0].records}) != opts.expected_tasks)):
+            raise ValueError(f"Dataset does not match explicit expected_original_episodes={opts.expected_original_episodes}, expected_tasks={opts.expected_tasks}")
         dataset = ConcatDataset(children) if len(children) > 1 else children[0]
         if len(children) > 1:
-            RoboTwinPosttrainSampler(dataset, batch_size=128, pool_weights=
+            RoboTwinPosttrainSampler(dataset, batch_size=opts.microbatch, pool_weights=
                 config["dataloaders"]["train"]["sampler"]["pool_weights"])
         validate_training_image_contracts(dataset, config["models"]["checkpoint_dir"])
         summaries = [validate_episode_caches(child.records) for child in children]
@@ -161,17 +145,6 @@ def training(opts):
     finally:
         for child in children:
             child.close()
-    if opts.command == "audit":
-        return
-    project = Path(config["project_dir"])
-    if project.exists():
-        raise FileExistsError(f"Fresh-phase output exists; no implicit overwrite/resume: {project}")
-    project.mkdir(parents=True)
-    atomic_json(project / "protocol_config.json", config)
-    env = dict(os.environ, ROBONANA_PROJECT_DIR=str(project), ROBONANA_PYTHON=sys.executable)
-    env.setdefault("NCCL_NVLS_ENABLE", "0")  # Preserve NVLink P2P; do not set NCCL_P2P_DISABLE.
-    subprocess.run(["bash", "scripts/run_robotwin_train.sh", "--config",
-                    "robonana.configs.multitask_mbrl.config"], cwd=ROOT, env=env, check=True)
 
 
 def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gpu, revision):
@@ -246,10 +219,11 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
                    "--server-gpu", str(opts.gpus[lane]), "--sim-python", str(opts.sim_python),
                    "--robotwin", str(opts.robotwin), "--checkpoint", str(opts.checkpoint),
                    "--model-config", str(opts.model_config), "--initial-dataset", str(opts.initial_dataset),
+                   "--flux-checkpoint-dir", str(opts.flux_checkpoint_dir), "--stats-path", str(opts.stats_path),
                    "--output", str(attempt / "rollout"), "--port", str(server_opts.port),
                    "--external-server", "--inference-mode", server_opts.inference_mode,
-                   "--capture-mode", getattr(opts, "capture_mode", None) or ("scout_replay" if opts.command == "collect" else "scout"),
-                   "--candidate-batch-size", "32", "--timeout-seconds",
+                   "--capture-mode", opts.capture_mode,
+                   "--candidate-batch-size", str(opts.candidate_batch_size), "--timeout-seconds",
                    str(opts.seed_timeout)]
         rollout, _ = run_seed_stage(command, env=env, root=attempt, stage="rollout",
             timeout=opts.seed_timeout + 60, retries=getattr(opts, "infra_retries", 2))
@@ -259,7 +233,7 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
             raise ValueError(f"Rollout result does not match assigned seed {seed}: {rollout}")
         row.update(status="evaluated", result=result["episodes"][0])
         accepted.append(job)
-        if opts.command == "collect" and not row["result"]["success"] and row["result"].get("replay_verified"):
+        if opts.capture_mode == "scout_replay" and not row["result"]["success"] and row["result"].get("replay_verified"):
             # Publish an accepted-only dataset view. Rejected attempts and
             # orphaned artifacts can never leak into Stage1 via a broad glob.
             source = Path(row["result"]["hdf5"]).parent.parent.resolve()
@@ -304,16 +278,16 @@ def export_dataset(opts, pairs):
 
 def collect_lane(opts, pairs, lane):
     from robotwin_eval_pool import server_command
-    from eval_robotwin_task_isolated import terminate_process_group
+    from robonana.sim.processes import terminate_process_group
     from robonana.inference_contract import sha256_file
     server_opts = copy(opts)
     server_opts.port = opts.port + lane
-    server_opts.inference_mode = getattr(opts, "inference_mode", None) or ("action_only" if opts.command == "collect" else "action_q_rejection")
+    server_opts.inference_mode = opts.inference_mode
     server_opts.inference_batch_size, server_opts.batch_wait_ms = 1, 0
     lane_root = opts.output / f"lane_{lane}"
     lane_root.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, PYTHONUNBUFFERED="1", CUDA_VISIBLE_DEVICES=str(opts.gpus[lane]),
-               ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE="32", FACT_ROBOTWIN_EVAL_VIDEO_LOG="0")
+               ROBONANA_REJECTION_CANDIDATE_BATCH_SIZE=str(opts.candidate_batch_size), FACT_ROBOTWIN_EVAL_VIDEO_LOG="0")
     sim_gpu = opts.gpus[lane] if getattr(opts, "shared_gpus", False) else opts.gpus[lane + len(opts.gpus)//2]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=opts.robotwin, text=True).strip()
     # 遥测组件拒绝覆盖文件；每次重启归档旧遥测，保留历史而不阻断模型启动。
@@ -488,69 +462,33 @@ def _collection(opts):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("audit", "train", "aliases", "collect", "eval"))
-    parser.add_argument("--phase", choices=("pretrain", "stage1", "stage2"), default="pretrain")
-    parser.add_argument("--world-conditioning", choices=("fixed48", "rope_prefix"), default="fixed48",
-                        help="World training: fixed48 bidirectional or random h/RoPE with causal clean-action prefix")
-    parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--checkpoint", type=Path)
-    parser.add_argument("--model-config", type=Path)
-    parser.add_argument("--replay-root", type=Path)
-    gc = parser.add_mutually_exclusive_group()
-    gc.add_argument("--no-gradient-checkpointing", action="store_true", help="Verified protocol default")
-    gc.add_argument("--gradient-checkpointing", action="store_true", help="Explicit fallback to existing block checkpoint policy")
-    parser.add_argument("--smoke-steps", type=int, default=0, help="Bounded 1..10 update probe")
-    parser.add_argument("--smoke-save", action="store_true", help="Save each bounded smoke update, including optimizer, for restore validation")
-    parser.add_argument("--smoke-task-globs", help="Explicit certified-data subset for memory probes only")
-    parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--robotwin", type=Path, default=Path("/workspace/hongjia/RoboTwin"))
-    parser.add_argument("--sim-python", type=Path, default=Path("/data3/hongjia/venvs/robotwin-sapien303/bin/python"))
-    parser.add_argument("--initial-dataset", type=Path, default=Path("/workspace/datasets/fact-robotwin-v2/RoboTwin"))
-    parser.add_argument("--gpus", type=int, nargs="+", default=list(range(8)))
-    parser.add_argument("--tasks", nargs="+", help="Bounded smoke subset only; omit for full 50")
-    parser.add_argument("--task-configs", nargs="+", choices=("demo_clean", "demo_randomized"),
-                        default=["demo_clean", "demo_randomized"])
-    parser.add_argument("--workers-per-gpu", type=int, nargs="+", default=[1],
-                        help="Independent simulators sharing each policy service; one value or one per lane")
-    parser.add_argument("--inference-mode", choices=("action_only", "action_q_rejection"),
-                        help="Explicit policy mode; historical collect/eval defaults remain compatible")
-    parser.add_argument("--capture-mode", choices=("scout", "scout_replay", "full"),
-                        help="scout=SR only; scout_replay=save verified failures; full=save every episode")
-    parser.add_argument("--resume-interrupted", action="store_true",
-                        help="Archive incomplete attempts and retry the same seed; requires exclusive run lock")
-    parser.add_argument("--export-dataset", type=Path, help="Full-capture compatibility view for rollout preparation")
-    parser.add_argument("--infra-retries", type=int, default=2,
-                        help="Retry the same seed on infrastructure errors; never silently replace it")
-    parser.add_argument("--episodes", type=int, default=100, help="Per task AND per clean/random config")
-    parser.add_argument("--seed-start", type=int, default=100000,
-                        help="First official expert-check candidate (RoboTwin seed: 0 starts at 100000)")
-    parser.add_argument("--seed-timeout", type=int, default=1200)
-    parser.add_argument("--candidate-multiplier", type=int, default=20, help="Maximum candidates per requested episode; lower for probes")
-    parser.add_argument("--port", type=int, default=8400)
-    parser.add_argument("--manifests", type=Path)
-    parser.add_argument("--expert-seed-cache", type=Path, help="Use harvested task__config/expert_manifest.json; skip expert preparation")
-    parser.add_argument("--shared-gpus", action="store_true",
-                        help="One persistent policy+sim lane per GPU; supports inline official expert checks or frozen jobs")
-    parser.add_argument("--shard-count", type=int, help="Global seed shards across hosts; defaults to local lane count")
-    parser.add_argument("--shard-offset", type=int, default=0, help="First shard owned by this host")
-    parser.add_argument("--ready-only", action="store_true", help="Run only configs with a completed expert seed manifest")
-    parser.add_argument("--allow-partial-expert-seeds", action="store_true", help="Bounded probes only: evaluate available seeds and report the actual denominator")
-    opts = parser.parse_args()
-    sources = [str(ROOT / path) for path in
-        ("src", "third_party/FACT", "third_party/flux2/src", "third_party/flux2_official/src")]
-    sys.path[:0] = sources
-    os.environ["PYTHONPATH"] = os.pathsep.join(sources) + os.pathsep + os.environ.get("PYTHONPATH", "")
-    opts.output = opts.output.resolve()
-    if opts.command in ("collect", "eval"):
+    from dataclasses import asdict
+    from robonana.configs.schema import load_options
+    from robonana.configs.training import TrainOptions
+    from robonana.configs.evaluation import EvalOptions
+    from robonana.configs.resume import ResumeOptions
+    parser = argparse.ArgumentParser(description="One explicit JSON configuration; no legacy environment overrides")
+    parser.add_argument('command', choices=('train','resume','audit','eval'))
+    parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--execute', action='store_true', help='Dry-run unless explicitly requested')
+    args = parser.parse_args()
+    legacy = sorted(key for key in os.environ if key.startswith('ROBONANA_'))
+    if legacy:
+        parser.error(f'Legacy experiment environment overrides are unsupported; unset {legacy} and use --config')
+    cls = EvalOptions if args.command=='eval' else ResumeOptions if args.command=='resume' else TrainOptions
+    try:
+        options = load_options(cls, args.config)
+    except (ValueError, TypeError) as exc:
+        parser.error(str(exc))
+    opts = argparse.Namespace(**asdict(options), command=args.command, execute=args.execute, options=options)
+    if args.command=='eval':
+        print(json.dumps(dict(requested=asdict(options), inference_batch_size=1), indent=2, default=str))
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, lambda *_args: STOP.set())
-        if not opts.checkpoint or not opts.model_config:
-            parser.error("Collection/eval requires checkpoint and model-config")
         collection(opts)
     else:
         training(opts)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

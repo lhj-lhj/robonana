@@ -25,6 +25,7 @@ from accelerate import Accelerator
 from accelerate.utils import set_seed
 from torch.utils.data import ConcatDataset, DataLoader
 
+from robonana.normalization import A_STATS_PATH
 from robonana.data.robotwin_hdf5 import RoboTwinHDF5Dataset, RoboTwinPosttrainSampler
 from robonana.data.robotwin_lerobot import RoboTwinLeRobotDataset
 from robonana.models.flux2_action_student import build_action_student
@@ -104,11 +105,12 @@ def main():
         checkpoint=args.output/f'step_{args.steps:06d}'/'model.safetensors'
         for split,jobs in [('fixed100',args.eval_jobs),('heldout20',args.heldout_jobs)]:
             if jobs is None:continue
-            cmd=[sys.executable,str(root/'scripts/diagnostics/benchmark_robotwin_collection_pool.py'),
+            cmd=[sys.executable,str(root/'scripts/internal/robotwin_eval_pool.py'),
                  '--jobs-json',str(jobs),'--sim-gpus','7','7','--server-gpu','6',
                  '--sim-python',args.sim_python,'--robotwin',args.robotwin,
                  '--checkpoint',str(args.teacher),'--model-config',str(args.config),
-                 '--initial-dataset',args.initial_dataset,'--output',str(args.output/f'eval_{split}'),
+                 '--flux-checkpoint-dir',str(json.loads(Path(args.config).read_text())['models']['checkpoint_dir']),
+                 '--stats-path',str(A_STATS_PATH),'--initial-dataset',args.initial_dataset,'--output',str(args.output/f'eval_{split}'),
                  '--inference-mode','action_only','--action-student',str(checkpoint),
                  '--inference-batch-size','2','--batch-wait-ms','10','--port','8494',
                  '--timeout-seconds','43200']

@@ -18,6 +18,8 @@ from flux2.model import Flux2Params
 
 # Imports register the raw HDF5 dataset and sampler with FACT.
 from robonana.data import robotwin_hdf5 as _robotwin_hdf5  # noqa: F401
+# JSON launch 不再 import 配置模块；两种数据源都在实际 trainer 边界注册。
+from robonana.data import robotwin_lerobot as _robotwin_lerobot  # noqa: F401
 from robonana.models.pretrained import (
     configure_trainable_parameters,
     load_flux2_fact_trained_checkpoint,

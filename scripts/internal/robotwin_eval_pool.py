@@ -19,7 +19,7 @@ from robonana.sim.collection_pool import EpisodeQueue, validate_jobs
 from robonana.normalization import A_STATS_PATH
 from robonana.inference_contract import sha256_file
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "internal"))
-from eval_robotwin_task_isolated import terminate_process_group
+from robonana.sim.processes import terminate_process_group
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -28,8 +28,8 @@ def server_command(opts, output):
     """中文：正式多任务入口复用同一服务参数。 English: Shared server argv, no second inference path."""
     return [sys.executable, str(ROOT / "scripts/services/inference_server_robotwin_batched.py"),
         "--checkpoint", str(opts.checkpoint.resolve()), "--model-config", str(opts.model_config.resolve()),
-        "--flux-checkpoint-dir", str(os.environ.get("ROBONANA_FLUX_CHECKPOINT_DIR") or ROOT / "checkpoints/FLUX.2-klein-base-4B"),
-        "--stats-path", str(os.environ.get("ROBONANA_STATS_PATH") or A_STATS_PATH),
+        "--flux-checkpoint-dir", str(opts.flux_checkpoint_dir),
+        "--stats-path", str(opts.stats_path),
         "--model-device", "cuda:0", "--vae-device", "cuda:0", "--text-encoder-device", "cuda:0",
         "--inference-mode", opts.inference_mode, "--port", str(opts.port),
         "--max-batch-size", str(opts.inference_batch_size),
@@ -48,6 +48,8 @@ def main():
     parser.add_argument("--robotwin", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--model-config", type=Path, required=True)
+    parser.add_argument("--flux-checkpoint-dir", type=Path, required=True)
+    parser.add_argument("--stats-path", type=Path, required=True)
     parser.add_argument("--initial-dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8194)

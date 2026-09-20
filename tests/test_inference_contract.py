@@ -5,15 +5,14 @@ from pathlib import Path
 import pytest
 
 from robonana import inference_contract as contracts
-from robonana.configs.posttrain_config import apply_mac_posttrain_config
+from robonana.configs.training import TrainOptions, build_training_config
+from robonana.normalization import A_STATS_PATH
 
 
-def _posttrain(tmp_path):
-    base = {"project_dir": str(tmp_path), "models": {},
-            "dataloaders": {"train": {"data_or_config": {
-                "_class_name": "RoboTwinLeRobotDataset", "data_path": str(tmp_path)}, "sampler": {}}},
-            "train": {"loss_weights": {}, "tracker_init_kwargs": {"wandb": {}}}}
-    return apply_mac_posttrain_config(base)["train"]["posttrain"]
+def _posttrain(tmp_path, **kwargs):
+    return build_training_config(TrainOptions(output=tmp_path, dataset_root=tmp_path,
+        flux_checkpoint_dir=tmp_path, stats_path=A_STATS_PATH, max_steps=120000, lr=2e-5, robot_lr=1e-4,
+        **kwargs))['train']['posttrain']
 
 
 def _saved(tmp_path):
@@ -27,11 +26,7 @@ def _saved(tmp_path):
 
 
 def test_sampling_uses_saved_nondefault_values_and_separate_candidate_budgets(monkeypatch, tmp_path):
-    monkeypatch.setenv("ROBONANA_MAC_SAMPLING_STEPS", "7")
-    monkeypatch.setenv("ROBONANA_MAC_FLOW_SHIFT", "2.5")
-    monkeypatch.setenv("ROBONANA_MAC_TRAIN_CANDIDATES", "4")
-    monkeypatch.setenv("ROBONANA_MAC_EVAL_CANDIDATES", "12")
-    post = _posttrain(tmp_path)
+    post = _posttrain(tmp_path, sampling_steps=7, flow_shift=2.5, train_candidates=4, eval_candidates=12)
     result = contracts.sampling_contract(post)
     assert result["num_inference_steps"] == 7
     assert result["flow_shift"] == 2.5

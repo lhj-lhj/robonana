@@ -29,6 +29,8 @@ def main():
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--robotwin',type=Path,required=True)
     p.add_argument('--sim-python',type=Path,required=True)
+    p.add_argument('--flux-checkpoint-dir',type=Path,required=True)
+    p.add_argument('--stats-path',type=Path,required=True)
     p.add_argument('--initial-dataset',type=Path,required=True)
     p.add_argument('--server-gpu',type=int,default=4)
     p.add_argument('--sim-gpu',type=int,default=5)
@@ -70,10 +72,11 @@ def main():
     for split,manifest in manifests.items():
         for name,ck,config in evaluation_policies(args):
             output=args.output/f'{split}_{name}'
-            cmd=[sys.executable,str(root/'scripts/diagnostics/benchmark_robotwin_collection_pool.py'),
+            cmd=[sys.executable,str(root/'scripts/internal/robotwin_eval_pool.py'),
                  '--jobs-json',str(manifest),'--sim-gpus',str(args.sim_gpu),str(args.sim_gpu),
                  '--server-gpu',str(args.server_gpu),'--sim-python',str(args.sim_python),
                  '--robotwin',str(args.robotwin),'--checkpoint',str(ck),'--model-config',str(config),
+                 '--flux-checkpoint-dir',str(args.flux_checkpoint_dir),'--stats-path',str(args.stats_path),
                  '--initial-dataset',str(args.initial_dataset),'--output',str(output),
                  '--inference-mode','action_only','--inference-batch-size','2','--batch-wait-ms','10',
                  '--port',str(args.port),'--timeout-seconds','43200']
@@ -85,7 +88,7 @@ def main():
                 while proc.exists():
                     command=proc.read_bytes()
                     if not command:break  # exited zombie
-                    if b'benchmark_robotwin_collection_pool.py' not in command or str(output).encode() not in command:
+                    if b'robotwin_eval_pool.py' not in command or str(output).encode() not in command:
                         raise RuntimeError('adopted PID no longer identifies the expected collector')
                     time.sleep(15)
                 result=json.loads((output/'summary.json').read_text())

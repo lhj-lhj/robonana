@@ -12,8 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 PUBLIC = {
     "run_multitask_mbrl.py",
-    "run_robotwin_train.sh", "run_hanging_mug_mac_round.sh",
-    "collect_prepare_robotwin_rollouts.sh", "eval_robotwin_all_tasks_parallel.sh",
+    "run_robotwin_train.sh",
+    "eval_robotwin_all_tasks_parallel.sh",
     "prepare_robotwin_rollouts.py", "report_selected_world_eval.py",
 }
 
@@ -72,7 +72,7 @@ def test_moved_executable_entrypoints_keep_their_permissions():
     "prepare_robotwin_rollouts.py",
     "diagnostics/verify_image_pipeline.py",
     "internal/collect_robotwin_pool_worker.py",
-    "internal/train_robotwin.py",
+    "run_multitask_mbrl.py",
 ])
 def test_relocated_help_entrypoint_imports_from_another_working_directory(tmp_path, relative):
     # Help exits before training, model loading, simulation or data writes.
