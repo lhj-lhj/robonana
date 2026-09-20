@@ -17,7 +17,7 @@ import threading
 from queue import Queue, Empty
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = [str(ROOT / name) for name in ('src','third_party/FACT','third_party/flux2/src','third_party/flux2_official/src')]
+SOURCES = [str(ROOT / name) for name in ('src','third_party/FACT','third_party/flux2_official/src')]
 sys.path[:0] = SOURCES + [str(ROOT / 'scripts/internal')]
 os.environ['PYTHONPATH'] = os.pathsep.join(SOURCES) + os.pathsep + os.environ.get('PYTHONPATH','')
 STOP = threading.Event()
@@ -484,6 +484,8 @@ def main():
         options = load_options(cls, args.config)
     except (ValueError, TypeError) as exc:
         parser.error(str(exc))
+    # Show the anchor as well as resolved paths; changing shell CWD must not change assets.
+    print(json.dumps(dict(config_file=str(args.config.resolve()), path_base=str(args.config.resolve().parent))))
     opts = argparse.Namespace(**asdict(options), command=args.command, execute=args.execute, options=options)
     if args.command=='eval':
         print(json.dumps(dict(requested=asdict(options), inference_batch_size=1), indent=2, default=str))

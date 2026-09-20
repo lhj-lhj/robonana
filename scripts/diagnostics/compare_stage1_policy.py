@@ -50,7 +50,7 @@ def main():
     args.output.mkdir(parents=True,exist_ok=bool(args.adopt_running_fixed100))
     env=dict(os.environ,OMP_NUM_THREADS='1',MKL_NUM_THREADS='1',PYTHONUNBUFFERED='1')
     env['PYTHONPATH']=os.pathsep.join(str(root/x) for x in
-        ('src','third_party/FACT','third_party/flux2/src','third_party/flux2_official/src'))
+        ('src','third_party/FACT','third_party/flux2_official/src'))
     def run(cmd,log,extra=None):
         with log.open('x') as f:
             subprocess.run(cmd,cwd=root,env=dict(env,**(extra or {})),stdout=f,stderr=subprocess.STDOUT,check=True)

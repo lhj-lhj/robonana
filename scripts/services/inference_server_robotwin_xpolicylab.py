@@ -17,7 +17,6 @@ for upstream in reversed(
     (
         REPO_ROOT / "src",
         REPO_ROOT / "third_party" / "FACT",
-        REPO_ROOT / "third_party" / "flux2" / "src",
         REPO_ROOT / "third_party" / "flux2_official" / "src",
     )
 ):

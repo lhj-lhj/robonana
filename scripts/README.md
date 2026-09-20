@@ -66,3 +66,5 @@ Stage1/2必须同时提供 checkpoint、model_config、replay_root；Stage2不�
 - `services/`：现有推理协议服务；`env/`：FACT/RoboTwin/SAPIEN环境适配。必要的上游环境变量仅在进程边界组装，不作为用户实验配置。
 
 旧单任务轮次、legacy参数翻译、孤立eval启动器和7个叠加配置模块已删除；源码历史由Git保留。历史实验文档中的旧命令不可作为新启动方式。
+
+路径示例：`configs/eval.json` 中的 `../outputs/eval` 指向 `runtime/outputs/eval`；`outputs/eval` 则指向 `runtime/configs/outputs/eval`。启动时显示 `config_file`、`path_base` 和展开后的绝对路径；切换终端目录不会改变同一配置文件的含义。

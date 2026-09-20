@@ -13,6 +13,6 @@ else
 fi
 PYTHON_BIN="${PYTHON_BIN:-${DEFAULT_PYTHON}}"
 
-export PYTHONPATH="${ROOT}/src:${ROOT}/third_party/FACT:${ROOT}/third_party/flux2/src:${PYTHONPATH:-}"
+export PYTHONPATH="${ROOT}/src:${ROOT}/third_party/FACT:${ROOT}/third_party/flux2_official/src:${PYTHONPATH:-}"
 
 "${PYTHON_BIN}" -m pytest -q "${ROOT}/tests"

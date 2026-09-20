@@ -22,7 +22,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 for source_root in (
     REPO_ROOT / "src",
     REPO_ROOT / "third_party" / "FACT",
-    REPO_ROOT / "third_party" / "flux2" / "src",
     REPO_ROOT / "third_party" / "flux2_official" / "src",
 ):
     if str(source_root) not in sys.path:

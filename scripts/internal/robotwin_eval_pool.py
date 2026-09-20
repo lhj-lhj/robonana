@@ -16,7 +16,7 @@ import time
 import h5py
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path[:0] = [str(ROOT / name) for name in ('src', 'third_party/FACT', 'third_party/flux2/src', 'third_party/flux2_official/src')]
+sys.path[:0] = [str(ROOT / name) for name in ('src', 'third_party/FACT', 'third_party/flux2_official/src')]
 
 from robonana.sim.collection_pool import EpisodeQueue, validate_jobs
 from robonana.normalization import A_STATS_PATH
@@ -106,7 +106,7 @@ def main():
     queue = EpisodeQueue(queue_path)
     queue.initialize(jobs)
     pythonpath = os.pathsep.join(str(ROOT / p) for p in
-        ("src", "third_party/FACT", "third_party/flux2_official/src", "third_party/flux2/src"))
+        ("src", "third_party/FACT", "third_party/flux2_official/src"))
     common = dict(os.environ, PYTHONPATH=pythonpath, PYTHONUNBUFFERED="1")
     common['ROBONANA_COLLECTION_ROUND'] = str(opts.collection_round)
     # Do not inherit optional diagnostics or global instruction overrides.

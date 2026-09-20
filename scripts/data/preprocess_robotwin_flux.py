@@ -32,8 +32,6 @@ from PIL import Image
 REPO_ROOT = Path(__file__).resolve().parents[2]
 for upstream in (
     REPO_ROOT / "third_party" / "FACT",
-    REPO_ROOT / "third_party" / "flux2",
-    REPO_ROOT / "third_party" / "flux2" / "src",
     REPO_ROOT / "third_party" / "flux2_official" / "src",
 ):
     if str(upstream) not in sys.path:

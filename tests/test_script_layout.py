@@ -76,10 +76,35 @@ def test_moved_executable_entrypoints_keep_their_permissions():
 ])
 def test_relocated_help_entrypoint_imports_from_another_working_directory(tmp_path, relative):
     # Help exits before training, model loading, simulation or data writes.
-    roots = [ROOT / p for p in ("src", "third_party/FACT", "third_party/flux2/src", "third_party/flux2_official/src")]
+    roots = [ROOT / p for p in ("src", "third_party/FACT", "third_party/flux2_official/src")]
     environment = dict(os.environ, PYTHONPATH=os.pathsep.join(map(str, roots)),
                        OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
     result = subprocess.run([sys.executable, str(SCRIPTS / relative), "--help"],
                             cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "usage:" in result.stdout.lower()
+
+
+def test_deleted_config_module_has_no_importers():
+    for folder in (ROOT / 'src', SCRIPTS, ROOT / 'tests'):
+        for path in folder.rglob('*.py'):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    assert node.module != 'robonana.configs.posttrain_config', path
+                    if node.module == 'robonana.configs':
+                        assert all(a.name != 'posttrain_config' for a in node.names), path
+                elif isinstance(node, ast.Import):
+                    assert all(a.name != 'robonana.configs.posttrain_config' for a in node.names), path
+
+
+def test_config_paths_are_independent_of_working_directory(tmp_path, monkeypatch):
+    from robonana.configs.evaluation import EvalOptions
+    from robonana.configs.schema import load_options
+
+    config = ROOT / 'configs' / 'eval.json'
+    before = load_options(EvalOptions, config)
+    monkeypatch.chdir(tmp_path)
+    after = load_options(EvalOptions, config)
+    assert before == after
+    assert after.output == ROOT / 'outputs' / 'eval'
