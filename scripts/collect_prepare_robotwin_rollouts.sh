@@ -47,20 +47,13 @@ count_dataset_episodes() {
 }
 
 count_completed_eval_episodes() {
-  local ledger rows
-  local total=0
-  if [[ ! -d ${eval_run_dir} ]]; then
-    printf '0\n'
-    return
-  fi
-  while IFS= read -r -d '' ledger; do
-    rows=$(grep -cve '^[[:space:]]*$' "${ledger}" || true)
-    total=$((total + rows))
-  done < <(
-    find "${eval_run_dir}" -type f \
-      -path "*/task_runs/${task_name}/episodes.jsonl" -print0
-  )
-  printf '%d\n' "${total}"
+  # 中文：统一管线的 ledger 是验收计数来源；不再遍历旧 task_runs 日志。
+  "${model_python}" - "${eval_run_dir}/${task_name}/${task_config}/ledger.json" <<'PYCODE'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+print(sum(r['status'] == 'evaluated' for r in json.loads(p.read_text())) if p.exists() else 0)
+PYCODE
 }
 
 for required_path in "${trained_checkpoint}" "${stats_source}" "${model_python}" \

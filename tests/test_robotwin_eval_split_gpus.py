@@ -9,19 +9,27 @@ import sys
 import pytest
 
 
-def test_eval_launcher_requires_disjoint_policy_and_simulator_gpu_pools() -> None:
-    script = (
-        Path(__file__).resolve().parents[1]
-        / "scripts"
-        / "eval_robotwin_all_tasks_parallel.sh"
-    ).read_text(encoding="utf-8")
-
-    assert "ROBONANA_EVAL_SERVER_GPUS" in script
-    assert "ROBONANA_EVAL_SIM_GPUS" in script
-    assert "the pools must be disjoint" in script
-    assert 'CUDA_VISIBLE_DEVICES="${server_gpu}"' in script
-    assert '"CUDA_VISIBLE_DEVICES=${sim_gpu}"' in script
-    assert '"OIDN_DEFAULT_DEVICE=cuda"' in script
+def test_eval_compatibility_forwards_to_single_pipeline():
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "scripts/internal/eval_legacy_args.py"
+    spec = importlib.util.spec_from_file_location("legacy_args", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    env = dict(ROBONANA_TRAINED_CHECKPOINT="/a/transformer/model.bin",
+        ROBONANA_EVAL_SERVER_GPUS="0,1", ROBONANA_EVAL_SIM_GPUS="2,3",
+        ROBONANA_EVAL_SEED_GROUP="2", ROBONANA_EVAL_TASKS="a,b",
+        ROBONANA_EVAL_JOBS_PER_GPU="2")
+    argv = module.arguments("demo_clean", 50, env)
+    assert argv[argv.index('--seed-start')+1] == '300000'
+    assert argv[argv.index('--workers-per-gpu')+1] == '2'
+    assert argv[argv.index('--gpus')+1:argv.index('--tasks')] == ['0','1','2','3']
+    assert argv[-3:] == ['--tasks','a','b']
+    assert '--shared-gpus' not in argv
+    env['ROBONANA_EVAL_SIM_GPUS'] = '0,1'
+    assert '--shared-gpus' in module.arguments("demo_clean",50,env)
+    env['ROBONANA_EVAL_SIM_GPUS'] = '1,2'
+    with pytest.raises(ValueError, match='disjoint'):
+        module.arguments("demo_clean",50,env)
 
 
 def test_rollout_collector_separates_policy_and_simulator_gpus() -> None:

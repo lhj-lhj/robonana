@@ -140,7 +140,7 @@ def test_bounded_process_timeout(tmp_path):
     assert rc==124 and time.monotonic()-start<5
 
 
-def test_seed_timeout_replaced_but_locked_eval_not_replaced(tmp_path, monkeypatch):
+def test_seed_timeout_retries_same_seed_and_locked_eval_stops(tmp_path, monkeypatch):
     """Run the real lane supervisor with fake simulator processes, not GPU jobs."""
     import importlib.util
     import json
@@ -151,7 +151,7 @@ def test_seed_timeout_replaced_but_locked_eval_not_replaced(tmp_path, monkeypatc
     spec=importlib.util.spec_from_file_location("protocol_lane_test",path)
     module=importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    monkeypatch.setitem(sys.modules,"benchmark_robotwin_collection_pool",
+    monkeypatch.setitem(sys.modules,"robotwin_eval_pool",
                         SimpleNamespace(server_command=lambda *args:["fake-server"]))
     monkeypatch.setitem(sys.modules,"eval_robotwin_task_isolated",
                         SimpleNamespace(terminate_process_group=lambda *args,**kw:None))
@@ -176,14 +176,14 @@ def test_seed_timeout_replaced_but_locked_eval_not_replaced(tmp_path, monkeypatc
         else:
             output=Path(command[command.index("--output")+1])
             module.atomic_json(output/"summary.json",dict(replay_mismatches=0,
-                episodes=[dict(seed=300001,success=True,hdf5=None)]))
+                episodes=[dict(seed=300000,success=True,hdf5=None)]))
         return 0
     monkeypatch.setattr(module,"run_bounded",fake_run)
     module.collect_lane(opts,[("hanging_mug","demo_clean")],0)
     locked_path=opts.output/"hanging_mug/demo_clean/seeds.json"
     locked=locked_path.read_bytes()
-    assert prepared==[300000,300001]
-    assert json.loads(locked)["jobs"][0]["seed"]==300001
+    assert prepared==[300000,300000]
+    assert json.loads(locked)["jobs"][0]["seed"]==300000
     opts.command="eval"
     opts.manifests=opts.output
     opts.output=tmp_path/"eval"
@@ -194,10 +194,11 @@ def test_seed_timeout_replaced_but_locked_eval_not_replaced(tmp_path, monkeypatc
         assert command[command.index("--capture-mode")+1]=="scout"
         return 124
     monkeypatch.setattr(module,"run_bounded",error_run)
-    module.collect_lane(opts,[("hanging_mug","demo_clean")],0)
-    assert len(eval_commands)==1 and locked_path.read_bytes()==locked
-    summary=json.loads((opts.output/"hanging_mug/demo_clean/summary.json").read_text())
-    assert summary==dict(evaluated=0,errors=1,successes=0,paired_scene_count=1)
+    with pytest.raises(RuntimeError, match="infrastructure failure"):
+        module.collect_lane(opts,[("hanging_mug","demo_clean")],0)
+    assert len(eval_commands)==3 and locked_path.read_bytes()==locked
+    assert not (opts.output/"hanging_mug/demo_clean/ledger.json").exists()
+    assert not (opts.output/"hanging_mug/demo_clean/summary.json").exists()
 
 
 def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monkeypatch):
@@ -210,7 +211,7 @@ def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monk
     spec = importlib.util.spec_from_file_location("expert_cache_launcher", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    monkeypatch.setitem(sys.modules, "benchmark_robotwin_collection_pool", SimpleNamespace(server_command=lambda *a: ["server"]))
+    monkeypatch.setitem(sys.modules, "robotwin_eval_pool", SimpleNamespace(server_command=lambda *a: ["server"]))
     monkeypatch.setitem(sys.modules, "eval_robotwin_task_isolated", SimpleNamespace(terminate_process_group=lambda *a, **k: None))
     monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: SimpleNamespace(poll=lambda: None))
     monkeypatch.setattr(module.subprocess, "check_output", lambda *a, **k: "revision\n")

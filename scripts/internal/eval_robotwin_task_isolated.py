@@ -183,185 +183,23 @@ def write_outputs(
 
 
 def run(args: argparse.Namespace) -> int:
-    signal.signal(signal.SIGTERM, _raise_stop_requested)
-    signal.signal(signal.SIGINT, _raise_stop_requested)
-    output_dir = args.output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ledger_path = output_dir / "episodes.jsonl"
-    # 中文：复测历史崩溃seed，无需伪造已完成ledger。
-    # English: Explicit retry seed; existing ledger validation still applies.
-    seed_start = getattr(args,'start_seed',None)
-    if seed_start is None:seed_start = initial_seed(args.seed_group)
-    rows = read_ledger(ledger_path, args.test_num, seed_start)
-    if rows:
-        print(f"[resume] {args.task_name}: {len(rows)}/{args.test_num} episodes", flush=True)
-    modes = attempt_modes(args.gpu_attempts, args.cpu_fallback)
-    eval_root = (
-        Path(os.environ["ROBOTWIN_PATH"])
-        / "eval_result"
-        / args.task_name
-        / os.environ.get("POLICY_NAME", "robonana_robotwin.adapter")
-        / args.task_config
-        / args.ckpt_setting
-    )
-
-    for episode_index in range(len(rows), args.test_num):
-        start_seed = seed_start if not rows else int(rows[-1]["next_seed"])
-        episode_dir = output_dir / "episodes" / f"episode_{episode_index:03d}"
-        episode_dir.mkdir(parents=True, exist_ok=True)
-        completed_row: dict[str, Any] | None = None
-
-        for attempt_index, mode in enumerate(modes, start=1):
-            attempt_dir = episode_dir / f"attempt_{attempt_index}_{mode.name}"
-            attempt_dir.mkdir(parents=True, exist_ok=True)
-            runtime_dir = attempt_dir / "runtime"
-            runtime_dir.mkdir(exist_ok=True)
-            metadata_path = attempt_dir / "metadata.json"
-            log_path = attempt_dir / "client.log"
-            metadata_path.unlink(missing_ok=True)
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    "OIDN_DEFAULT_DEVICE": mode.oidn_device,
-                    "PYTHONUNBUFFERED": "1",
-                    "ROBONANA_EVAL_EPISODE_METADATA": str(metadata_path),
-                    "ROBONANA_EVAL_START_SEED": str(start_seed),
-                    "TEST_NUM": "1",
-                    "XDG_RUNTIME_DIR": str(runtime_dir),
-                }
-            )
-            command = [
-                "bash",
-                str(args.launch_client),
-                args.task_name,
-                args.task_config,
-                args.ckpt_setting,
-                str(args.seed_group),
-            ]
-            started_at = time.time()
-            started_monotonic = time.monotonic()
-            return_code: int | None = None
-            timed_out = False
-            swallowed_errors = 0
-            with log_path.open("w", encoding="utf-8", buffering=1) as log:
-                log.write(
-                    f"mode={mode.name} start_seed={start_seed} "
-                    f"timeout={args.episode_timeout_seconds}s\n"
-                )
-                process = subprocess.Popen(
-                    command,
-                    env=environment,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-                try:
-                    deadline = time.monotonic() + args.episode_timeout_seconds
-                    while process.poll() is None:
-                        if time.monotonic() >= deadline:
-                            timed_out = True
-                            terminate_process_group(process)
-                            break
-                        if args.max_swallowed_errors > 0:
-                            swallowed_errors = swallowed_error_count(log_path)
-                            if swallowed_errors >= args.max_swallowed_errors:
-                                terminate_process_group(process, grace_seconds=5.0)
-                                break
-                        time.sleep(1.0)
-                    return_code = process.returncode
-                except StopRequested:
-                    terminate_process_group(process)
-                    raise
-
-            duration = time.monotonic() - started_monotonic
-            error: str | None = None
-            metadata: dict[str, int] | None = None
-            if timed_out:
-                error = f"episode exceeded {args.episode_timeout_seconds}s"
-            elif swallowed_errors >= args.max_swallowed_errors > 0:
-                error = (
-                    "RoboTwin swallowed repeated exceptions ("
-                    f"{swallowed_errors} x 'error occurs !')"
-                )
-            elif return_code != 0:
-                error = f"client exited with rc={return_code}"
-            elif not metadata_path.is_file():
-                error = "client succeeded without episode metadata"
-            else:
-                try:
-                    metadata = validate_episode_metadata(read_json(metadata_path), start_seed)
-                except (KeyError, TypeError, ValueError) as exc:
-                    error = f"invalid episode metadata: {exc}"
-
-            attempt_record = {
-                "attempt": attempt_index,
-                "duration_seconds": round(duration, 3),
-                "error": error,
-                "log": str(log_path),
-                "mode": mode.name,
-                "return_code": return_code,
-                "start_seed": start_seed,
-                "swallowed_errors": swallowed_errors,
-                "timed_out": timed_out,
-            }
-            append_jsonl(output_dir / "attempts.jsonl", attempt_record)
-            if error is not None:
-                print(
-                    f"[retry] {args.task_name} episode={episode_index} "
-                    f"mode={mode.name}: {error}",
-                    flush=True,
-                )
-                continue
-
-            assert metadata is not None
-            result_dir = newest_result_dir(eval_root, started_at)
-            video_path: str | None = None
-            if os.environ.get("EVAL_VIDEO_LOG", "1") != "0":
-                candidate = result_dir / "episode0.mp4" if result_dir is not None else None
-                if candidate is None or not candidate.is_file() or candidate.stat().st_size == 0:
-                    print(
-                        f"[retry] {args.task_name} episode={episode_index} "
-                        f"mode={mode.name}: missing completed MP4",
-                        flush=True,
-                    )
-                    continue
-                video_path = str(candidate.resolve())
-
-            completed_row = {
-                **metadata,
-                "attempt": attempt_index,
-                "duration_seconds": round(duration, 3),
-                "episode_index": episode_index,
-                "log": str(log_path),
-                "mode": mode.name,
-                "result_dir": str(result_dir.resolve()) if result_dir is not None else None,
-                "video_path": video_path,
-            }
-            append_jsonl(ledger_path, completed_row)
-            rows.append(completed_row)
-            write_outputs(output_dir, args.task_name, rows, args.test_num)
-            print(
-                f"[episode] {args.task_name} {episode_index + 1}/{args.test_num} "
-                f"seed={metadata['accepted_seed']} success={metadata['success']} "
-                f"mode={mode.name} duration={duration:.1f}s",
-                flush=True,
-            )
-            break
-
-        if completed_row is None:
-            (output_dir / "FAILED").write_text(
-                f"episode={episode_index} start_seed={start_seed}\n", encoding="utf-8"
-            )
-            print(
-                f"[failed] {args.task_name}: episode={episode_index} "
-                f"start_seed={start_seed} exhausted {len(modes)} attempts",
-                file=sys.stderr,
-                flush=True,
-            )
-            return 1
-
-    (output_dir / "FAILED").unlink(missing_ok=True)
-    write_outputs(output_dir, args.task_name, rows, args.test_num)
+    # 中文：保留旧 CLI 和日志读取 helper；实际评测只调用统一入口。
+    # Explicit retry seed replaces only the candidate start, never a completed ledger.
+    if args.cpu_fallback:
+        raise ValueError("CPU fallback changes rendering; unified eval requires CUDA OIDN")
+    from eval_legacy_args import arguments
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from run_multitask_mbrl import main
+    env = dict(os.environ, ROBONANA_EVAL_TASKS=args.task_name,
+               ROBONANA_EVAL_RUN_DIR=str(args.output_dir),
+               ROBONANA_EVAL_SEED_GROUP=str(args.seed_group),
+               ROBONANA_EPISODE_TIMEOUT_SECONDS=str(args.episode_timeout_seconds),
+               ROBONANA_EPISODE_GPU_ATTEMPTS=str(args.gpu_attempts))
+    argv = arguments(args.task_config, args.test_num, env)
+    if args.start_seed is not None:
+        argv[argv.index('--seed-start')+1] = str(args.start_seed)
+    sys.argv = [sys.argv[0], *argv]
+    main()
     return 0
 
 

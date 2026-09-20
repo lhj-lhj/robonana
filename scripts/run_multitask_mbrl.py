@@ -14,6 +14,7 @@ import sys
 import time
 import signal
 import threading
+from queue import Queue, Empty
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts/diagnostics"), str(ROOT / "scripts/internal")]
@@ -64,6 +65,28 @@ def run_bounded(command, *, env, log, timeout):
             raise InterruptedError("Collection cancelled; do not replace this seed")
         finally:
             terminate_process_group(child, grace_seconds=40)
+
+
+def run_seed_stage(command, *, env, root, stage, timeout, retries):
+    """基础设施故障只重试同一命令/seed；每次单独保留日志和产物。"""
+    for retry in range(retries + 1):
+        output = root / (stage if retry == 0 else f"{stage}_retry_{retry}")
+        argv = list(command)
+        argv[argv.index("--output") + 1] = str(output)
+        started = time.monotonic()
+        rc = run_bounded(argv, env=env, log=root / f"{output.name}.log", timeout=timeout)
+        rejected = output / "rejected_seed.json"
+        if stage == "prepare" and rejected.exists():
+            record = json.loads(rejected.read_text())
+            seed = int(argv[argv.index("--seed-start") + 1])
+            if record == dict(seed=seed, reason="expert_infeasible"):
+                return output, True
+        atomic_json(root / f"{output.name}_status.json", dict(
+            returncode=rc, elapsed_seconds=time.monotonic()-started, retry=retry))
+        if rc == 0:
+            return output, False
+    # 不写入已消费 seed 的 ledger；重启前须检查该 attempt 的留档。
+    raise RuntimeError(f"{stage} infrastructure failure after {retries+1} attempts: {root}")
 
 
 def training(opts):
@@ -151,13 +174,133 @@ def training(opts):
                     "robonana.configs.multitask_mbrl.config"], cwd=ROOT, env=env, check=True)
 
 
+def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gpu, revision):
+    """一个 task/config 只有一个调度者，避免并发重复 seed 或覆盖 ledger。"""
+    from robonana.inference_contract import sha256_file
+    task_root = opts.output / task / task_config
+    expert_jobs = getattr(opts, "expert_jobs", None)
+    locked = None
+    if expert_jobs is not None:
+        shard = opts.shard_offset + lane
+        jobs = expert_jobs[f"{task}__{task_config}"][shard::opts.shard_count]
+        if not jobs:
+            return
+        locked = dict(jobs=jobs)
+        task_root = task_root / f"shard_{shard:02d}"
+    task_root.mkdir(parents=True, exist_ok=True)
+    ledger_path = task_root / "ledger.json"
+    ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else []
+    if any(row.get("result", {}).get("replay_verified") is False for row in ledger):
+        raise RuntimeError("Unresolved scout/replay mismatch in existing ledger; no automatic scene filtering")
+    accepted = [r["job"] for r in ledger if r["status"] == "evaluated"]
+    if opts.manifests and expert_jobs is None:
+        locked = json.loads((opts.manifests / task / task_config / "seeds.json").read_text())
+        if locked["robotwin_commit"] != revision or locked["task_config_sha256"] != sha256_file(opts.robotwin / "task_config" / f"{task_config}.yml"):
+            raise ValueError("Locked scenes do not match simulator revision/config")
+    attempts = len(ledger)
+    while (attempts < len(locked["jobs"]) if locked else len(accepted) < opts.episodes):
+        if STOP.is_set():
+            raise InterruptedError("Collection cancelled")
+        if attempts >= opts.episodes * opts.candidate_multiplier:
+            raise RuntimeError("Candidate budget exhausted; partial ledger retained, no false completion")
+        attempt = task_root / f"attempt_{attempts:05d}"
+        if attempt.exists():
+            raise FileExistsError(f"Uncommitted attempt requires inspection, refusing overwrite: {attempt}")
+        # Seed numbers may repeat across tasks/configs; identity is the full tuple.
+        seed = locked["jobs"][attempts]["seed"] if locked else opts.seed_start + attempts
+        row = dict(seed=seed, status="infrastructure_error", task=task, task_config=task_config)
+        attempts += 1
+        if server.poll() is not None:
+            raise RuntimeError("Policy server exited; refusing to consume/reject scene seeds")
+        if locked:
+            job = dict(locked["jobs"][attempts-1])
+        else:
+            prepare = [str(opts.sim_python), str(ROOT / "scripts/internal/collect_robotwin_pool_worker.py"),
+                       "--prepare-seeds", "1", "--strict-infra", "--candidate-limit", "1", "--seed-start", str(seed),
+                       "--task-name", task, "--task-config", task_config, "--robotwin", str(opts.robotwin),
+                       "--output", str(attempt / "prepare"), "--port", str(server_opts.port),
+                       "--worker-id", str(lane), "--vector-env-checkout", str(ROOT / "third_party/RoboTwin_RLinf")]
+            runtime = attempt / "runtime"
+            runtime.mkdir(parents=True, mode=0o700, exist_ok=True)
+            sim_env = dict(env, CUDA_VISIBLE_DEVICES=str(sim_gpu), OIDN_DEFAULT_DEVICE="cuda",
+                           ROBONANA_SAPIEN_RENDER_DEVICE="cuda:0", XDG_RUNTIME_DIR=str(runtime))
+            prepared, rejected = run_seed_stage(prepare, env=sim_env, root=attempt,
+                stage="prepare", timeout=opts.seed_timeout, retries=getattr(opts, "infra_retries", 2))
+            if rejected:
+                row.update(status="candidate_rejected", reason="expert_infeasible")
+                ledger.append(row)
+                atomic_json(ledger_path, ledger)
+                continue
+            job = json.loads((prepared / "accepted_seeds.json").read_text())["jobs"][0]
+        row["job"] = job
+        job["sampling_seed_base"] = int(seed) * 1000003
+        manifest = dict(task_name=task, task_config=task_config, jobs=[job], expert_validated=True)
+        atomic_json(attempt / "job.json", manifest)
+        command = [sys.executable, str(ROOT / "scripts/internal/robotwin_eval_pool.py"),
+                   "--jobs-json", str(attempt / "job.json"), "--sim-gpus", str(sim_gpu),
+                   "--server-gpu", str(opts.gpus[lane]), "--sim-python", str(opts.sim_python),
+                   "--robotwin", str(opts.robotwin), "--checkpoint", str(opts.checkpoint),
+                   "--model-config", str(opts.model_config), "--initial-dataset", str(opts.initial_dataset),
+                   "--output", str(attempt / "rollout"), "--port", str(server_opts.port),
+                   "--external-server", "--inference-mode", server_opts.inference_mode,
+                   "--capture-mode", getattr(opts, "capture_mode", None) or ("scout_replay" if opts.command == "collect" else "scout"),
+                   "--candidate-batch-size", "32", "--timeout-seconds",
+                   str(opts.seed_timeout)]
+        rollout, _ = run_seed_stage(command, env=env, root=attempt, stage="rollout",
+            timeout=opts.seed_timeout + 60, retries=getattr(opts, "infra_retries", 2))
+        row["returncode"] = 0
+        result = json.loads((rollout / "summary.json").read_text())
+        row.update(status="evaluated", result=result["episodes"][0])
+        accepted.append(job)
+        if opts.command == "collect" and not row["result"]["success"] and row["result"].get("replay_verified"):
+            # Publish an accepted-only dataset view. Rejected attempts and
+            # orphaned artifacts can never leak into Stage1 via a broad glob.
+            source = Path(row["result"]["hdf5"]).parent.parent.resolve()
+            link = opts.output / "failure_dataset" / f"{task_config}_{seed}" / task / "robonana_rollout"
+            link.parent.mkdir(parents=True, exist_ok=True)
+            if not link.exists():
+                link.symlink_to(source, target_is_directory=True)
+        ledger.append(row)
+        atomic_json(ledger_path, ledger)
+        # A replay mismatch invalidates only that failure artifact.  The
+        # evaluated scout outcome stays in the ledger, while the
+        # replay_verified guard above keeps the artifact out of the
+        # published failure dataset.  Continue the remaining jobs.
+    if not locked or expert_jobs is not None:
+        atomic_json(task_root / "seeds.json", dict(
+            task_name=task, task_config=task_config, jobs=accepted, expert_validated=True,
+            robotwin_commit=revision, task_config_sha256=sha256_file(opts.robotwin / "task_config" / f"{task_config}.yml"),
+            sampling_seed_rule="seed * 1000003 + control_step // 48"))
+    atomic_json(task_root / "summary.json", dict(
+        evaluated=len(accepted), errors=sum(r["status"] != "evaluated" for r in ledger),
+        successes=sum(bool(r["result"]["success"]) for r in ledger if r["status"] == "evaluated"),
+        paired_scene_count=len(locked["jobs"]) if locked else len(accepted)))
+
+
+def export_dataset(opts, pairs):
+    """旧训练采集只需要平铺视图：硬链接已验收文件，不再执行第二套 eval。"""
+    for task, config in pairs:
+        ledger = json.loads((opts.output / task / config / "ledger.json").read_text())
+        for row in ledger:
+            if row['status'] != 'evaluated':
+                continue
+            source = Path(row['result']['hdf5'])
+            target = opts.export_dataset / task / 'robonana_rollout/data' / f"episode{row['seed']}.hdf5"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                if not source.samefile(target):
+                    raise FileExistsError(f"Refusing to overwrite unrelated dataset artifact: {target}")
+            else:
+                os.link(source, target)
+
+
 def collect_lane(opts, pairs, lane):
-    from benchmark_robotwin_collection_pool import server_command
+    from robotwin_eval_pool import server_command
     from eval_robotwin_task_isolated import terminate_process_group
     from robonana.inference_contract import sha256_file
     server_opts = copy(opts)
     server_opts.port = opts.port + lane
-    server_opts.inference_mode = "action_only" if opts.command == "collect" else "action_q_rejection"
+    server_opts.inference_mode = getattr(opts, "inference_mode", None) or ("action_only" if opts.command == "collect" else "action_q_rejection")
     server_opts.inference_batch_size, server_opts.batch_wait_ms = 1, 0
     lane_root = opts.output / f"lane_{lane}"
     lane_root.mkdir(parents=True, exist_ok=True)
@@ -169,106 +312,33 @@ def collect_lane(opts, pairs, lane):
         server = subprocess.Popen(server_command(server_opts, lane_root), cwd=ROOT, env=env,
                                   stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
-            for task, task_config in pairs:
-                task_root = opts.output / task / task_config
-                expert_jobs = getattr(opts, "expert_jobs", None)
-                locked = None
-                if expert_jobs is not None:
-                    shard = opts.shard_offset + lane
-                    jobs = expert_jobs[f"{task}__{task_config}"][shard::opts.shard_count]
-                    if not jobs:
-                        continue
-                    locked = dict(jobs=jobs)
-                    task_root = task_root / f"shard_{shard:02d}"
-                task_root.mkdir(parents=True, exist_ok=True)
-                ledger_path = task_root / "ledger.json"
-                ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else []
-                if any(row.get("result", {}).get("replay_verified") is False for row in ledger):
-                    raise RuntimeError("Unresolved scout/replay mismatch in existing ledger; no automatic scene filtering")
-                accepted = [r["job"] for r in ledger if r["status"] == "evaluated"]
-                if opts.command == "eval" and expert_jobs is None:
-                    locked = json.loads((opts.manifests / task / task_config / "seeds.json").read_text())
-                    if locked["robotwin_commit"] != revision or locked["task_config_sha256"] != sha256_file(opts.robotwin / "task_config" / f"{task_config}.yml"):
-                        raise ValueError("Locked scenes do not match simulator revision/config")
-                attempts = len(ledger)
-                while (attempts < len(locked["jobs"]) if locked else len(accepted) < opts.episodes):
-                    if STOP.is_set():
-                        raise InterruptedError("Collection cancelled")
-                    if attempts >= opts.episodes * opts.candidate_multiplier:
-                        raise RuntimeError("Candidate budget exhausted; partial ledger retained, no false completion")
-                    attempt = task_root / f"attempt_{attempts:05d}"
-                    if attempt.exists():
-                        raise FileExistsError(f"Uncommitted attempt requires inspection, refusing overwrite: {attempt}")
-                    seed_started = time.monotonic()
-                    # Seed numbers may repeat across tasks/configs; identity is the full tuple.
-                    seed = locked["jobs"][attempts]["seed"] if locked else opts.seed_start + attempts
-                    row = dict(seed=seed, status="infrastructure_error", task=task, task_config=task_config)
-                    attempts += 1
-                    if server.poll() is not None:
-                        raise RuntimeError("Policy server exited; refusing to consume/reject scene seeds")
-                    if locked:
-                        job = dict(locked["jobs"][attempts-1])
-                    else:
-                        prepare = [str(opts.sim_python), str(ROOT / "scripts/internal/collect_robotwin_pool_worker.py"),
-                                   "--prepare-seeds", "1", "--candidate-limit", "1", "--seed-start", str(seed),
-                                   "--task-name", task, "--task-config", task_config, "--robotwin", str(opts.robotwin),
-                                   "--output", str(attempt / "prepare"), "--port", str(server_opts.port),
-                                   "--worker-id", str(lane), "--vector-env-checkout", str(ROOT / "third_party/RoboTwin_RLinf")]
-                        runtime = attempt / "runtime"
-                        runtime.mkdir(parents=True, mode=0o700, exist_ok=True)
-                        sim_env = dict(env, CUDA_VISIBLE_DEVICES=str(sim_gpu), OIDN_DEFAULT_DEVICE="cuda",
-                                       ROBONANA_SAPIEN_RENDER_DEVICE="cuda:0", XDG_RUNTIME_DIR=str(runtime))
-                        rc = run_bounded(prepare, env=sim_env, log=attempt / "prepare.log", timeout=opts.seed_timeout)
-                        if rc:
-                            row.update(status="candidate_rejected", prepare_returncode=rc)
-                            ledger.append(row)
-                            atomic_json(ledger_path, ledger)
-                            continue
-                        job = json.loads((attempt / "prepare/accepted_seeds.json").read_text())["jobs"][0]
-                    row["job"] = job
-                    job["sampling_seed_base"] = int(seed) * 1000003
-                    manifest = dict(task_name=task, task_config=task_config, jobs=[job], expert_validated=True)
-                    atomic_json(attempt / "job.json", manifest)
-                    command = [sys.executable, str(ROOT / "scripts/diagnostics/benchmark_robotwin_collection_pool.py"),
-                               "--jobs-json", str(attempt / "job.json"), "--sim-gpus", str(sim_gpu),
-                               "--server-gpu", str(opts.gpus[lane]), "--sim-python", str(opts.sim_python),
-                               "--robotwin", str(opts.robotwin), "--checkpoint", str(opts.checkpoint),
-                               "--model-config", str(opts.model_config), "--initial-dataset", str(opts.initial_dataset),
-                               "--output", str(attempt / "rollout"), "--port", str(server_opts.port),
-                               "--external-server", "--inference-mode", server_opts.inference_mode,
-                               "--capture-mode", "scout_replay" if opts.command == "collect" else "scout",
-                               "--candidate-batch-size", "32", "--timeout-seconds",
-                               str(max(1, int(opts.seed_timeout - (time.monotonic()-seed_started))))]
-                    rc = run_bounded(command, env=env, log=attempt / "rollout.log",
-                                     timeout=max(1, opts.seed_timeout-(time.monotonic()-seed_started)) + 60)
-                    row["returncode"] = rc
-                    if rc == 0:
-                        result = json.loads((attempt / "rollout/summary.json").read_text())
-                        row.update(status="evaluated", result=result["episodes"][0])
-                        accepted.append(job)
-                        if opts.command == "collect" and not row["result"]["success"] and row["result"].get("replay_verified"):
-                            # Publish an accepted-only dataset view. Rejected attempts and
-                            # orphaned artifacts can never leak into Stage1 via a broad glob.
-                            source = Path(row["result"]["hdf5"]).parent.parent.resolve()
-                            link = opts.output / "failure_dataset" / f"{task_config}_{seed}" / task / "robonana_rollout"
-                            link.parent.mkdir(parents=True, exist_ok=True)
-                            if not link.exists():
-                                link.symlink_to(source, target_is_directory=True)
-                    ledger.append(row)
-                    atomic_json(ledger_path, ledger)
-                    # A replay mismatch invalidates only that failure artifact.  The
-                    # evaluated scout outcome stays in the ledger, while the
-                    # replay_verified guard above keeps the artifact out of the
-                    # published failure dataset.  Continue the remaining jobs.
-                if not locked or expert_jobs is not None:
-                    atomic_json(task_root / "seeds.json", dict(
-                        task_name=task, task_config=task_config, jobs=accepted, expert_validated=True,
-                        robotwin_commit=revision, task_config_sha256=sha256_file(opts.robotwin / "task_config" / f"{task_config}.yml"),
-                        sampling_seed_rule="seed * 1000003 + control_step // 48"))
-                atomic_json(task_root / "summary.json", dict(
-                    evaluated=len(accepted), errors=sum(r["status"] != "evaluated" for r in ledger),
-                    successes=sum(bool(r["result"]["success"]) for r in ledger if r["status"] == "evaluated"),
-                    paired_scene_count=len(locked["jobs"]) if locked else len(accepted)))
+            # 一份模型服务供多个独立仿真进程使用；SAPIEN 不共享进程内全局 RNG。
+            work = getattr(opts, "task_queue", None)
+            if work is None:
+                work = Queue()
+                for pair in pairs:
+                    work.put(pair)
+            def consume():
+                while not STOP.is_set():
+                    try:
+                        task, task_config = work.get_nowait()
+                    except Empty:
+                        return
+                    try:
+                        collect_task(opts, task, task_config, lane, server_opts, server,
+                                     env, sim_gpu, revision)
+                    except Exception:
+                        # 一条任务失败就停止新领取；其他 lane 也会关闭自有子进程。
+                        STOP.set()
+                        raise
+                    finally:
+                        work.task_done()
+            counts = getattr(opts, "workers_per_gpu", [1])
+            count = counts[0] if len(counts) == 1 else counts[lane]
+            with ThreadPoolExecutor(max_workers=count) as workers:
+                pending = [workers.submit(consume) for _ in range(count)]
+                for future in pending:
+                    future.result()
         finally:
             terminate_process_group(server, grace_seconds=10)
 
@@ -282,20 +352,30 @@ def collection(opts):
         if not set(opts.tasks) <= set(tasks):
             raise ValueError("Unknown task in bounded probe")
         tasks = opts.tasks
-    pairs = [(task, cfg) for task in tasks for cfg in ("demo_clean", "demo_randomized")]
+    pairs = [(task, cfg) for task in tasks for cfg in getattr(opts, "task_configs", ("demo_clean", "demo_randomized"))]
+    if getattr(opts, "export_dataset", None) and (len(opts.task_configs) != 1 or opts.capture_mode != "full"):
+        raise ValueError("Dataset export requires full capture and a single task config")
+    if len(set(pairs)) != len(pairs):
+        raise ValueError("Duplicate task/config pairs")
+    if getattr(opts, "infra_retries", 2) < 0:
+        raise ValueError("infra-retries must be nonnegative")
     if len(set(opts.gpus)) != len(opts.gpus) or not opts.gpus or any(g < 0 for g in opts.gpus):
         raise ValueError("Use distinct nonnegative GPU ids")
     if not opts.shared_gpus and (len(opts.gpus) < 2 or len(opts.gpus) % 2):
         raise ValueError("Use distinct GPU pairs; default 4 policy + 4 simulator GPUs")
     if opts.episodes <= 0 or opts.seed_timeout <= 0 or opts.seed_start < 0 or opts.candidate_multiplier <= 0:
         raise ValueError("Invalid episode count, seed or timeout")
-    if opts.command == "eval" and not opts.manifests and not opts.expert_seed_cache:
-        raise ValueError("Paired evaluation requires locked collection --manifests")
+    
     lanes = len(opts.gpus) if opts.shared_gpus else len(opts.gpus)//2
     # A shared lane can either consume frozen expert jobs or run the official
     # expert check inline.  The latter preserves RoboTwin's canonical candidate
     # sequence while still colocating one persistent policy server and simulator
     # on every GPU.
+    counts = getattr(opts, "workers_per_gpu", [1])
+    if len(counts) not in (1, lanes) or any(n < 1 or n > 4 for n in counts):
+        raise ValueError("workers-per-gpu needs one count or a count per lane, each 1..4")
+    if opts.expert_seed_cache and any(n != 1 for n in counts):
+        raise ValueError("Frozen cross-host shards currently require one worker per lane")
     if opts.expert_seed_cache and opts.manifests:
         raise ValueError("Choose external expert cache or locked collection manifests")
     opts.expert_jobs = None
@@ -327,6 +407,8 @@ def collection(opts):
     signature = dict(checkpoint_sha256=sha256_file(opts.checkpoint), model_config_sha256=sha256_file(opts.model_config),
                      mode=opts.command, pairs=pairs, episodes=opts.episodes, seed_start=opts.seed_start,
                      manifests=str(opts.manifests.resolve()) if opts.manifests else None)
+    if getattr(opts, "inference_mode", None) or getattr(opts, "capture_mode", None):
+        signature.update(inference_mode=opts.inference_mode, capture_mode=opts.capture_mode)
     signature = json.loads(json.dumps(signature))
     if opts.expert_jobs is not None:
         signature.update(expert_jobs=opts.expert_jobs, shard_count=opts.shard_count,
@@ -338,11 +420,20 @@ def collection(opts):
     if path.exists() and json.loads(path.read_text()) != signature:
         raise ValueError("Output belongs to a different collection/eval protocol")
     atomic_json(path, signature)
+    # 运行参数独立记录：调整并发不能改变冻结的 seed/模型协议。
+    atomic_json(opts.output / "execution.json", dict(workers_per_gpu=counts, gpus=opts.gpus,
+                inference_batch_size=1, updated_at=time.time()))
+    if opts.expert_jobs is None:
+        opts.task_queue = Queue()
+        for pair in pairs:
+            opts.task_queue.put(pair)
     with ThreadPoolExecutor(max_workers=lanes) as pool:
         futures = [pool.submit(collect_lane, opts, pairs if opts.expert_jobs is not None else pairs[lane::lanes], lane)
                    for lane in range(lanes)]
         for future in futures:
             future.result()
+    if getattr(opts, "export_dataset", None):
+        export_dataset(opts, pairs)
 
 
 def main():
@@ -367,6 +458,17 @@ def main():
     parser.add_argument("--initial-dataset", type=Path, default=Path("/workspace/datasets/fact-robotwin-v2/RoboTwin"))
     parser.add_argument("--gpus", type=int, nargs="+", default=list(range(8)))
     parser.add_argument("--tasks", nargs="+", help="Bounded smoke subset only; omit for full 50")
+    parser.add_argument("--task-configs", nargs="+", choices=("demo_clean", "demo_randomized"),
+                        default=["demo_clean", "demo_randomized"])
+    parser.add_argument("--workers-per-gpu", type=int, nargs="+", default=[1],
+                        help="Independent simulators sharing each policy service; one value or one per lane")
+    parser.add_argument("--inference-mode", choices=("action_only", "action_q_rejection"),
+                        help="Explicit policy mode; historical collect/eval defaults remain compatible")
+    parser.add_argument("--capture-mode", choices=("scout", "scout_replay", "full"),
+                        help="scout=SR only; scout_replay=save verified failures; full=save every episode")
+    parser.add_argument("--export-dataset", type=Path, help="Full-capture compatibility view for rollout preparation")
+    parser.add_argument("--infra-retries", type=int, default=2,
+                        help="Retry the same seed on infrastructure errors; never silently replace it")
     parser.add_argument("--episodes", type=int, default=100, help="Per task AND per clean/random config")
     parser.add_argument("--seed-start", type=int, default=100000,
                         help="First official expert-check candidate (RoboTwin seed: 0 starts at 100000)")

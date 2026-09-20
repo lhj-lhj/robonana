@@ -31,6 +31,8 @@ def main():
     parser.add_argument("--vector-env-checkout", type=Path, required=True)
     parser.add_argument("--queue", type=Path)
     parser.add_argument("--worker-id", required=True)
+    parser.add_argument("--strict-infra", action="store_true",
+                        help="Do not replace a candidate seed after infrastructure errors")
     parser.add_argument("--prepare-seeds", type=int, default=0,
                         help="Expert-check this many new seeds, without loading a policy or recording replay")
     parser.add_argument('--capture-mode', choices=('full','full_failures','scout','scout_replay','paired_benchmark'),default='full')
@@ -78,6 +80,10 @@ def main():
                     finally:
                         task.close_env()
                     if not valid:
+                        # 只有完成 expert 判定的不可解场景才允许推进候选 seed。
+                        if opts.strict_infra:
+                            (output / 'rejected_seed.json').write_text(json.dumps(
+                                dict(seed=seed, reason='expert_infeasible')))
                         continue
                     try:
                         task.setup_demo(now_ep_num=0, seed=seed, is_test=True, **args)
@@ -92,6 +98,9 @@ def main():
                         task.close_env()
                     except Exception:
                         pass
+                    # 正式评测将异常交给外层重试同一个 seed；历史 harvest 保持兼容。
+                    if opts.strict_infra:
+                        raise
                     # Skip problematic seed gracefully (e.g., UnStableError, NoneType grasp pose)
                     continue
                 accepted.append(dict(seed=seed, instruction=instruction,
