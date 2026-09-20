@@ -4,6 +4,12 @@
 
 ## 当前到哪一步
 
+### 2026-09-20：fixed48 global256 改为八卡续训
+
+四卡global256任务意外停在step11540，最新完整保存点为step11000。为保持global batch不变并使用全部190算力，已用DeepSpeed官方Universal转换把四卡ZeRO-2 checkpoint生成独立八卡恢复视图，原checkpoint不改；Adam moments、scheduler、step和LR均验证恢复，八卡配置为每卡32、累积1、global256。完全关闭gradient checkpointing在首个forward达到约177.3GiB/卡并OOM；最终采用部分重计算stride4，显存约129.7GiB/卡，保留约53GiB余量。
+
+正式输出 `/data3/hongjia/robonana/experiments/fixed48_batch256_8gpu_resume_step11000_20260920`，tmux `rn_fixed48_bs256_8gpu_resume_20260920`，日志 `logs/train_20260920T043759Z.log`，W&B `envo39rp`。已稳定到step11050，约2.02秒/更新、126.8 samples/s，八卡100%利用；相对原四卡约4.60秒/更新提速约2.28倍。日志ETA约2天13小时，checkpoint保存开销另计。
+
 ### 2026-09-20：140k 官方 seed=0 口径的 50×2 全任务评测
 
 用户将协议改为与 RoboTwin 官方 `seed: 0` 完全一致：每个 task/config 从候选 seed 100000 开始，先跑官方 expert check，不可解候选递增跳过，直到 Clean 和 Randomized 分别得到 50 个实际评测 episode；不再使用此前 expert seed cache。共享 GPU 入口现支持 inline expert check，仍保留一张卡一个持久策略服务、低频 scout、仅失败完整回放保存的加速逻辑。聚焦回归在190通过2项，提交 `e39eb4d`。
