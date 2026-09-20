@@ -485,7 +485,7 @@ def main():
     except (ValueError, TypeError) as exc:
         parser.error(str(exc))
     # Show the anchor as well as resolved paths; changing shell CWD must not change assets.
-    print(json.dumps(dict(config_file=str(args.config.resolve()), path_base=str(args.config.resolve().parent))))
+    print(json.dumps(dict(config_file=str(args.config.resolve()), path_base=str(args.config.resolve().parent))), file=sys.stderr)
     opts = argparse.Namespace(**asdict(options), command=args.command, execute=args.execute, options=options)
     if args.command=='eval':
         print(json.dumps(dict(requested=asdict(options), inference_batch_size=1), indent=2, default=str))
