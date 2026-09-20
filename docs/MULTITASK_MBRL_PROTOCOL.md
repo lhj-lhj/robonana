@@ -4,6 +4,17 @@
 
 ## 当前到哪一步
 
+### 2026-09-20：显式配置重构（未切换运行中的任务）
+
+用户明确取消旧环境变量兼容，要求缺信息时不能静默猜测。基于GitHub最新工作提交 `e212ab1`（已包含main）在 `codex/flat-config-20260920` 重构，核心提交 `e16d217`。
+
+- 配置入口为 `configs/train.json`、`configs/eval.json`、`configs/resume.json`；所有字段必填。配置类也没有默认值。未知字段、错误类型、batch等式或预算冲突在启动前报错；旧 `ROBONANA_*` 实验环境变量明确拒绝。
+- 模型/数据/采样/学习率预算由一个训练组装函数产生；不再从base→单任务→多任务层层覆写。训练打印完整请求、batch等式与最终配置，保存 `requested.json`、`launch_config.json`；eval保存完整 `eval_config.json`。续训显式读取来源配置并展示所有继承值。
+- 删除7个旧配置模块、旧单任务训练轮次/采集脚本、legacy参数转换器、孤立eval启动器及失效YAML。进程清理回归 `sim/processes.py`，诊断调用统一评测组件。保留既有模型、loss、数据与checkpoint合同。
+- 验证仅在190的 `/data3/hongjia/robonana_worktrees/flat_config_20260920`：最终263 passed、4 skipped（本轮禁用CUDA，未占正式训练GPU）。三阶段新旧最终配置逐字段相同，只排除隔离worktree下同一DeepSpeed文件的绝对路径。包括显式字段缺失、错类型、批量矛盾、独立导入/跨目录入口、实际dataset构造、FACT JSON往返和续训回归。
+- 190正式训练和71正式评测checkout均未部署此次破坏兼容性的清理；已有实验/权重/数据不改。旧历史命令只作证据，新启动按[配置说明](../scripts/README.md)填写并检查计划。
+
+
 ### 2026-09-20：71 eval 收束为单一管线并增加仿真并发
 
 正式入口统一为 `scripts/run_multitask_mbrl.py`，旧 shell/隔离入口及 benchmark 都转发到同一评测组件；用法见 [脚本导航](../scripts/README.md#唯一评测管线)。没有修改策略、48步动作、采样、渲染配置或轨迹验收规则。已补中文注释。
