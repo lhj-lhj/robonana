@@ -4,6 +4,19 @@
 
 ## 当前到哪一步
 
+### 2026-09-20：71 eval 收束为单一管线并增加仿真并发
+
+正式入口统一为 `scripts/run_multitask_mbrl.py`，旧 shell/隔离入口及 benchmark 都转发到同一评测组件；用法见 [脚本导航](../scripts/README.md#唯一评测管线)。没有修改策略、48步动作、采样、渲染配置或轨迹验收规则。已补中文注释。
+
+- 八份 batch=1 模型服务、每卡2个独立仿真进程，公共 task/config 队列动态领取；单个配置内保持候选 seed 顺序。暂不做异步编码/失败回放队列或新的仿真框架。
+- 超时/未知异常重试同一 seed 两次；官方 expert 判定失败或 `UnStableError` 才跳候选。耗尽后留 `blocked.json`，不计模型失败，其他任务继续。运行目录独占锁；恢复时归档未完成 attempt 和旧吞吐日志，不覆盖成果。
+- 71同 seed `move_stapler_pad/demo_clean`（100003、100004）小测：正式逐seed独立进程顺序执行75.40+78.23=153.63秒；双worker88.31秒，约1.74倍。两者均2/2成功、步数分别136/159。此试验为scout小样本，不含expert和失败重放，不能外推全量ETA。另测单进程复用两seed为94.82秒，但这不是当前正式入口的逐seed基线。
+- 验证全部在190：扩展回归83项通过，故障隔离后33项复验通过，重启遥测修复后调度6项通过（这些计数有重叠）。代码 `0d531d7`，GitHub `codex/rope-prefix-dense-reward`。71小测产物 `/raid/hongjia/robonana_deploy/eval_unified_probe_20260920`，不计正式SR。
+- 71部署checkout `/raid/hongjia/robonana_eval_unified_20260920`；启动脚本 `/raid/hongjia/run_eval140k_unified_20260920.sh`，日志 `/raid/hongjia/robonana_deploy/eval140k_unified_20260920_r2.log`。仍用原140k、同一正式输出目录、9900–9907端口。
+- 切换前638条已评测记录已备份到正式输出的 `migration_unified_20260920/ledgers_before.json`，`protocol.json`不变。旧23次expert超时跳seed是历史偏差，原记录保留且没有伪装成已补测；新版不再这样跳seed。已有scout/replay不一致记录保留SR，未验收轨迹仍不进入失败数据集。
+- 首次重启曾因旧 `batch_metrics.jsonl` 已存在而退出；已修复为重启自动归档遥测，并在190回归。未完成attempt保留后重跑，未写成模型失败。
+
+
 ### 2026-09-20：fixed48 global256 改为八卡续训
 
 四卡global256任务意外停在step11540，最新完整保存点为step11000。为保持global batch不变并使用全部190算力，已用DeepSpeed官方Universal转换把四卡ZeRO-2 checkpoint生成独立八卡恢复视图，原checkpoint不改；Adam moments、scheduler、step和LR均验证恢复，八卡配置为每卡32、累积1、global256。完全关闭gradient checkpointing在首个forward达到约177.3GiB/卡并OOM；最终采用部分重计算stride4，显存约129.7GiB/卡，保留约53GiB余量。
