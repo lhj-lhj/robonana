@@ -4,6 +4,16 @@
 
 ## 当前到哪一步
 
+### 2026-09-21：修复71评测阻塞并续跑
+
+原八卡评测在北京时间2026-09-21 12:29退出（71日志为UTC−7）。100组中60组完成，所有ledger合计3370条有效评测、2452次成功；尚缺1630条。40组阻塞细分为26组expert规划异常、6组成功判定属性缺失、8组上游VectorEnv固定120秒超时。
+
+- 修复提交 `748490c`：只把已核实来源/类型的抓取、放置规划异常标记为expert不可解；资源、模型和未知异常仍重试同一seed并报错。`open_laptop`、`place_object_scale`、`put_object_cabinet`每次reset后按官方play_once相同几何公式初始化成功判定属性。单仿真进程直接同步执行既有slot，由显式1200秒seed watchdog负责超时，不再套VectorEnv固定120秒线程超时。
+- 190隔离目录完整回归275 passed、4 skipped；保留用户新注释及其取消旧环境变量启动拒绝的修改，测试确认旧变量仍不能覆盖JSON batch。
+- 71原评测checkout `/raid/hongjia/robonana_eval_unified_20260920` 已更新到此提交；使用容器 `robonana-eval140k-ready-71`。八卡、每卡2个仿真进程、140k权重、每task clean/random各50、candidate从100000起、expert筛选和失败回放保持原协议。
+- 当前启动配置：`/raid/hongjia/robonana_deploy/eval140k_resume_20260921.json`；日志：同目录 `eval140k_resume_20260921.log`。入口改为 `scripts/run_multitask_mbrl.py eval --config <该JSON> --execute`。
+- 继续写原输出 `/raid/hongjia/robonana_rollouts/absorbing140k_official_seed0_50_20260920`。`recovery_20260921/` 保存旧协议和96份ledger哈希；协议仅迁移CLI名称collect→eval并显式记录原action_only/scout_replay模式。模型哈希重新核验一致。未提交的attempt通过现有resume机制归档；不删除已有评测结果。
+
 ### 2026-09-20：显式配置重构（未切换运行中的任务）
 
 用户明确取消旧环境变量兼容，要求缺信息时不能静默猜测。基于GitHub最新工作提交 `e212ab1`（已包含main）在 `codex/flat-config-20260920` 重构，核心提交 `e16d217`。

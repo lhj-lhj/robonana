@@ -32,7 +32,7 @@ historical behavior; do not reconstruct legacy branches from those reports.
 - Replay preparation: `scripts/prepare_robotwin_rollouts.py` builds an episode
   index through `data/stats.py::write_robotwin_replay_index`, references A and
   generates image/language caches. It does not refit or copy normalization.
-- Collection: RLinf/RoboTwin pool management in `sim/collection_pool.py`,
+- Collection: synchronous RoboTwin slots and atomic episode queue in `sim/collection_pool.py`,
   existing inference servers/transports, and lossless HDF5 rollout writer.
 - Selected-action world reports: `inference/selected_world.py` still calls
   `_decode_stage2_image`; keep this helper even though its old docstring said
