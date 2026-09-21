@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / name) for name in ('src', 'third_party/FACT', 'third_party/flux2_official/src')]
 
 from robonana.sim import configure_sapien_runtime
-from robonana.sim.collection_pool import EpisodeQueue, RoboNanaSubEnv, load_vector_env, make_vector_env
+from robonana.sim.collection_pool import EpisodeQueue, RoboNanaSubEnv, expert_planning_failure
 # 中文：复用仿真环境适配。 English: reuse the simulator environment bootstrap.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "env"))
 from robotwin_eval_bootstrap import _install_static_camera_filter
@@ -31,7 +31,6 @@ def main():
     parser.add_argument("--robotwin", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--vector-env-checkout", type=Path, required=True)
     parser.add_argument("--queue", type=Path)
     parser.add_argument("--worker-id", required=True)
     parser.add_argument("--strict-infra", action="store_true",
@@ -47,7 +46,6 @@ def main():
     payload = json.loads(opts.jobs.read_text()) if opts.jobs else dict(
         task_name=opts.task_name, task_config=opts.task_config, jobs=[dict(seed=opts.seed_start)])
     output = opts.output.resolve()
-    vector_checkout = opts.vector_env_checkout.resolve()
     if not opts.prepare_seeds and opts.queue is None:
         parser.error('--queue is required for collection')
     queue = EpisodeQueue(opts.queue.resolve()) if opts.queue else None
@@ -60,7 +58,6 @@ def main():
     import robonana_robotwin_client as adapter
     namespace = runpy.run_path("script/eval_policy.py", run_name="_collection_pool")
     _install_static_camera_filter()
-    vector_class = load_vector_env(vector_checkout)
 
     def collect(_name, task, args, model, _seed, **kwargs):
         args.update(eval_mode=True, render_freq=0, eval_video_log=False)
@@ -108,6 +105,10 @@ def main():
                             (output / 'rejected_seed.json').write_text(json.dumps(
                                 dict(seed=seed, reason='expert_unstable')))
                             continue
+                        if expert_planning_failure(seed_exc):
+                            (output / 'rejected_seed.json').write_text(json.dumps(
+                                dict(seed=seed, reason='expert_infeasible', error=repr(seed_exc))))
+                            continue
                         raise
                     # Skip problematic seed gracefully (e.g., UnStableError, NoneType grasp pose)
                     continue
@@ -130,7 +131,6 @@ def main():
                              audit_actions=scout_mode, defer_publish=scout_mode)
         writer = model._robonana_rollout_writer
         if opts.capture_mode != 'full':writer.failures_only = True
-        vector = make_vector_env(slot, vector_class)
         def phase(job, record):
             # 中文：复用FACT现有低频取图/同步开关；每48步仍完整获取三路RGB。
             # English: Reuse FACT evaluation/robotwin/model2robotwin_interface.py
@@ -142,12 +142,16 @@ def main():
             model.skip_action_render_sync = not record
             model._configure_robotwin_render()
             start = time.perf_counter()
-            vector.reset(env_idx=[0], env_seeds=[int(job['seed'])])
+            # One simulator per process: use the existing slot synchronously.
+            # Upstream VectorEnv hard-codes a 120s Future timeout, shorter than
+            # cold scene setup/inference under shared-GPU load. The supervisor's
+            # explicit seed_timeout bounds the entire process and cleans it up.
+            slot.reset(env_seed=int(job['seed']))
             while not slot.done:
-                _, _, _, _, infos = vector.step([None])
-                if infos[0]['steps'] % 48 == 0:
-                    print(json.dumps({'progress':infos[0],'record':record,'worker':opts.worker_id}),flush=True)
-            result = dict(infos[0], duration_seconds=time.perf_counter()-start,
+                info = slot.step(None)['info']
+                if info['steps'] % 48 == 0:
+                    print(json.dumps({'progress':info,'record':record,'worker':opts.worker_id}),flush=True)
+            result = dict(info, duration_seconds=time.perf_counter()-start,
                           rgb_steps=slot.rgb_steps)
             return result, list(slot.action_trace)
         try:
@@ -192,8 +196,7 @@ def main():
                 print(json.dumps(result), flush=True)
                 queue.complete(job["seed"], opts.worker_id, result)
         finally:
-            vector.close()
-            vector.env_thread_pool.shutdown(wait=True)
+            slot.close()
         (output / "complete.json").write_text(json.dumps(results), encoding="utf-8")
         return int(payload["jobs"][-1]["seed"]) + 1, sum(r["success"] for r in results)
 

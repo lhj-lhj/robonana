@@ -7,6 +7,56 @@ from concurrent.futures import ThreadPoolExecutor
 from robonana.sim.collection_pool import EpisodeQueue, RoboNanaSubEnv, validate_jobs
 
 
+@pytest.mark.parametrize('filename,function,error,expected', [
+    ('click_alarmclock.py', 'play_once', TypeError("'NoneType' object is not subscriptable"), True),
+    ('put_bottles_dustbin.py', 'play_once', IndexError('list index out of range'), True),
+    ('client.py', 'play_once', TypeError("'NoneType' object is not subscriptable"), False),
+    ('click_alarmclock.py', 'setup_demo', TypeError("'NoneType' object is not subscriptable"), False),
+    ('click_alarmclock.py', 'play_once', RuntimeError('CUDA out of memory'), False),
+    ('click_alarmclock.py', 'play_once', FileNotFoundError('asset missing'), False),
+])
+def test_expert_rejection_checks_origin_not_just_error_text(filename, function, error, expected):
+    from robonana.sim.collection_pool import expert_planning_failure
+    scope = {'error': error}
+    exec(compile(f'def {function}():\n    raise error\n', filename, 'exec'), scope)
+    try:
+        scope[function]()
+    except Exception as caught:
+        assert expert_planning_failure(caught) is expected
+
+
+def test_grasp_rejection_requires_planner_and_action_frames():
+    from robonana.sim.collection_pool import expert_planning_failure
+    scope = {}
+    exec(compile('def __init__():\n    raise AssertionError("target_pose cannot be None for move action.")',
+                 'action.py', 'exec'), scope)
+    exec(compile('def grasp_actor():\n    __init__()', '_base_task.py', 'exec'), scope)
+    for function, expected in [('__init__', False), ('grasp_actor', True)]:
+        try:
+            scope[function]()
+        except AssertionError as caught:
+            assert expert_planning_failure(caught) is expected
+
+
+@pytest.mark.parametrize('name,side', [('open_laptop','left'), ('place_object_scale','right'),
+                                    ('put_object_cabinet','right')])
+def test_success_check_state_is_reinitialized_from_current_scene(monkeypatch, name, side):
+    import sys
+    from robonana.sim.collection_pool import initialize_policy_task_state
+    monkeypatch.setitem(sys.modules, 'envs.utils', SimpleNamespace(ArmTag=str, get_face_prod=lambda *a:1))
+    task = type(name, (), {})()
+    pose = SimpleNamespace(p=[0.2, 0., 0.81], q=[1., 0., 0., 0.])
+    task.object = task.laptop = SimpleNamespace(get_pose=lambda:pose)
+    task.arm_tag, task.origin_z = 'stale', -1
+    initialize_policy_task_state(task)
+    assert task.arm_tag == side
+    if name == 'put_object_cabinet':
+        assert task.origin_z == .81
+        pose.p[2] = .85
+        initialize_policy_task_state(task)
+        assert task.origin_z == .85
+
+
 def test_valid_seed_list():
     jobs = [{"seed": i, "instruction": "hang mug"} for i in range(4)]
     assert validate_jobs(jobs, 2) is None

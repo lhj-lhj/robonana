@@ -157,7 +157,6 @@ def main():
             worker = subprocess.Popen([str(opts.sim_python.absolute()),
                 str(ROOT / "scripts/internal/collect_robotwin_pool_worker.py"), "--jobs", str(job_path),
                 "--robotwin", str(opts.robotwin.resolve()), "--output", str(worker_dir),
-                "--vector-env-checkout", str(ROOT / "third_party/RoboTwin_RLinf"),
                 "--queue", str(queue_path), "--worker-id", str(rank),
                 "--port", str(opts.port), '--capture-mode',opts.capture_mode], cwd=ROOT, env=worker_env, stdout=logs[-1],
                 stderr=subprocess.STDOUT, start_new_session=True)

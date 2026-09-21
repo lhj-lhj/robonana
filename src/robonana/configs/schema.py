@@ -44,9 +44,12 @@ def load_options(cls, path):
     payload = json.loads(path.read_text())
     if not isinstance(payload, dict): raise ValueError('Config must be a JSON object')
     unknown = set(payload) - {f.name for f in fields(cls)}
+    # 排查未知字段（防拼写错误）
     if unknown: raise ValueError(f'Unknown config fields: {sorted(unknown)}')
+    # 排查缺失字段（防遗漏配置）
     missing = {f.name for f in fields(cls)} - set(payload)
     if missing: raise ValueError(f'Missing explicit config fields: {sorted(missing)}')
+
     hints = get_type_hints(cls)
     try:
         return cls(**{k: _convert(v, hints[k], path.parent, k) for k,v in payload.items()})

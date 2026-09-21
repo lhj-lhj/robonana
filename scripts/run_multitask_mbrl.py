@@ -24,6 +24,7 @@ STOP = threading.Event()
 
 
 def atomic_json(path, value):
+    # 对json进行原子写入
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -96,24 +97,31 @@ def training(opts):
     from robonana.configs.training import build_training_config
     from robonana.configs.resume import build_resume_config
     config = build_resume_config(opts.options) if opts.command == 'resume' else build_training_config(opts.options)
+
+    # 输出模型config信息
     batch = dict(gpus=len(config['launch']['gpu_ids']), microbatch=config['dataloaders']['train']['batch_size_per_gpu'],
                  accumulation_steps=config['train']['gradient_accumulation_steps'])
     batch['global_batch'] = batch['gpus'] * batch['microbatch'] * batch['accumulation_steps']
     # 用户看到的和实际传给 FACT 的是同一份 resolved config，不再二次 import 覆写。
     print(json.dumps(dict(requested=asdict(opts.options), batch=batch, resolved=config), indent=2, default=str))
+    
     if not opts.execute and opts.command != 'audit':
         return
     if opts.command != 'resume':
         preflight_training(opts, config)
     if opts.command == 'audit':
         return
+    
+    # 防止覆写已有的项目目录
     project = Path(config['project_dir'])
     if project.exists():
         raise FileExistsError(f'Use a new output directory: {project}')
     project.mkdir(parents=True)
+    # 把当前的执行experiment的config写入到project/'requested.json'
     atomic_json(project/'requested.json', json.loads(json.dumps(asdict(opts.options), default=str)))
+
     from fact_train import Config, launch_from_config
-    # FACT 原生支持 JSON；训练进程直接读取本次快照，不需要配置模块缓存。
+    # FACT 原生支持完整JSON；训练进程直接读取本次快照，不需要配置模块缓存。
     resolved = project/'launch_config.json'
     Config(config).save(str(resolved))
     launch_from_config(str(resolved))
@@ -197,7 +205,7 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
                        "--prepare-seeds", "1", "--strict-infra", "--candidate-limit", "1", "--seed-start", str(seed),
                        "--task-name", task, "--task-config", task_config, "--robotwin", str(opts.robotwin),
                        "--output", str(attempt / "prepare"), "--port", str(server_opts.port),
-                       "--worker-id", str(lane), "--vector-env-checkout", str(ROOT / "third_party/RoboTwin_RLinf")]
+                       "--worker-id", str(lane)]
             runtime = attempt / "runtime"
             runtime.mkdir(parents=True, mode=0o700, exist_ok=True)
             sim_env = dict(env, CUDA_VISIBLE_DEVICES=str(sim_gpu), OIDN_DEFAULT_DEVICE="cuda",
@@ -476,9 +484,9 @@ def main():
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--execute', action='store_true', help='Dry-run unless explicitly requested')
     args = parser.parse_args()
-    legacy = sorted(key for key in os.environ if key.startswith('ROBONANA_'))
-    if legacy:
-        parser.error(f'Legacy experiment environment overrides are unsupported; unset {legacy} and use --config')
+    # legacy = sorted(key for key in os.environ if key.startswith('ROBONANA_'))
+    # if legacy:
+    #     parser.error(f'Legacy experiment environment overrides are unsupported; unset {legacy} and use --config')
     cls = EvalOptions if args.command=='eval' else ResumeOptions if args.command=='resume' else TrainOptions
     try:
         options = load_options(cls, args.config)

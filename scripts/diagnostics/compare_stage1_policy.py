@@ -62,7 +62,7 @@ def main():
       run([str(args.sim_python),str(root/'scripts/internal/collect_robotwin_pool_worker.py'),
          '--prepare-seeds','20','--seed-start','300000','--robotwin',str(args.robotwin),
          '--output',str(held),'--port',str(args.port),'--worker-id','heldout',
-         '--vector-env-checkout',str(root/'third_party/RoboTwin_RLinf')],args.output/'heldout_prepare.log',
+         ],args.output/'heldout_prepare.log',
          dict(CUDA_VISIBLE_DEVICES=str(args.sim_gpu),ROBONANA_SAPIEN_RENDER_DEVICE='cuda:0',
               OIDN_DEFAULT_DEVICE='cuda',ROBONANA_ROBOTWIN_STATIC_CAMERAS='head_camera',
               XDG_RUNTIME_DIR=str(runtime)))

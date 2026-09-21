@@ -1,47 +1,56 @@
-"""Collection scheduling only; no policy, reward or world-model changes.
+"""One synchronous RoboTwin slot per process, with atomic episode scheduling.
 
-Directly loads the official VectorEnv; never imports the RLinf trainer:
-https://github.com/RoboTwin-Platform/RoboTwin/blob/RLinf_support/robotwin/envs/vector_env.py
-  SubEnv.reset: persistent task, selected-env reset, periodic clear_cache.
-https://github.com/RLinf/RLinf/blob/main/rlinf/envs/robotwin/seed_utils.py
-  partition_success_seeds: prevalidated, disjoint seed assignment.
-
-We use one official VectorEnv slot per GPU-bound process:
-the existing RoboTwin uses process-global NumPy RNG and SAPIEN configuration.
-This preserves the deployed simulator, camera and action execution semantics.
+The supervisor owns the explicit wall-clock timeout. A second thread-level
+timeout would abort valid cold resets on shared GPUs without cancelling them.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-import importlib.util
 import json
 from pathlib import Path
 import sqlite3
-import subprocess
-
-RLINF_ROBOTWIN_COMMIT = "0008ae6800df9f75fc8de7098bacb01735fd8fd2"
 
 
-def load_vector_env(checkout):
-    """Load only the pinned environment library, using CURRENT RoboTwin imports.
+def expert_planning_failure(error):
+    """Only known expert planning failures may advance the candidate seed.
 
-    Do not add the RLinf_support checkout to sys.path: that would replace the
-    deployed envs._base_task and task reward/control code as an accidental side
-    effect. Only vector_env.py is loaded, and all envs imports resolve to the
-    current simulator. This dependency is source, not an edited local copy.
+    RoboTwin's official expert loop skips these exceptions. Scope both their
+    message and origin: a policy error, OOM or missing asset must still abort.
     """
-    checkout = Path(checkout)
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
-    if revision != RLINF_ROBOTWIN_COMMIT:
-        raise RuntimeError(f"RLinf VectorEnv revision mismatch: {revision}")
-    relative = "robotwin/envs/vector_env.py"
-    original = subprocess.check_output(["git", "show", f"HEAD:{relative}"], cwd=checkout)
-    if (checkout / relative).read_bytes() != original:
-        raise RuntimeError("official VectorEnv dependency has local modifications")
-    spec = importlib.util.spec_from_file_location("_robonana_official_vector_env", checkout / relative)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.VectorEnv
+    frames = []
+    tb = error.__traceback__
+    while tb is not None:
+        frames.append((Path(tb.tb_frame.f_code.co_filename).name, tb.tb_frame.f_code.co_name))
+        tb = tb.tb_next
+    if isinstance(error, AssertionError) and str(error) == "target_pose cannot be None for move action.":
+        return ("action.py", "__init__") in frames and ("_base_task.py", "grasp_actor") in frames
+    if isinstance(error, TypeError) and str(error) == "'NoneType' object is not subscriptable":
+        return ("click_alarmclock.py", "play_once") in frames
+    if isinstance(error, IndexError) and str(error) == "list index out of range":
+        return ("put_bottles_dustbin.py", "play_once") in frames
+    from numpy.linalg import LinAlgError
+    if isinstance(error, LinAlgError) and str(error) == "Eigenvalues did not converge":
+        return ("transforms.py", "get_place_pose") in frames and ("_base_task.py", "place_actor") in frames
+    return False
+
+
+def initialize_policy_task_state(task):
+    """Restore task-local success-check inputs normally set by play_once.
+
+    Official evaluation reuses the expert's Python task object after reset.
+    Our separate policy process must derive these same inputs from the initial
+    scene, before moving anything. Never replay expert actions or consume RNG.
+    """
+    name = type(task).__name__
+    if name not in ("open_laptop", "place_object_scale", "put_object_cabinet"):
+        return
+    from envs.utils import ArmTag, get_face_prod
+    if name == "open_laptop":
+        face = get_face_prod(task.laptop.get_pose().q, [1, 0, 0], [1, 0, 0])
+        task.arm_tag = ArmTag("left" if face > 0 else "right")
+    else:
+        task.arm_tag = ArmTag("right" if task.object.get_pose().p[0] > 0 else "left")
+        if name == "put_object_cabinet":
+            task.origin_z = task.object.get_pose().p[2]
 
 
 def validate_jobs(jobs, workers):
@@ -58,7 +67,7 @@ def validate_jobs(jobs, workers):
 class EpisodeQueue:
     """Atomic FIFO claims shared by GPU-isolated workers, not a policy queue.
 
-    Scheduling extension around official VectorEnv's selected-env reset. SQLite
+    Scheduling around the simulator's selected-seed reset. SQLite
     transactions only cover tiny metadata operations, never simulation/inference.
     Claimed work is NOT automatically retried: the supervisor fails the whole
     probe on worker death, avoiding duplicate trajectories/false completion.
@@ -99,7 +108,7 @@ class EpisodeQueue:
 
 
 class RoboNanaSubEnv:
-    """Thin task/client bridge for official VectorEnv.step/reset/close.
+    """Thin synchronous task/client bridge for step/reset/close.
 
     Do NOT call RLinf gen_sparse_reward_data/chunk_step: those interfaces only
     expose chunk-end observations. Our adapter.eval saves every real transition
@@ -131,6 +140,7 @@ class RoboNanaSubEnv:
             self.close(clear_cache=self.completed % self.clear_cache_freq == 0)
         self.task.setup_demo(now_ep_num=0, seed=int(env_seed), is_test=True, **self.args)
         self.active = True
+        initialize_policy_task_state(self.task)
         self.task.set_instruction(instruction=job["instruction"])
         self.adapter.reset_model(self.model)
         self.done = False
@@ -166,16 +176,3 @@ class RoboNanaSubEnv:
             self.task.close_env(clear_cache=clear_cache)
             self.active = False
 
-
-def make_vector_env(slot, vector_class):
-    """Reuse upstream scheduling verbatim, inject our already-configured slot.
-
-    Deliberately bypass VectorEnv.__init__ asset/task construction, which changes
-    embodiment/planner/config assumptions. Native step/reset/transform/close
-    methods and native timeout handling are used without copying or patching.
-    """
-    vector = vector_class.__new__(vector_class)
-    vector.n_envs = 1
-    vector.envs = [slot]
-    vector.env_thread_pool = ThreadPoolExecutor(max_workers=1)
-    return vector

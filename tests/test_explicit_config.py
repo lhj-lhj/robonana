@@ -136,8 +136,10 @@ def test_explicit_smoke_updates_budget_scheduler_and_retention(tmp_path):
     assert not c['train']['disable_checkpointing']
 
 
-def test_cli_rejects_legacy_overrides_instead_of_guessing(tmp_path, monkeypatch):
+def test_ignored_legacy_environment_cannot_override_explicit_batch(tmp_path, monkeypatch):
     monkeypatch.setenv('ROBONANA_BATCH_SIZE','999')
     result=subprocess.run([sys.executable,str(ROOT/'scripts/run_multitask_mbrl.py'),'train','--config',str(ROOT/'configs/train.json')],capture_output=True,text=True)
-    assert result.returncode!=0
-    assert 'Legacy experiment environment overrides' in result.stderr
+    # 用户已关闭旧环境变量的启动拒绝；仍必须保证它不能覆盖显式 JSON。
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan['batch']['global_batch'] == plan['requested']['global_batch'] == 128

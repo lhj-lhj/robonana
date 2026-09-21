@@ -97,19 +97,24 @@ class TrainOptions:
 def build_training_config(o: TrainOptions):
     """只在这里映射到 FACT：修改一个参数会同步影响所有消费者。"""
     import copy
-    phase = 'critic' if o.phase == 'stage2' else 'world_policy'
+    phase = 'critic' if o.phase == 'stage2' else 'world_policy' # o.phase取值是pretrain、stage1或stage2
+    #  组装数据池（Data Mixture），如果是 stage1 / stage2：额外挂载 HDF5 失败回放池（成功与失败各 50% 混合）
     weights = dict(original_success=1. if o.phase=='pretrain' else .5,
                    collected_success_replay=0., historical_failure_replay=0.,
                    latest_failure=0. if o.phase=='pretrain' else .5)
+    # o.world_conditioning = “fixed48”或“rope_prefix“
     shared = dict(stats_path=str(o.stats_path), action_chunk=CHUNK, action_dim=ACTION_DIM,
         max_horizon=CHUNK, fixed_horizon=CHUNK, discount=o.discount, reward_non_goal=-1.,
         reward_goal=0., q_target_mode='mac_mot_v2', world_conditioning=o.world_conditioning)
+
     original = dict(shared, _class_name='RoboTwinLeRobotDataset', data_path=str(o.dataset_root),
         index_path=str(o.dataset_root/'robonana_index.json'), task_globs=o.task_globs,
         episode_filter='success', pool_name='original_success', allow_empty=False, require_final_observation=False)
     pools = [original]
+
     if o.phase != 'pretrain':
         # 数据源字段单复数差异只在这个适配边界处理，实验配置不用跟着数据类换名字。
+        # 加入replay的成功数据，历史失败数据和最近的失败数据。
         for name, filtering in [('collected_success_replay','success'),('historical_failure_replay','failure'),('latest_failure','failure')]:
             pool = dict(shared, _class_name='RoboTwinHDF5Dataset', data_path=str(o.replay_root),
                 index_path=str(o.replay_root/'robonana_index.json'), task_glob=o.replay_task_glob,
@@ -117,9 +122,12 @@ def build_training_config(o: TrainOptions):
             if name=='historical_failure_replay': pool['round_max']=o.collection_round-1
             if name=='latest_failure': pool['round_id']=o.collection_round
             pools.append(pool)
+
+    # 根据不同阶段构造优化器      
     sampler = (dict(type='RoboTwinEpisodeSampler', infinite=True) if o.phase=='pretrain' else
         dict(type='RoboTwinPosttrainSampler', infinite=True, pool_weights=dict(weights),
              redistribute_empty_historical_failure_to_latest=True, redistribute_empty_collected_success_to_original=True))
+
     posttrain = dict(enabled=True, algorithm='mac_mot_v2', q_target_mode='mac_mot_v2', phase=phase,
         chunk_horizon=CHUNK, discount=o.discount, reward_non_goal=-1., reward_goal=0., return_scale=1000.,
         current_collection_round=o.collection_round,
@@ -130,11 +138,16 @@ def build_training_config(o: TrainOptions):
             redistribute_empty_historical_failure_to_latest=True, redistribute_empty_collected_success_to_original=True),
         environment_policy=dict(candidate_count=o.eval_candidates, candidate_selection='argmax_q',
             action_chunk=CHUNK, execute_actions_per_plan=CHUNK))
+    
     from robonana.inference_contract import sampling_contract
     sampling_contract(posttrain)
+
     keeps = [] if o.smoke_steps else sorted(set((*o.checkpoint_keeps, o.steps)))
+    # WandB 看板名
     tracker = dict(name=o.run_name or f'multitask-mbrl-loop{o.collection_round}-{o.phase}-{o.world_conditioning}')
     if o.tracker_entity: tracker['entity']=o.tracker_entity
+
+    #  .../RoboNANA/runtime
     repo = Path(__file__).resolve().parents[3]
     return dict(
         project_dir=str(o.output), runners=['robonana.training.robotwin_trainer.RoboNanaTrainer'],
