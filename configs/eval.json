@@ -7,11 +7,25 @@
   "initial_dataset": "../assets/RoboTwin",
   "flux_checkpoint_dir": "../checkpoints/FLUX.2-klein-base-4B",
   "stats_path": "/workspace/datasets/fact-robotwin-v2/RoboTwin/robonana_norm_stats.json",
-  "gpus": [0, 1, 2, 3, 4, 5, 6, 7],
+  "gpus": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
   "shared_gpus": true,
-  "workers_per_gpu": [2],
+  "workers_per_gpu": [
+    2
+  ],
   "tasks": [],
-  "task_configs": ["demo_clean", "demo_randomized"],
+  "task_configs": [
+    "demo_clean",
+    "demo_randomized"
+  ],
   "episodes": 50,
   "seed_start": 100000,
   "seed_timeout": 1200,
@@ -28,5 +42,7 @@
   "ready_only": false,
   "allow_partial_expert_seeds": false,
   "resume_interrupted": false,
-  "export_dataset": null
+  "export_dataset": null,
+  "rollout_timeout": 3600,
+  "expert_prefetch_gpus": []
 }

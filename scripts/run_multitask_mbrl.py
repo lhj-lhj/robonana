@@ -155,6 +155,65 @@ def preflight_training(opts, config):
             child.close()
 
 
+def prepare_candidate(opts, task, task_config, seed, root, env, gpu, port, worker):
+    """Reuse the official expert check; a cached result belongs to this frozen run only."""
+    for stage in [root / "prepare"] + sorted(root.glob("prepare_retry_*")):
+        accepted, rejected = stage / "accepted_seeds.json", stage / "rejected_seed.json"
+        if accepted.exists():
+            jobs = json.loads(accepted.read_text())["jobs"]
+            if len(jobs) != 1 or jobs[0]["seed"] != seed:
+                raise ValueError(f"Expert cache seed mismatch: {stage}")
+            return stage, False
+        if rejected.exists():
+            row = json.loads(rejected.read_text())
+            if row.get("seed") == seed and row.get("reason") in ("expert_infeasible", "expert_unstable"):
+                return stage, True
+    # An interrupted check is archived, never counted as an expert rejection.
+    if root.exists():
+        root.rename(root.with_name(root.name + f"_interrupted_{time.time_ns()}"))
+    runtime = root / "runtime"
+    runtime.mkdir(parents=True, mode=0o700)
+    command = [str(opts.sim_python), str(ROOT / "scripts/internal/collect_robotwin_pool_worker.py"),
+        "--prepare-seeds", "1", "--strict-infra", "--candidate-limit", "1", "--seed-start", str(seed),
+        "--task-name", task, "--task-config", task_config, "--robotwin", str(opts.robotwin),
+        "--output", str(root / "prepare"), "--port", str(port), "--worker-id", str(worker)]
+    sim_env = dict(env, CUDA_VISIBLE_DEVICES=str(gpu), OIDN_DEFAULT_DEVICE="cuda",
+                   ROBONANA_SAPIEN_RENDER_DEVICE="cuda:0", XDG_RUNTIME_DIR=str(runtime))
+    return run_seed_stage(command, env=sim_env, root=root, stage="prepare",
+                          timeout=opts.seed_timeout, retries=opts.infra_retries)
+
+
+def prefetch_candidates(opts, task, task_config, seeds, root, env, port):
+    """Parallel execution never changes seed order: only collect_task commits the ledger.
+
+    Each configured GPU entry is one simulator slot (repeated ids are explicit).
+    A shared slot queue bounds concurrency across tasks. An infrastructure error
+    is retained at its seed and raised when that seed is reached, never skipped.
+    """
+    def check(seed):
+        while not STOP.is_set():
+            try:
+                gpu = opts.expert_slots.get(timeout=.5)
+                break
+            except Empty:
+                continue
+        else:
+            raise InterruptedError("Expert prefetch cancelled")
+        try:
+            return prepare_candidate(opts, task, task_config, seed, root / str(seed), env, gpu, port, seed)
+        finally:
+            opts.expert_slots.put(gpu)
+    results = {}
+    with ThreadPoolExecutor(max_workers=len(opts.expert_prefetch_gpus)) as pool:
+        futures = {seed: pool.submit(check, seed) for seed in seeds}
+        for seed, future in futures.items():
+            try:
+                results[seed] = future.result()
+            except Exception as exc:
+                results[seed] = exc
+    return results
+
+
 def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gpu, revision):
     """一个 task/config 只有一个调度者，避免并发重复 seed 或覆盖 ledger。"""
     from robonana.inference_contract import sha256_file
@@ -179,6 +238,7 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
         if locked["robotwin_commit"] != revision or locked["task_config_sha256"] != sha256_file(opts.robotwin / "task_config" / f"{task_config}.yml"):
             raise ValueError("Locked scenes do not match simulator revision/config")
     attempts = len(ledger)
+    prefetched = {}
     while (attempts < len(locked["jobs"]) if locked else len(accepted) < opts.episodes):
         if STOP.is_set():
             raise InterruptedError("Collection cancelled")
@@ -201,17 +261,19 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
         if locked:
             job = dict(locked["jobs"][attempts-1])
         else:
-            prepare = [str(opts.sim_python), str(ROOT / "scripts/internal/collect_robotwin_pool_worker.py"),
-                       "--prepare-seeds", "1", "--strict-infra", "--candidate-limit", "1", "--seed-start", str(seed),
-                       "--task-name", task, "--task-config", task_config, "--robotwin", str(opts.robotwin),
-                       "--output", str(attempt / "prepare"), "--port", str(server_opts.port),
-                       "--worker-id", str(lane)]
-            runtime = attempt / "runtime"
-            runtime.mkdir(parents=True, mode=0o700, exist_ok=True)
-            sim_env = dict(env, CUDA_VISIBLE_DEVICES=str(sim_gpu), OIDN_DEFAULT_DEVICE="cuda",
-                           ROBONANA_SAPIEN_RENDER_DEVICE="cuda:0", XDG_RUNTIME_DIR=str(runtime))
-            prepared, rejected = run_seed_stage(prepare, env=sim_env, root=attempt,
-                stage="prepare", timeout=opts.seed_timeout, retries=opts.infra_retries)
+            if opts.expert_prefetch_gpus:
+                if seed not in prefetched:
+                    stop = min(opts.seed_start + opts.episodes * opts.candidate_multiplier,
+                               seed + len(opts.expert_prefetch_gpus))
+                    prefetched = prefetch_candidates(opts, task, task_config, range(seed, stop),
+                        task_root / "expert_prefetch", env, server_opts.port)
+                outcome = prefetched.pop(seed)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                prepared, rejected = outcome
+            else:
+                prepared, rejected = prepare_candidate(opts, task, task_config, seed,
+                    attempt / "expert", env, sim_gpu, server_opts.port, lane)
             if rejected:
                 row.update(status="candidate_rejected", reason=json.loads((prepared / "rejected_seed.json").read_text())["reason"])
                 ledger.append(row)
@@ -232,9 +294,9 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
                    "--external-server", "--inference-mode", server_opts.inference_mode,
                    "--capture-mode", opts.capture_mode,
                    "--candidate-batch-size", str(opts.candidate_batch_size), "--timeout-seconds",
-                   str(opts.seed_timeout)]
+                   str(opts.rollout_timeout)]
         rollout, _ = run_seed_stage(command, env=env, root=attempt, stage="rollout",
-            timeout=opts.seed_timeout + 60, retries=opts.infra_retries)
+            timeout=opts.rollout_timeout + 60, retries=opts.infra_retries)
         row["returncode"] = 0
         result = json.loads((rollout / "summary.json").read_text())
         if len(result['episodes']) != 1 or int(result['episodes'][0]['seed']) != seed:
@@ -458,7 +520,11 @@ def _collection(opts):
                       policy_ports=list(range(opts.port, opts.port+lanes)), workers_per_lane=counts)))
     # 运行参数独立记录：调整并发不能改变冻结的 seed/模型协议。
     atomic_json(opts.output / "execution.json", dict(workers_per_gpu=counts, gpus=opts.gpus,
-                inference_batch_size=1, updated_at=time.time()))
+                inference_batch_size=1, expert_prefetch_gpus=opts.expert_prefetch_gpus,
+                seed_timeout=opts.seed_timeout, rollout_timeout=opts.rollout_timeout, updated_at=time.time()))
+    opts.expert_slots = Queue()
+    for gpu in opts.expert_prefetch_gpus:
+        opts.expert_slots.put(gpu)
     if opts.expert_jobs is None:
         opts.task_queue = Queue()
         for pair in pairs:

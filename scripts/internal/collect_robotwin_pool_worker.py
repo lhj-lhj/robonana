@@ -162,6 +162,13 @@ def main():
                     import numpy as np
                     result['scout_seconds'] = result['duration_seconds']
                     result['scout_rgb_steps'] = result['rgb_steps']
+                    # Persist the measured policy result before expensive failure recording.
+                    # This audit file is not a completed ledger row or a published dataset.
+                    # If recording times out, its original outcome remains inspectable.
+                    audit = output / f"scout_{int(job['seed'])}.json"
+                    temporary = audit.with_suffix('.tmp')
+                    temporary.write_text(json.dumps(dict(job=job, result=result)), encoding='utf-8')
+                    temporary.replace(audit)
                     # Benchmark replays successes too to measure the baseline cost;
                     # their frames are buffered then discarded, never published.
                     if opts.capture_mode != 'scout' and (not result['success'] or opts.capture_mode == 'paired_benchmark'):

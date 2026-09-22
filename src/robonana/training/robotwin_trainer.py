@@ -110,6 +110,8 @@ class RoboNanaTrainer(Trainer):
                     "FACT initialized the trainer at a nonzero step unexpectedly"
                 )
             self._cur_step = initial_global_step
+
+        # 给模型设置显存上限
         self.memory_limit_gib = float(self.kwargs.get("memory_limit_gib", 0.0))
         self.cuda_device_index = resolve_cuda_device_index(self.device)
         if self.memory_limit_gib > 0 and self.device.type == "cuda":
@@ -118,12 +120,16 @@ class RoboNanaTrainer(Trainer):
             torch.cuda.set_per_process_memory_fraction(
                 min(1.0, limit_bytes / total_bytes), self.cuda_device_index
             )
+        # 清空显存峰值统计
         if self.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(self.cuda_device_index)
+        # grid_height=12, grid_width=24 VAE latent token 的网格尺寸
         self.grid_height = int(self.kwargs.get("latent_grid_height", 12))
         self.grid_width = int(self.kwargs.get("latent_grid_width", 24))
+        # flow matching
         self.flow_shift = float(self.kwargs.get("flow_shift", 1.0))
         self.num_inference_steps = int(self.kwargs.get("num_inference_steps", 20))
+
         if self.num_inference_steps <= 0:
             raise ValueError("num_inference_steps must be positive")
         self._optimizer_step_succeeded = False

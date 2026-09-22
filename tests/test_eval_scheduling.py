@@ -122,3 +122,46 @@ def test_legacy_results_csv_uses_evaluated_denominator(tmp_path):
     with (tmp_path/'results.csv').open() as handle:
         rows = list(csv.DictReader(handle))
     assert rows == [dict(task='task', task_config='demo_clean', success='1', total='2', success_rate='0.5')]
+
+
+def test_prefetch_finishes_out_of_order_but_consumes_in_seed_order(tmp_path, monkeypatch):
+    m = launcher()
+    slots = Queue()
+    slots.put(3); slots.put(3)
+    opts = SimpleNamespace(expert_prefetch_gpus=[3, 3], expert_slots=slots)
+    finished = []
+    def prepare(opts, task, config, seed, root, env, gpu, port, worker):
+        assert gpu == 3
+        if seed == 100000:
+            time.sleep(.05)
+        finished.append(seed)
+        return root, seed == 100000
+    monkeypatch.setattr(m, 'prepare_candidate', prepare)
+    results = m.prefetch_candidates(opts, 'task', 'demo_clean', range(100000, 100002), tmp_path, {}, 9000)
+    assert finished == [100001, 100000]
+    assert list(results) == [100000, 100001]
+    assert results[100000][1] is True
+    assert results[100001][1] is False
+    assert slots.qsize() == 2
+
+
+def test_prefetch_infrastructure_error_is_not_seed_rejection(tmp_path, monkeypatch):
+    m = launcher()
+    slots = Queue(); slots.put(3)
+    opts = SimpleNamespace(expert_prefetch_gpus=[3], expert_slots=slots)
+    def fail(*args):
+        raise TimeoutError('expert hung')
+    monkeypatch.setattr(m, 'prepare_candidate', fail)
+    results = m.prefetch_candidates(opts, 'task', 'demo_clean', [100000], tmp_path, {}, 9000)
+    assert isinstance(results[100000], TimeoutError)
+    assert slots.qsize() == 1
+
+
+def test_prefetch_reuses_exact_seed_cache_without_running_simulator(tmp_path, monkeypatch):
+    m = launcher()
+    m.atomic_json(tmp_path/'prepare/accepted_seeds.json', {'jobs':[{'seed':100000,'instruction':'place it'}]})
+    monkeypatch.setattr(m, 'run_seed_stage', lambda *a, **kw: pytest.fail('must reuse successful check'))
+    args = (None, 'task', 'demo_clean', 100000, tmp_path, {}, 3, 9000, 0)
+    assert m.prepare_candidate(*args) == (tmp_path/'prepare', False)
+    with pytest.raises(ValueError, match='seed mismatch'):
+        m.prepare_candidate(None, 'task', 'demo_clean', 100001, tmp_path, {}, 3, 9000, 0)

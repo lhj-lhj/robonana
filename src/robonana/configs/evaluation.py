@@ -21,6 +21,8 @@ class EvalOptions:
     episodes: int
     seed_start: int
     seed_timeout: int
+    rollout_timeout: int
+    expert_prefetch_gpus: tuple[int, ...]
     candidate_multiplier: int
     infra_retries: int
     port: int
@@ -37,6 +39,14 @@ class EvalOptions:
     export_dataset: Path | None
 
     def __post_init__(self):
+        if self.seed_timeout <= 0 or self.rollout_timeout <= 0:
+            raise ValueError("Expert and rollout timeouts must both be explicit positive seconds")
+        if any(g < 0 for g in self.expert_prefetch_gpus):
+            raise ValueError("expert_prefetch_gpus must contain nonnegative GPU ids")
+        if set(self.expert_prefetch_gpus) & set(self.gpus):
+            raise ValueError("Expert prefetch GPUs must be separate from policy/simulator GPUs")
+        if self.expert_prefetch_gpus and (self.manifests or self.expert_seed_cache):
+            raise ValueError("Expert prefetch is only valid for official sequential candidate evaluation")
         if self.inference_mode not in ('action_only','action_q_rejection'): raise ValueError('Invalid inference_mode')
         if self.capture_mode not in ('scout','scout_replay','full'): raise ValueError('Invalid capture_mode')
         if not self.task_configs or set(self.task_configs)-{'demo_clean','demo_randomized'}:

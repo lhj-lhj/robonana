@@ -143,3 +143,14 @@ def test_ignored_legacy_environment_cannot_override_explicit_batch(tmp_path, mon
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
     assert plan['batch']['global_batch'] == plan['requested']['global_batch'] == 128
+
+
+def test_eval_timeouts_and_prefetch_topology_are_explicit():
+    o = load_options(EvalOptions, ROOT/'configs/eval.json')
+    assert o.rollout_timeout > o.seed_timeout
+    for field in ('seed_timeout', 'rollout_timeout'):
+        with pytest.raises(ValueError, match='positive seconds'):
+            replace(o, **{field: 0})
+    with pytest.raises(ValueError, match='separate'):
+        replace(o, expert_prefetch_gpus=(o.gpus[0],))
+    assert replace(o, gpus=(1,), expert_prefetch_gpus=(3,3)).expert_prefetch_gpus == (3,3)

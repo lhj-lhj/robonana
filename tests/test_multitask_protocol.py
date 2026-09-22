@@ -66,7 +66,7 @@ def test_seed_timeout_retries_same_seed_and_locked_eval_stops(tmp_path, monkeypa
     (simulator/"task_config/demo_clean.yml").write_text("config")
     opts=SimpleNamespace(command="collect",output=tmp_path/"collect",robotwin=simulator,
         checkpoint=tmp_path/"model.bin",model_config=tmp_path/"model.json",gpus=[0,1],port=8400,
-        episodes=1,seed_timeout=60,seed_start=300000,candidate_multiplier=20,sim_python=Path(sys.executable),
+        episodes=1,seed_timeout=60,rollout_timeout=180,expert_prefetch_gpus=[],seed_start=300000,candidate_multiplier=20,sim_python=Path(sys.executable),
         initial_dataset=tmp_path/"initial",manifests=None, shared_gpus=False, workers_per_gpu=[1],
         infra_retries=2, resume_interrupted=False, capture_mode="scout_replay", inference_mode="action_only",
         candidate_batch_size=32, flux_checkpoint_dir=tmp_path, stats_path=tmp_path/"stats.json")
@@ -80,6 +80,8 @@ def test_seed_timeout_retries_same_seed_and_locked_eval_stops(tmp_path, monkeypa
             output=Path(command[command.index("--output")+1])
             module.atomic_json(output/"accepted_seeds.json",dict(jobs=[dict(seed=seed,instruction="fixed words")]))
         else:
+            assert command[command.index("--timeout-seconds")+1] == "180"
+            assert kwargs["timeout"] == 240
             output=Path(command[command.index("--output")+1])
             module.atomic_json(output/"summary.json",dict(replay_mismatches=0,
                 episodes=[dict(seed=300000,success=True,hdf5=None)]))
@@ -131,7 +133,7 @@ def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monk
     seen = []
     opts = SimpleNamespace(command="collect", output=tmp_path/"run", robotwin=tmp_path/"robotwin",
         checkpoint=tmp_path/"model.bin", model_config=tmp_path/"config.json", gpus=list(range(8)), port=8400,
-        episodes=100, seed_timeout=60, seed_start=300000, candidate_multiplier=20, sim_python=Path(sys.executable),
+        episodes=100, seed_timeout=60,rollout_timeout=180,expert_prefetch_gpus=[], seed_start=300000, candidate_multiplier=20, sim_python=Path(sys.executable),
         initial_dataset=tmp_path/"initial", manifests=None, expert_jobs={f"{task}__{cfg}": loaded},
         shared_gpus=True, shard_count=8, shard_offset=0, workers_per_gpu=[1], infra_retries=2, resume_interrupted=False, capture_mode="scout_replay", inference_mode="action_only",
         candidate_batch_size=32, flux_checkpoint_dir=tmp_path, stats_path=tmp_path/"stats.json")

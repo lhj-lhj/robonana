@@ -77,6 +77,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
             raise ValueError("mac_mot_v2 requires one reward logit per chunk step")
         if (int(success_dim), int(q_dim), int(value_dim)) != (1, 1, 1):
             raise ValueError("mac_mot_v2 success, Q, and Value outputs must be scalar")
+        # 当前版本去掉了dino traget
         if dino_dim is not None:
             raise ValueError("mac_mot_v2 world sequence does not include a DINO target")
         super().__init__(

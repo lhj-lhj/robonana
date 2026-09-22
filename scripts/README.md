@@ -68,3 +68,13 @@ Stage1/2必须同时提供 checkpoint、model_config、replay_root；Stage2不�
 旧单任务轮次、legacy参数翻译、孤立eval启动器和7个叠加配置模块已删除；源码历史由Git保留。历史实验文档中的旧命令不可作为新启动方式。
 
 路径示例：`configs/eval.json` 中的 `../outputs/eval` 指向 `runtime/outputs/eval`；`outputs/eval` 则指向 `runtime/configs/outputs/eval`。启动时显示 `config_file`、`path_base` 和展开后的绝对路径；切换终端目录不会改变同一配置文件的含义。
+
+### 长任务超时与官方 seed 并行预检
+
+- `seed_timeout`：单颗候选的 expert 检查秒数上限。
+- `rollout_timeout`：同一颗 seed 的 policy scout、失败录制及文件写入的**总**秒数上限；长任务使用 3600，不能再与 expert 共用 1200 秒预算。
+- `expert_prefetch_gpus`：独立的 expert 仿真槽位。`[]` 表示串行；例如 `[3,3,3,3]` 明确表示 GPU3 上最多四个仿真进程，与 policy GPU 分离。所有任务共享此上限。
+
+预检复用同一个 worker，连续候选并行执行，只有调度者按 seed 升序写入 ledger。后面的 seed 即使先通过，也不能越过尚未验收或发生基础设施错误的前一个 seed。缓存留在当前冻结协议的输出目录，重启可复用；超出最终50个有效结果的预检不计入评测。
+
+scout 完成后立即保存 `scout_<seed>.json` 审计记录，再录制失败。录制超时不会丢失该审计记录，也不会把半成品发布为有效失败数据或假装整次评测完成；仍重试同一 seed，保留各次产物。SR 仍以正式 ledger 为准。
