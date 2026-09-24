@@ -45,3 +45,11 @@
 后续验证全部在190进行，不在本地运行测试。2026-09-17已授权上述fixed48吸收态20k正式续训；这不代表授权启动其他消融或正式eval。文档中的计划、单元测试通过、真实实验完成要明确区分。
 
 现行细节见 [技术说明](TECHNICAL_REFERENCE.md)、[代码索引](CURRENT_CODE_MAP.md) 和 [脚本导航](../scripts/README.md)。历史训练、恢复和图像审计保留在archive；不要把某次单任务pilot的默认checkpoint当成50任务实验的初始化。
+
+## V3 Action expert（2026-09-24）
+
+用户已授权实现，尚未授权正式训练。分支 `codex/action-expert-v3-20260924`：
+独立 flow Action expert、联合训练保留 C K/V 梯度、现有 robot LR、fixed48 + 吸收态。
+配置模板 `configs/train_v3.json`（global256、120k），复用统一入口；用户本地注释已保留提交。
+190 隔离 worktree `action_expert_v3_20260924` 完整回归293通过，追加专项13通过；
+未更新运行实验的 checkout，未合入 main。实现与验证边界见 `INHERITANCE.md` 的 V3 节。

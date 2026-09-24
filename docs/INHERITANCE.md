@@ -62,3 +62,21 @@ V2 的 `[L,S,I,A,G,R,U,S',I']` 和权重名不变。
 120000 步、global256（8×16×2）、GC 开启、峰值 LR 2e-5/1e-4、20 步动作采样。
 路径需按服务器资产配置；这是模板，不代表已启动或已测量生产显存/吞吐。
 用相同配置仅将 architecture_version 改为 mac_mot_v2，即为控制变量对照。
+
+### V3 验收记录
+
+2026-09-24，仅在 190 的隔离 worktree
+`/data3/hongjia/robonana_worktrees/action_expert_v3_20260924` 验证：
+
+- `559aaab`：`pytest tests -q`，293 passed（含首次 10 项 v3 测试）；
+  日志 `/tmp/robonana_v3_regression_20260924.log`。
+- `66d29ea`：`pytest tests/test_action_expert_v3.py -q`，13 passed。
+  新增 BF16 CUDA、两进程 DDP（无 unused parameters）、Adam 恢复后下一步一致。
+- 已验证 Action loss 回传 FLUX、Action 与未来标签隔离、World 不依赖预测 A、
+  GC 前后梯度一致、20 步缓存/完整采样一致、候选 batch 映射、严格权重加载、
+  robot LR 分组、critic 阶段冻结，以及配置的数据/loss/LR 合同一致。
+- 这些是小模型功能和分布式测试；尚未跑 4B 生产尺寸的显存/吞吐测量或正式训练。
+
+`posttrain.algorithm` / `q_target_mode` 继续记录原有 MAC v2 的学习目标和数据合同；
+模型拆分由 `models.architecture_version=mac_mot_v3` 明确记录。未修改回报、吸收态、
+数据池、loss 权重或采样协议，不把模型架构版本误当成新的 RL 算法。
