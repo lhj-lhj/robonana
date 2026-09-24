@@ -277,6 +277,7 @@ def test_stage2_creates_critics_and_restores_them_without_reinitializing(tmp_pat
             expert.head.linear.weight.add_(1)
     config["include_critics"] = True
     config_path.write_text(json.dumps(config))
+    weights = tmp_path / "stage2.bin"
     torch.save(stage2.state_dict(), weights)
     resumed, report = load_flux2_fact_trained_checkpoint(weights, device="cpu", dtype=torch.float32,
                                                         include_critics=True)
@@ -290,6 +291,7 @@ def test_stage2_creates_critics_and_restores_them_without_reinitializing(tmp_pat
         torch.testing.assert_close(tensor, stage2.state_dict()[name], atol=0, rtol=0)
     corrupted = dict(stage2.state_dict())
     corrupted.pop("q_expert.head.linear.weight")
+    weights = tmp_path / "corrupted.bin"
     torch.save(corrupted, weights)
     with pytest.raises(RuntimeError):
         load_flux2_fact_trained_checkpoint(weights, device="cpu", include_critics=True)
