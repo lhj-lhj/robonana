@@ -48,8 +48,12 @@
 
 ## V3 Action expert（2026-09-24）
 
-用户已授权实现，尚未授权正式训练。分支 `codex/action-expert-v3-20260924`：
+用户2026-09-24已进一步授权停WAM并正式训练。分支 `codex/action-expert-v3-20260924`：
 独立 flow Action expert、联合训练保留 C K/V 梯度、现有 robot LR、fixed48 + 吸收态。
 配置模板 `configs/train_v3.json`（global256、120k），复用统一入口；用户本地注释已保留提交。
 190 隔离 worktree `action_expert_v3_20260924` 完整回归293通过，追加专项13通过；
 未更新运行实验的 checkout，未合入 main。实现与验证边界见 `INHERITANCE.md` 的 V3 节。
+
+2026-09-24正式启动：v3 fixed48，原始FLUX初始化120k，8×32×1=global256，GC stride1。
+真实八卡两步短测exit0；会话`rn_v3_fixed48_bs256_20260924`，实际配置与输出见当前实验顶部。
+不要把模板的8×16×2或此前“未授权训练”作为本次运行配置/授权状态。

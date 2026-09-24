@@ -4,6 +4,34 @@
 
 ## 当前到哪一步
 
+### 2026-09-24：v3 fixed48、global256 八卡预训练
+
+用户明确授权停止190上的WAM训练并启动RoboNANA v3。核验后仅向WAM launcher
+`2655111` 发送SIGTERM，其八个训练rank均已退出；GPU4–7上其他推理服务保持运行。
+停止证据在190 `/tmp/wam_stop_for_robonana_v3_20260924.json`。
+
+- 代码：`e2a3673`，分支 `codex/action-expert-v3-20260924`；隔离checkout
+  `/data3/hongjia/robonana_worktrees/action_expert_v3_20260924`。
+- 模型：mac_mot_v3、独立flow Action expert且梯度回传FLUX、fixed48、吸收态修复。
+  原始 `FLUX.2-klein-base-4B` 初始化，从0训练120000步，不加载v2训练权重。
+- 八卡0–7，每卡32、累积1、global256；BF16、GC开启、single stride1。
+  峰值LR FLUX2e-5 / robot1e-4，warmup500，原WarmupCosine；seed6666。
+- 原v2相同数据/统计/loss：`/workspace/datasets/fact-robotwin-v2/RoboTwin`，
+  Clean+Randomized，27500条成功演示、6075103帧；全量缓存与输入合同预检通过。
+- 正式配置：`/data3/hongjia/run_configs/v3_fixed48_global256_20260924/train.json`。
+  同目录`run.sh`调用统一JSON入口，`launch_provenance.json`记录代码和配置哈希。
+- 磁盘启动前剩约514GB；每1000步保存，滚动保留最近两份，额外保留最终120k；
+  未删除既有checkpoint。相比模板取消10k/30k/60k额外永久保留，避免本轮填满磁盘。
+- 八卡真实两步短测已exit0：loss有限，无OOM，峰值allocated34.044GiB、
+  reserved37.891GiB。第二步9.87秒，仅短测，不能作为稳定吞吐/完训ETA。
+- 正式启动时间北京时间12:24；tmux `rn_v3_fixed48_bs256_20260924`。
+  输出 `/data3/hongjia/robonana/experiments/v3_fixed48_global256_20260924`；
+  启动日志 `/data3/hongjia/run_configs/v3_fixed48_global256_20260924/train.log`。
+- 北京时间12:28核验到`10/120000`，loss有限，无OOM；W&B
+  [nced3qi9](https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/nced3qi9)。
+  前10步平均10.30秒/更新、24.86 samples/s；仅初始观测，日志暂估14天7小时，
+  尚未取得稳定吞吐。GPU4–7与已有推理服务共享，不能把八卡启动描述为独占全部算力。
+
 ### 2026-09-21：修复71评测阻塞并续跑
 
 原八卡评测在北京时间2026-09-21 12:29退出（71日志为UTC−7）。100组中60组完成，所有ledger合计3370条有效评测、2452次成功；尚缺1630条。40组阻塞细分为26组expert规划异常、6组成功判定属性缺失、8组上游VectorEnv固定120秒超时。
