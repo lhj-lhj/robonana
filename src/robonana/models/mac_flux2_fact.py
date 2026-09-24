@@ -1,4 +1,4 @@
-"""Current fixed-48 MAC actor/world model with separate MoT scalar experts."""
+"""Unified MAC actor/world model: v2 shared actor or v3 MoT action expert."""
 
 from __future__ import annotations
 

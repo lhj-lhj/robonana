@@ -1,4 +1,4 @@
-"""Load the single maintained mac_mot_v2 FLUX.2 model.
+"""Load the maintained v2/v3 FLUX.2 model through one strict loader.
 
 Initialize from complete upstream FLUX backbone weights for new pretraining,
 or strictly restore a trained MAC checkpoint. Neither path accepts a legacy

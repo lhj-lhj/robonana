@@ -272,6 +272,8 @@ class RoboNanaTrainer(Trainer):
         self.world_conditioning = str(_config_value(model_config, "world_conditioning", "fixed48"))
         if self.world_conditioning not in {"fixed48", "rope_prefix"}:
             raise ValueError("world_conditioning must be fixed48 or rope_prefix")
+        if architecture_version == "mac_mot_v3" and self.world_conditioning != "fixed48":
+            raise ValueError("v3 currently requires fixed48")
         value_dim = int(_config_value(model_config, "value_dim", 1))
         expert_hidden_dim = _config_value(model_config, "expert_hidden_dim", None)
         expert_hidden_dim = None if expert_hidden_dim is None else int(expert_hidden_dim)

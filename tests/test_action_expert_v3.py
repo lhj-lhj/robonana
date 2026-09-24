@@ -174,3 +174,78 @@ def test_v3_config_is_explicit_and_preserves_data_and_loss_contract():
     assert a["train"] == b["train"]
     with pytest.raises(ValueError, match="fixed48"):
         replace(v3, world_conditioning="rope_prefix")
+
+
+def test_cuda_bfloat16_joint_and_cached_action():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    model, inputs, _ = setup_v3("cuda")
+    model.bfloat16().enable_gradient_checkpointing()
+    inputs = {k: v.bfloat16() if v.is_floating_point() and "timestep" not in k else v
+              for k, v in inputs.items()}
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        out = model(**inputs)
+        loss = sum(getattr(out, name).float().square().mean()
+                   for name in ("action", "image", "future_state", "reward", "success"))
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+    assert model.action_expert.head.linear.weight.grad.abs().sum() > 0
+    condition = {k: inputs[k] for k in ("context", "context_ids", "current_latents", "current_ids", "state", "context_mask")}
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        cache = model.prefill_condition_cache(**condition)
+        actual = model.predict_action_cached(cache, inputs["noisy_pred_action"],
+                    batch_indices=torch.arange(2, device="cuda"), timestep=inputs["action_timestep"])
+    torch.testing.assert_close(actual, out.action, atol=.025, rtol=.025)
+
+
+def test_v3_adam_resume_matches_uninterrupted_update():
+    model, inputs, _ = setup_v3()
+    model.enable_gradient_checkpointing()
+    optimizer = torch.optim.AdamW(build_optimizer_param_groups(model, base_lr=2e-5, robot_lr=1e-4))
+    def step(m, opt):
+        opt.zero_grad(set_to_none=True)
+        out = m(**inputs)
+        sum(getattr(out, name).square().mean() for name in
+            ("action", "image", "future_state", "reward", "success")).backward()
+        opt.step()
+    step(model, optimizer)
+    restored = copy.deepcopy(model)
+    restored_opt = torch.optim.AdamW(build_optimizer_param_groups(restored, base_lr=2e-5, robot_lr=1e-4))
+    restored_opt.load_state_dict(copy.deepcopy(optimizer.state_dict()))
+    step(model, optimizer)
+    step(restored, restored_opt)
+    for name, tensor in model.state_dict().items():
+        torch.testing.assert_close(tensor, restored.state_dict()[name], atol=0, rtol=0)
+
+
+def _ddp_v3_worker(rank, rendezvous):
+    import torch.distributed as dist
+    from datetime import timedelta
+    dist.init_process_group("gloo", rank=rank, world_size=2, init_method=rendezvous,
+                            timeout=timedelta(seconds=90))
+    try:
+        model, inputs, _ = setup_v3()
+        model.enable_gradient_checkpointing()
+        ddp = torch.nn.parallel.DistributedDataParallel(model, find_unused_parameters=False)
+        optimizer = torch.optim.AdamW(build_optimizer_param_groups(model, base_lr=2e-5, robot_lr=1e-4))
+        # Different batches exercise synchronization; two iterations catch an
+        # unfinished reducer from any mistakenly registered unused v3 parameter.
+        inputs["context"] = inputs["context"] + rank
+        for _ in range(2):
+            optimizer.zero_grad(set_to_none=True)
+            out = ddp(**inputs)
+            sum(getattr(out, name).square().mean() for name in
+                ("action", "image", "future_state", "reward", "success")).backward()
+            optimizer.step()
+        for parameter in (model.img_in.weight, model.action_expert.head.linear.weight):
+            copies = [torch.empty_like(parameter) for _ in range(2)]
+            dist.all_gather(copies, parameter.detach())
+            torch.testing.assert_close(copies[0], copies[1], atol=0, rtol=0)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_v3_two_rank_training_has_no_unused_reducer_parameters(tmp_path):
+    torch.multiprocessing.spawn(_ddp_v3_worker,
+        args=((tmp_path / "v3-rendezvous").as_uri(),), nprocs=2, join=True)
