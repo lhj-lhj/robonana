@@ -81,6 +81,10 @@ scout 完成后立即保存 `scout_<seed>.json` 审计记录，再录制失败�
 
 ### V3 Action expert
 
+pretrain/Stage1自动生成`models.include_critics=false`，Stage2生成true。
+GC只有`models.gradient_checkpointing`及single stride生效；生成配置不再包含
+`train.activation_checkpointing`。启动日志显示实际backend、enabled、stride及Q/V状态。
+
 `python scripts/run_multitask_mbrl.py train --config configs/train_v3.json`
 沿用唯一训练入口，默认只展示解析后的配置；正式启动仍需现有执行开关。
 V3 模板是 fixed48 + 吸收态修复、global256、120k，从原始 FLUX 初始化。

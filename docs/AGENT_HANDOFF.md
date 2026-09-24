@@ -57,3 +57,9 @@
 2026-09-24正式启动：v3 fixed48，原始FLUX初始化120k，8×32×1=global256，GC stride1。
 真实八卡两步短测exit0；会话`rn_v3_fixed48_bs256_20260924`，实际配置与输出见当前实验顶部。
 不要把模板的8×16×2或此前“未授权训练”作为本次运行配置/授权状态。
+
+2026-09-24后续：用户要求停止上面旧任务、pretrain移除Q/V并测试stride2。
+代码`5fad5ed`已在190通过301项回归；Q/V仅Stage2创建，GC日志和配置统一为model-native。
+8×32×1的stride2在GPU4–7真实OOM，保留stride1；新会话`rn_v3_no_critics_20260924`，
+新输出`v3_no_critics_stride1_20260924`。旧任务410步尚无checkpoint，故从原始FLUX重启。
+实际配置、失败短测证据和路径见当前实验顶部。

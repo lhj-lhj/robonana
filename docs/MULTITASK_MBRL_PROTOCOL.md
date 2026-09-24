@@ -4,6 +4,29 @@
 
 ## 当前到哪一步
 
+### 2026-09-24：移除pretrain Q/V；stride2短测OOM，保留stride1重启
+
+用户要求停止本轮v3、Q/V只在Stage2加载，并实测stride2。已停止旧launcher
+`3505357`；停止前最后日志为410步，首次1000步保存尚未触发，models目录为空，
+因此新任务从原始FLUX的第0步重新训练，未声称续接这410步。
+
+- 代码 `5fad5ed`：pretrain/Stage1不创建Q/V，Stage2首次从当前World初始化，
+  Stage2续训严格恢复。pretrain总参数从5565949184降为4439237376，trainable数不变。
+- 新配置删除`train.activation_checkpointing`；只使用模型内部GC开关和single stride，
+  启动日志明确输出`backend=model-native`及`Q/V_loaded=False`。190完整回归301 passed。
+- 八卡、每卡32、累积1、stride2真实短测在GPU4–7发生OOM：本任务约57–59GiB，
+  同卡其他推理任务约104–105GiB。未停止其他任务，也未把失败短测当作训练进度。
+  证据：`/data3/hongjia/run_configs/v3_no_critics_stride2_20260924/smoke.log`。
+- 按“不OOM才采用stride2”的条件保留stride1。正式新配置
+  `/data3/hongjia/run_configs/v3_no_critics_stride1_20260924/train.json`：
+  八卡0–7、8×32×1=global256、fixed48、吸收态修复、120k，原数据与LR不变。
+  输出`/data3/hongjia/robonana/experiments/v3_no_critics_stride1_20260924`；
+  tmux `rn_v3_no_critics_20260924`，配置同目录`train.log`。
+  checkout `/data3/hongjia/robonana_worktrees/v3_stage2_critics_20260924`。
+- 北京时间13:41核验到10/120000，loss有限，无OOM；本任务进程每卡37780–39064MiB
+  （约36.9–38.1GiB）。前10步10.47秒/更新，仅启动区间。
+  W&B [fzmfc186](https://wandb.ai/hongjia-liu-aalto-university/robonana/runs/fzmfc186)。
+
 ### 2026-09-24：v3 fixed48、global256 八卡预训练
 
 用户明确授权停止190上的WAM训练并启动RoboNANA v3。核验后仅向WAM launcher
