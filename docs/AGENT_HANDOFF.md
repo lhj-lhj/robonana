@@ -2,6 +2,10 @@
 
 当前进度只维护在 [当前实验](MULTITASK_MBRL_PROTOCOL.md)，不要从历史文档的目录名推断训练状态。源码修改前核对 Git、保存配置和实际进程。
 
+2026-09-24分支整理：用户要求合并分支，全部8个实验分支的提交已收拢到`main`。
+后续从`main`接手；下文历史分支名仅是实验来源，定位旧版本使用记录的commit。
+190正在训练的`v3_stage2_critics_20260924`目录仍固定`5fad5ed`，本次合并不更新运行代码。
+
 ## 工作位置
 
 - 2026-09-19更新：rope_prefix四卡已按用户要求停止，最新ckpt11000；多h图像诊断30组已完成。原fixed48 batch128仍运行，新fixed48 batch256（0–3卡，每卡32×累积2，GC）短测通过后启动。新任务使用隔离worktree `horizon_batch256_20260919` 和用户目录610驱动库；详见当前实验最新记录，不要重启系统驱动。
@@ -48,11 +52,11 @@
 
 ## V3 Action expert（2026-09-24）
 
-用户2026-09-24已进一步授权停WAM并正式训练。分支 `codex/action-expert-v3-20260924`：
+用户2026-09-24已进一步授权停WAM并正式训练，相关代码现已合入 `main`：
 独立 flow Action expert、联合训练保留 C K/V 梯度、现有 robot LR、fixed48 + 吸收态。
 配置模板 `configs/train_v3.json`（global256、120k），复用统一入口；用户本地注释已保留提交。
 190 隔离 worktree `action_expert_v3_20260924` 完整回归293通过，追加专项13通过；
-未更新运行实验的 checkout，未合入 main。实现与验证边界见 `INHERITANCE.md` 的 V3 节。
+运行实验的 checkout 保持原版本；main 已包含后续修复。实现与验证边界见 `INHERITANCE.md` 的 V3 节。
 
 2026-09-24正式启动：v3 fixed48，原始FLUX初始化120k，8×32×1=global256，GC stride1。
 真实八卡两步短测exit0；会话`rn_v3_fixed48_bs256_20260924`，实际配置与输出见当前实验顶部。
