@@ -23,6 +23,8 @@ class TrainOptions:
     flux_checkpoint_dir: Path
     stats_path: Path
     phase: str
+    architecture_version: str
+    expert_hidden_dim: int
     checkpoint: Path | None
     model_config: Path | None
     replay_root: Path | None
@@ -67,6 +69,12 @@ class TrainOptions:
             raise ValueError("gpus * microbatch * accumulation_steps must equal global_batch")
         if self.max_steps is None or self.lr is None or self.robot_lr is None:
             raise ValueError("max_steps, lr and robot_lr must be explicit")
+        if self.architecture_version not in ('mac_mot_v2', 'mac_mot_v3'):
+            raise ValueError('architecture_version must be mac_mot_v2 or mac_mot_v3')
+        if self.expert_hidden_dim <= 0:
+            raise ValueError('expert_hidden_dim must be positive')
+        if self.architecture_version == 'mac_mot_v3' and self.world_conditioning != 'fixed48':
+            raise ValueError('v3 currently requires fixed48')
         if self.phase not in PHASES: raise ValueError('phase must be pretrain/stage1/stage2')
         if self.world_conditioning not in ('fixed48','rope_prefix'): raise ValueError('Invalid world_conditioning')
         if self.phase == 'stage2' and self.world_conditioning != 'fixed48': raise ValueError('Stage2 requires fixed48')
@@ -158,13 +166,13 @@ def build_training_config(o: TrainOptions):
             batch_size_per_gpu=o.microbatch, num_workers=o.num_workers, pin_memory=True,
             persistent_workers=o.num_workers>0, prefetch_factor=4 if o.num_workers>0 else None,
             transform=None, sampler=sampler, collator=dict(is_equal=True)), test={}),
-        models=dict(architecture_version='mac_mot_v2', initialization='flux_backbone' if o.phase=='pretrain' else 'trained',
+        models=dict(architecture_version=o.architecture_version, initialization='flux_backbone' if o.phase=='pretrain' else 'trained',
             checkpoint=str(o.flux_checkpoint_dir/'flux-2-klein-base-4b.safetensors') if o.phase=='pretrain' else str(o.checkpoint),
             checkpoint_config=None if o.phase=='pretrain' else str(o.model_config), checkpoint_dir=str(o.flux_checkpoint_dir),
             params=copy.deepcopy(MODEL_PARAMS), action_dim=ACTION_DIM, state_dim=ACTION_DIM, reward_dim=CHUNK,
             success_dim=1, q_dim=1, reward_head_type='binary_chunk', max_horizon=CHUNK,
             pred_action_bidirectional=True, chunk_horizon=CHUNK, value_dim=1, dino_dim=None,
-            expert_hidden_dim=1024, train_mode=phase, world_conditioning=o.world_conditioning,
+            expert_hidden_dim=o.expert_hidden_dim, train_mode=phase, world_conditioning=o.world_conditioning,
             # 复用模型现有部分重计算开关；不改变精度或动作/World注意力规则。
             gradient_checkpointing=o.gradient_checkpointing, gradient_checkpointing_single_stride=o.single_checkpoint_stride,
             vae_dtype='float32'),

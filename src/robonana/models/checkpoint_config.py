@@ -62,8 +62,14 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
     if missing:
         raise ValueError(f"model config is missing model dimensions: {', '.join(missing)}")
     architecture = str(models.get("architecture_version", ""))
-    if architecture != "mac_mot_v2":
-        raise ValueError("only architecture_version='mac_mot_v2' is supported")
+    if architecture not in {"mac_mot_v2", "mac_mot_v3"}:
+        raise ValueError("architecture_version must be mac_mot_v2 or mac_mot_v3")
+    if architecture == "mac_mot_v3":
+        for name in ("expert_hidden_dim", "world_conditioning"):
+            if name not in models:
+                raise ValueError(f"v3 config requires explicit {name}")
+        if models["world_conditioning"] != "fixed48":
+            raise ValueError("v3 currently requires fixed48")
     horizon = int(models.get("chunk_horizon", 0))
     if horizon != 48 or int(models["max_horizon"]) != 48:
         raise ValueError("the maintained model requires max_horizon=chunk_horizon=48")
@@ -104,13 +110,15 @@ def resolve_checkpoint_config(
     if contract_path.is_file():
         recorded_mode = json.loads(contract_path.read_text(encoding="utf-8")).get("world_conditioning", "fixed48")
     if discovered is None:
+        if architecture_version == "mac_mot_v3":
+            raise FileNotFoundError("v3 checkpoint requires its recorded model config")
         if recorded_mode not in (None, "fixed48"):
             raise FileNotFoundError("rope_prefix checkpoint requires its recorded model config")
         explicit = (params, action_dim, state_dim, reward_dim, success_dim, q_dim, reward_head_type, max_horizon)
         if not all(value is not None for value in explicit):
             raise FileNotFoundError("complete mac_mot_v2 config is required beside the checkpoint")
-        if architecture_version not in (None, "mac_mot_v2"):
-            raise ValueError("only architecture_version='mac_mot_v2' is supported")
+        if architecture_version not in (None, "mac_mot_v2", "mac_mot_v3"):
+            raise ValueError("architecture_version must be mac_mot_v2 or mac_mot_v3")
         if int(max_horizon) != 48 or int(reward_dim) != 48 or int(success_dim) != 1 or int(q_dim) != 1:
             raise ValueError("explicit metadata must describe fixed-48 mac_mot_v2")
         return RoboNanaCheckpointConfig(
@@ -118,7 +126,7 @@ def resolve_checkpoint_config(
             reward_dim=int(reward_dim), success_dim=int(success_dim), q_dim=int(q_dim),
             reward_head_type=str(reward_head_type), max_horizon=int(max_horizon),
             dino_dim=dino_dim, pred_action_bidirectional=True,
-            architecture_version="mac_mot_v2", chunk_horizon=48,
+            architecture_version=architecture_version or "mac_mot_v2", chunk_horizon=48,
             value_dim=1 if value_dim is None else int(value_dim), source="explicit metadata",
             expert_hidden_dim=1024 if expert_hidden_dim is None else int(expert_hidden_dim),
         )
@@ -127,7 +135,7 @@ def resolve_checkpoint_config(
     # different config with identical parameter shapes. Older exports are fixed48.
     if recorded_mode is not None and recorded_mode != config.world_conditioning:
         raise ValueError("Checkpoint contract and config world_conditioning disagree")
-    for name, value in (("params", params), ("action_dim", action_dim), ("state_dim", state_dim),
+    for name, value in (("architecture_version", architecture_version), ("params", params), ("action_dim", action_dim), ("state_dim", state_dim),
                         ("reward_dim", reward_dim), ("success_dim", success_dim), ("q_dim", q_dim),
                         ("reward_head_type", reward_head_type), ("max_horizon", max_horizon),
                         ("dino_dim", dino_dim), ("chunk_horizon", chunk_horizon),

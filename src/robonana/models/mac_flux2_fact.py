@@ -10,6 +10,8 @@ from torch.utils.checkpoint import checkpoint
 
 from flux2.model import Flux2Params, apply_rope
 
+from .flux2_action_student import FlowActionExpert
+
 from .attention_mask import (
     MacSegmentMap,
     build_mac_attention_bias,
@@ -67,7 +69,13 @@ class MacFlux2FACTModel(Flux2FACTModel):
         dino_dim: int | None = None,
         expert_hidden_dim: int | None = None,
         world_conditioning: str = "fixed48",
+        architecture_version: str = "mac_mot_v2",
     ) -> None:
+        if architecture_version not in {"mac_mot_v2", "mac_mot_v3"}:
+            raise ValueError("architecture_version must be mac_mot_v2 or mac_mot_v3")
+        if architecture_version == "mac_mot_v3" and world_conditioning != "fixed48":
+            raise ValueError("v3 currently requires fixed48")
+        self.architecture_version = architecture_version
         if world_conditioning not in {"fixed48", "rope_prefix"}:
             raise ValueError("world_conditioning must be fixed48 or rope_prefix")
         self.world_conditioning = world_conditioning
@@ -123,6 +131,11 @@ class MacFlux2FACTModel(Flux2FACTModel):
         self.q_expert = DeterministicFlux2ScalarExpert(**expert_kwargs)
         self.value_expert.reset_parameters()
         self.q_expert.reset_parameters()
+        if self.architecture_version == "mac_mot_v3":
+            # G keeps action_in; only the predicted-action output moves to MoT.
+            self.action_expert = FlowActionExpert(
+                action_dim=action_dim, horizon=chunk_horizon, **expert_kwargs)
+            del self.action_out
         self._mac_training_phase = "world_policy"
         # 中文：仅控制训练激活重计算，不改变权重、attention 或推理。
         # English: Stride 1 checkpoints every single block; stride 2 keeps
@@ -281,6 +294,11 @@ class MacFlux2FACTModel(Flux2FACTModel):
         if gt_action_cond.shape[1] not in (0, self.chunk_horizon):
             raise ValueError("clean action must be empty or one 48-step chunk")
 
+        # V3 removes A from the shared sequence, retaining C/G/world order.
+        # Its separate branch consumes exactly the same per-layer C K/V below.
+        expert_action = noisy_pred_action if self.architecture_version == "mac_mot_v3" else None
+        if expert_action is not None:
+            noisy_pred_action = noisy_pred_action[:, :0]
         dtype = self.img_in.weight.dtype
         device = context.device
         segments = MacSegmentMap.from_lengths(
@@ -359,8 +377,38 @@ class MacFlux2FACTModel(Flux2FACTModel):
             strict=True,
         ))
         double_txt = self.double_stream_modulation_txt(vec_clean)
-        for block in self.double_blocks:
-            if self.gradient_checkpointing and self.training:
+        if expert_action is not None and expert_action.shape[1]:
+            query, expert_vec = self.action_expert.prepare(expert_action, action_timestep)
+            expert_pe = self._action_expert_pe(batch=batch, device=device)
+            expert_double = self.action_expert.double_stream_modulation_img(expert_vec)
+            expert_single = self.action_expert.single_stream_modulation(expert_vec)[0]
+            prefix_length = segments.clean_condition.stop
+            key_mask = torch.ones(batch, prefix_length + self.chunk_horizon,
+                                  device=device, dtype=torch.bool)
+            if context_mask is not None:
+                key_mask[:, :context.shape[1]] = context_mask.to(device=device, dtype=torch.bool)
+        else:
+            query = None
+        for index, block in enumerate(self.double_blocks):
+            if query is not None:
+                def joint_double(img_, txt_, query_, block_=block,
+                                 expert_block_=self.action_expert.double_blocks[index]):
+                    q, k, v, rope, num_txt, mods = block_._prepare_qkv(
+                        img_, txt_, pe_img, pe_txt, double_img, double_txt)
+                    q, k = apply_rope(q, k, rope)
+                    next_query = self.action_expert.advance(
+                        expert_block_, query_, expert_pe, expert_double,
+                        _flatten_heads(k[:, :, :prefix_length]),
+                        _flatten_heads(v[:, :, :prefix_length]), key_mask)
+                    attention = _masked_attention(q, k, v, bias)
+                    next_img, next_txt = block_._apply_residuals(
+                        img_, txt_, attention[:, num_txt:], attention[:, :num_txt], mods)
+                    return next_img, next_txt, next_query
+                if self.gradient_checkpointing and self.training:
+                    img, txt, query = checkpoint(joint_double, img, txt, query, use_reentrant=False)
+                else:
+                    img, txt, query = joint_double(img, txt, query)
+            elif self.gradient_checkpointing and self.training:
                 img, txt = checkpoint(
                     lambda img_, txt_, block_=block: self._double_block_forward(
                         block_, img_, txt_, pe_img, pe_txt, double_img, double_txt, bias
@@ -383,8 +431,24 @@ class MacFlux2FACTModel(Flux2FACTModel):
             strict=True,
         ))
         for block_index, block in enumerate(self.single_blocks):
-            if (self.gradient_checkpointing and self.training
-                    and block_index % self.gradient_checkpointing_single_stride == 0):
+            use_checkpoint = (self.gradient_checkpointing and self.training
+                              and block_index % self.gradient_checkpointing_single_stride == 0)
+            if query is not None:
+                def joint_single(hidden_, query_, block_=block,
+                                 expert_block_=self.action_expert.single_blocks[block_index]):
+                    q, k, v, mlp, gate = block_._qkv(hidden_, single_mod)
+                    q, k = apply_rope(q, k, pe)
+                    next_query = self.action_expert.advance(
+                        expert_block_, query_, expert_pe, expert_single,
+                        _flatten_heads(k[:, :, :prefix_length]),
+                        _flatten_heads(v[:, :, :prefix_length]), key_mask)
+                    next_hidden = block_._out(hidden_, _masked_attention(q, k, v, bias), mlp, gate)
+                    return next_hidden, next_query
+                if use_checkpoint:
+                    hidden, query = checkpoint(joint_single, hidden, query, use_reentrant=False)
+                else:
+                    hidden, query = joint_single(hidden, query)
+            elif use_checkpoint:
                 hidden = checkpoint(
                     lambda hidden_, block_=block: self._single_block_forward(
                         block_, hidden_, pe, single_mod, bias
@@ -396,7 +460,9 @@ class MacFlux2FACTModel(Flux2FACTModel):
 
         return Flux2FACTOutput(
             image=self.final_layer(hidden[:, segments.future_image], vec_world),
-            action=self.action_out(hidden[:, segments.pred_action]),
+            action=(self.action_out(hidden[:, segments.pred_action]) if expert_action is None
+                    else self.action_expert.head(query, expert_vec) if query is not None
+                    else expert_action),
             future_state=self.state_out(hidden[:, segments.future_state]),
             reward=self.reward_out(hidden[:, segments.reward]).squeeze(1),
             success=self.success_out(hidden[:, segments.success]).squeeze(1),
@@ -619,8 +685,24 @@ class MacFlux2FACTModel(Flux2FACTModel):
             )
         return hidden, branch
 
+    def _action_expert_pe(self, *, batch, device):
+        ids = self._robot_ids(batch_size=batch, length=self.chunk_horizon,
+                              segment_id=3, device=device, dtype=torch.long)
+        return self.pe_embedder(ids)
+
     @torch.no_grad()
     def predict_action_cached(self, cache, action, *, batch_indices, timestep):
+        if self.architecture_version == "mac_mot_v3":
+            if cache.parent is not None or batch_indices.shape != (action.shape[0],):
+                raise ValueError("action branch requires a condition-only cache and batch mapping")
+            # Reindex lazily per layer; C storage remains shared by candidates.
+            selected = FrozenFluxKVCache(
+                double=cache.double, single=cache.single, batch_indices=batch_indices,
+                key_mask=cache.key_mask.index_select(0, batch_indices),
+                prefix_length=cache.prefix_length, compute_dtype=cache.compute_dtype)
+            return self.action_expert(
+                selected, action=action, timestep=timestep.to(action.device).expand(action.shape[0]),
+                query_pe=self._action_expert_pe(batch=action.shape[0], device=action.device))
         hidden, _ = self._action_from_cache(
             cache, action, batch_indices=batch_indices, timestep=timestep, clean=False
         )

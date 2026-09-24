@@ -237,8 +237,8 @@ class RoboNanaRobotWinPolicy:
         if self.action_chunk != 48 or self.horizon != 48 or self.max_horizon != 48:
             raise ValueError("mac_mot_v2 live inference requires action_chunk=horizon=max_horizon=48")
         self.model.eval().requires_grad_(False)
-        if getattr(self.model, "architecture_version", None) != "mac_mot_v2":
-            raise ValueError("live inference requires a mac_mot_v2 checkpoint")
+        if getattr(self.model, "architecture_version", None) not in {"mac_mot_v2", "mac_mot_v3"}:
+            raise ValueError("live inference requires a mac_mot_v2 or mac_mot_v3 checkpoint")
         self.vae = AutoencoderKLFlux2.from_pretrained(
             self.flux_checkpoint_dir,
             subfolder="vae",

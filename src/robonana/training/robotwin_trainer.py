@@ -266,8 +266,8 @@ class RoboNanaTrainer(Trainer):
         reward_head_type = str(_config_value(model_config, "reward_head_type", "binary_chunk"))
         max_horizon = int(_config_value(model_config, "max_horizon", 48))
         architecture_version = str(_config_value(model_config, "architecture_version", "mac_mot_v2"))
-        if architecture_version != "mac_mot_v2":
-            raise ValueError("RoboNana only supports the mac_mot_v2 architecture")
+        if architecture_version not in {"mac_mot_v2", "mac_mot_v3"}:
+            raise ValueError("RoboNana supports mac_mot_v2 and mac_mot_v3")
         chunk_horizon = int(_config_value(model_config, "chunk_horizon", max_horizon))
         self.world_conditioning = str(_config_value(model_config, "world_conditioning", "fixed48"))
         if self.world_conditioning not in {"fixed48", "rope_prefix"}:
@@ -279,9 +279,9 @@ class RoboNanaTrainer(Trainer):
             raise ValueError(
                 "mac_mot_v2 requires reward_head_type='binary_chunk' and reward_dim=chunk_horizon"
             )
-        raw_dino_dim = _config_value(model_config, "dino_dim", None)
-        if raw_dino_dim is not None:
-            raise ValueError("mac_mot_v2 does not support DINO targets")
+        # raw_dino_dim = _config_value(model_config, "dino_dim", None)
+        # if raw_dino_dim is not None:
+        #     raise ValueError("mac_mot_v2 does not support DINO targets")
         pred_action_bidirectional = _config_value(
             model_config, "pred_action_bidirectional", False
         )
@@ -313,7 +313,8 @@ class RoboNanaTrainer(Trainer):
             from robonana.models.pretrained import load_flux2_backbone_checkpoint
             model, report = load_flux2_backbone_checkpoint(
                 checkpoint, params=params, action_dim=action_dim, state_dim=state_dim,
-                expert_hidden_dim=expert_hidden_dim, device=self.device, dtype=self.dtype)
+                expert_hidden_dim=expert_hidden_dim, architecture_version=architecture_version,
+                device=self.device, dtype=self.dtype)
         else:
             model, report = load_flux2_fact_trained_checkpoint(
                 str(checkpoint), action_dim=action_dim, state_dim=state_dim,

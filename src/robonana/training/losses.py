@@ -29,6 +29,7 @@ def masked_action_mse(
         raise ValueError("action_valid_mask must match [batch, action_horizon]")
     valid = step_mask.to(per_step)
     per_sample = (per_step * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+    # mask掉batch中fail的episode data
     success = success_mask.to(per_sample).reshape(-1)
     return (per_sample * success).sum() / success.sum().clamp_min(1)
 

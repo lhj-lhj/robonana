@@ -46,7 +46,11 @@ class FrozenFluxKVCache:
     def layers(self, stream: str):
         own = getattr(self, stream)
         if self.parent is None:
-            yield from own
+            for layer in own:
+                # Candidate mapping is materialized one layer at a time.
+                yield layer if self.batch_indices is None else {
+                    name: tensor.index_select(0, self.batch_indices)
+                    for name, tensor in layer.items()}
             return
         for shared, branch in zip(self.parent.layers(stream), own, strict=True):
             yield {

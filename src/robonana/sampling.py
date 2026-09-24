@@ -149,8 +149,8 @@ def sample_flux2_action(
         device=device,
     )
     model_spec = getattr(model, "module", model)
-    if getattr(model_spec, "architecture_version", None) != "mac_mot_v2":
-        raise ValueError("action sampling requires a mac_mot_v2 model")
+    if getattr(model_spec, "architecture_version", None) not in {"mac_mot_v2", "mac_mot_v3"}:
+        raise ValueError("action sampling requires a mac_mot_v2 or mac_mot_v3 model")
     if not bool(torch.all(horizon == 48)) or action_noise.shape[1] != 48:
         raise ValueError("mac_mot_v2 action sampling requires a full 48-step chunk")
     cache = model_spec.prefill_condition_cache(
@@ -181,8 +181,8 @@ def evaluate_mac_critics(
     """Evaluate deterministic ``Value(s)`` and ``Q(s, action_chunk)``."""
 
     model_spec = getattr(model, "module", model)
-    if getattr(model_spec, "architecture_version", None) != "mac_mot_v2":
-        raise ValueError("deterministic critics require a mac_mot_v2 model")
+    if getattr(model_spec, "architecture_version", None) not in {"mac_mot_v2", "mac_mot_v3"}:
+        raise ValueError("deterministic critics require a mac_mot_v2 or mac_mot_v3 model")
     batch_size = context.shape[0]
     device = context.device
     context_ids = text_position_ids(batch_size, context.shape[1], device)
@@ -285,8 +285,8 @@ def sample_mac_world(
     """
 
     model_spec = getattr(model, "module", model)
-    if getattr(model_spec, "architecture_version", None) != "mac_mot_v2":
-        raise ValueError("imaginary world rollout requires a mac_mot_v2 model")
+    if getattr(model_spec, "architecture_version", None) not in {"mac_mot_v2", "mac_mot_v3"}:
+        raise ValueError("imaginary world rollout requires a mac_mot_v2 or mac_mot_v3 model")
     if schedule.ndim != 1 or schedule.numel() < 2:
         raise ValueError("schedule must contain at least a start and end sigma")
     if not bool(torch.isclose(schedule[0], schedule.new_tensor(1.0))):

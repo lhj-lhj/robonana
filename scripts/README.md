@@ -78,3 +78,12 @@ Stage1/2必须同时提供 checkpoint、model_config、replay_root；Stage2不�
 预检复用同一个 worker，连续候选并行执行，只有调度者按 seed 升序写入 ledger。后面的 seed 即使先通过，也不能越过尚未验收或发生基础设施错误的前一个 seed。缓存留在当前冻结协议的输出目录，重启可复用；超出最终50个有效结果的预检不计入评测。
 
 scout 完成后立即保存 `scout_<seed>.json` 审计记录，再录制失败。录制超时不会丢失该审计记录，也不会把半成品发布为有效失败数据或假装整次评测完成；仍重试同一 seed，保留各次产物。SR 仍以正式 ledger 为准。
+
+### V3 Action expert
+
+`python scripts/run_multitask_mbrl.py train --config configs/train_v3.json`
+沿用唯一训练入口，默认只展示解析后的配置；正式启动仍需现有执行开关。
+V3 模板是 fixed48 + 吸收态修复、global256、120k，从原始 FLUX 初始化。
+`architecture_version` 和 `expert_hidden_dim` 现在是新训练 JSON 的必填字段，
+旧的自定义训练 JSON 需显式补入 `mac_mot_v2` / `1024`；续训读取保存的模型配置。
+实现与梯度拓扑见 [模型继承说明](../docs/INHERITANCE.md#v3独立-action-expert2026-09-24)。

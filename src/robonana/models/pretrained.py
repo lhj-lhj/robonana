@@ -20,7 +20,7 @@ from .mac_flux2_fact import MacFlux2FACTModel
 MAC_MODULE_NAMES = (
     "action_in", "state_in", "reward_token", "success_token", "action_out",
     "state_out", "reward_out", "success_out", "actor_world_segment_embed",
-    "value_expert", "q_expert",
+    "value_expert", "q_expert", "action_expert",
 )
 
 
@@ -64,6 +64,7 @@ def _load_state(path: Path) -> dict[str, torch.Tensor]:
 
 def load_flux2_backbone_checkpoint(checkpoint_path, *, params, action_dim=14,
                                    state_dim=14, expert_hidden_dim=1024,
+                                   architecture_version="mac_mot_v2",
                                    device="cpu", dtype=torch.bfloat16):
     """中文：原始 FLUX 初始化，不接受缺失 backbone 或夹带旧 robot head。
 
@@ -76,7 +77,7 @@ def load_flux2_backbone_checkpoint(checkpoint_path, *, params, action_dim=14,
     from .flux2_scalar_expert import initialize_scalar_expert_from_flux
 
     model = MacFlux2FACTModel(params, action_dim=action_dim, state_dim=state_dim,
-                             expert_hidden_dim=expert_hidden_dim)
+                             expert_hidden_dim=expert_hidden_dim, architecture_version=architecture_version)
     state = load_file(str(checkpoint_path), device="cpu")
     robot_names = set(robot_parameter_names(model))
     backbone = set(model.state_dict()) - robot_names
@@ -84,7 +85,9 @@ def load_flux2_backbone_checkpoint(checkpoint_path, *, params, action_dim=14,
         raise ValueError(f"Original FLUX keys mismatch: missing={sorted(backbone-set(state))}, "
                          f"unexpected={sorted(set(state)-backbone)}")
     model.load_state_dict(state, strict=False)  # Exact key set checked above; shapes checked by PyTorch.
-    for name in ("value_expert", "q_expert"):
+    for name in ("value_expert", "q_expert", "action_expert"):
+        if not hasattr(model, name):
+            continue
         initialize_scalar_expert_from_flux(getattr(model, name), model)
     model.to(device=device, dtype=dtype)
     return model, PretrainedLoadReport(
@@ -125,11 +128,12 @@ def load_flux2_fact_trained_checkpoint(
         architecture_version=architecture_version, chunk_horizon=chunk_horizon,
         value_dim=value_dim, expert_hidden_dim=expert_hidden_dim,
     )
-    if config.architecture_version != "mac_mot_v2":
-        raise ValueError("the maintained checkpoint format is mac_mot_v2 only")
+    if config.architecture_version not in {"mac_mot_v2", "mac_mot_v3"}:
+        raise ValueError("unsupported MAC checkpoint architecture")
     with torch.device("meta"):
         model = MacFlux2FACTModel(
             config.params,
+            architecture_version=config.architecture_version,
             action_dim=config.action_dim,
             state_dim=config.state_dim,
             chunk_horizon=config.chunk_horizon,
