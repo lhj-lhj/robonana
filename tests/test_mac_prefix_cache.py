@@ -22,7 +22,7 @@ def model_and_inputs():
         in_channels=8, context_in_dim=16, hidden_size=32, num_heads=4,
         depth=2, depth_single_blocks=2, axes_dim=[2, 2, 2, 2],
         mlp_ratio=2.0, use_guidance_embed=False,
-    ), action_dim=6, state_dim=6, expert_hidden_dim=16).eval()
+    ), action_dim=6, state_dim=6, expert_hidden_dim=16, include_critics=True).eval()
     # A mixed batch with padding catches incorrect B/M indexing and key masks.
     inputs = dict(
         context=torch.randn(2, 3, 16), context_ids=text_position_ids(2, 3, "cpu"),

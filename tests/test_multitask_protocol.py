@@ -19,7 +19,8 @@ def test_original_flux_loading(tmp_path):
         state_dim=5, expert_hidden_dim=32, dtype=torch.float32)
     for key, value in original.state_dict().items():
         torch.testing.assert_close(model.state_dict()[key],value,rtol=0,atol=0)
-    assert "value_expert.query.weight" in report.initialized_robot_parameters
+    assert not model.include_critics
+    assert not any(name.startswith(("q_expert.", "value_expert.")) for name in model.state_dict())
     bad = dict(original.state_dict())
     bad.pop(next(iter(bad)))
     save_file(bad,str(path))
@@ -170,5 +171,4 @@ def test_expert_cache_shared_lanes_skip_prepare_and_keep_failures(tmp_path, monk
     module.atomic_json(manifest, duplicate)
     with pytest.raises(ValueError, match="duplicate"):
         module.load_expert_jobs(cache, task, cfg, 2)
-
 

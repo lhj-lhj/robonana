@@ -53,7 +53,7 @@ def test_action_loss_trains_shared_backbone_without_label_leak(checkpointing, de
                       model.action_expert.action_encoder.weight,
                       model.action_expert.head.linear.weight):
         assert parameter.grad is not None and parameter.grad.abs().sum() > 0
-    assert all(p.grad is None for p in model.value_expert.parameters())
+    assert not hasattr(model, "value_expert") and not hasattr(model, "q_expert")
 
 
 def test_checkpointing_preserves_joint_outputs_and_gradients():
@@ -124,6 +124,7 @@ def test_action_expert_uses_robot_lr_and_freezes_in_critic_phase():
     assert {id(p) for p in model.action_expert.parameters()} <= {id(p) for p in robot["params"]}
     all_ids = [id(p) for g in groups for p in g["params"]]
     assert len(all_ids) == len(set(all_ids)) == sum(p.requires_grad for p in model.parameters())
+    model.initialize_critics()
     model.set_training_phase("critic")
     assert all(not p.requires_grad for p in model.action_expert.parameters())
     assert not model.action_expert.training
@@ -146,7 +147,7 @@ def test_original_flux_initialization_and_strict_v3_checkpoint_roundtrip(tmp_pat
     config = dict(params=asdict(params), action_dim=6, state_dim=6, reward_dim=48,
                   success_dim=1, q_dim=1, value_dim=1, max_horizon=48, chunk_horizon=48,
                   reward_head_type="binary_chunk", architecture_version="mac_mot_v3",
-                  expert_hidden_dim=16, world_conditioning="fixed48")
+                  expert_hidden_dim=16, world_conditioning="fixed48", include_critics=False)
     (tmp_path / "model_config.json").write_text(json.dumps(config))
     restored, _ = load_flux2_fact_trained_checkpoint(checkpoint, device="cpu", dtype=torch.float32,
                                                     architecture_version="mac_mot_v3")
@@ -249,3 +250,46 @@ def _ddp_v3_worker(rank, rendezvous):
 def test_v3_two_rank_training_has_no_unused_reducer_parameters(tmp_path):
     torch.multiprocessing.spawn(_ddp_v3_worker,
         args=((tmp_path / "v3-rendezvous").as_uri(),), nprocs=2, join=True)
+
+
+def test_stage2_creates_critics_and_restores_them_without_reinitializing(tmp_path):
+    model, inputs, params = setup_v3()
+    config = dict(params=asdict(params), action_dim=6, state_dim=6, reward_dim=48,
+                  success_dim=1, q_dim=1, value_dim=1, max_horizon=48, chunk_horizon=48,
+                  reward_head_type="binary_chunk", architecture_version="mac_mot_v3",
+                  expert_hidden_dim=16, world_conditioning="fixed48", include_critics=False)
+    config_path = tmp_path / "model_config.json"
+    config_path.write_text(json.dumps(config))
+    weights = tmp_path / "model.bin"
+    torch.save(model.state_dict(), weights)
+    with pytest.raises(ValueError, match="Stage2"):
+        model.set_training_phase("critic")
+    restored, _ = load_flux2_fact_trained_checkpoint(weights, device="cpu", dtype=torch.float32)
+    assert not restored.include_critics and not hasattr(restored, "q_expert")
+    stage2, report = load_flux2_fact_trained_checkpoint(weights, device="cpu", dtype=torch.float32,
+                                                       include_critics=True)
+    assert report.initialized_robot_parameters
+    for name, tensor in model.state_dict().items():
+        torch.testing.assert_close(stage2.state_dict()[name], tensor, atol=0, rtol=0)
+    stage2.set_training_phase("critic")
+    for expert in (stage2.q_expert, stage2.value_expert):
+        with torch.no_grad():
+            expert.head.linear.weight.add_(1)
+    config["include_critics"] = True
+    config_path.write_text(json.dumps(config))
+    torch.save(stage2.state_dict(), weights)
+    resumed, report = load_flux2_fact_trained_checkpoint(weights, device="cpu", dtype=torch.float32,
+                                                        include_critics=True)
+    assert report.initialized_robot_parameters == ()
+    for name, tensor in stage2.state_dict().items():
+        torch.testing.assert_close(resumed.state_dict()[name], tensor, atol=0, rtol=0)
+    actor_only, report = load_flux2_fact_trained_checkpoint(weights, device="cpu", dtype=torch.float32,
+                                                           include_critics=False)
+    assert report.skipped_checkpoint_parameters and not actor_only.include_critics
+    for name, tensor in actor_only.state_dict().items():
+        torch.testing.assert_close(tensor, stage2.state_dict()[name], atol=0, rtol=0)
+    corrupted = dict(stage2.state_dict())
+    corrupted.pop("q_expert.head.linear.weight")
+    torch.save(corrupted, weights)
+    with pytest.raises(RuntimeError):
+        load_flux2_fact_trained_checkpoint(weights, device="cpu", include_critics=True)

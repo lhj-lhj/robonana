@@ -54,7 +54,7 @@ V2 的 `[L,S,I,A,G,R,U,S',I']` 和权重名不变。
 - 推理用已有 C cache 和 20 步 Euler；候选映射按层展开 K/V。
 - `action_in` 留给 clean action G；v3 不保留共享 `action_out`。
 - Action expert 全部参数归入现有 `robot_modules`，与 Q/V 使用同一 robot LR，
-  不新增第三组 LR。Stage2 冻结 Action/World，仅训练 Q/V。
+  不新增第三组 LR。pretrain/Stage1 不创建 Q/V；Stage2 冻结 Action/World，仅训练 Q/V。
 - 新配置必须显式声明 architecture_version 和 expert_hidden_dim；v3 首轮只支持
   fixed48。严格加载记录的架构，不自动把 v2 checkpoint 转为 v3。
 
@@ -80,3 +80,19 @@ V2 的 `[L,S,I,A,G,R,U,S',I']` 和权重名不变。
 `posttrain.algorithm` / `q_target_mode` 继续记录原有 MAC v2 的学习目标和数据合同；
 模型拆分由 `models.architecture_version=mac_mot_v3` 明确记录。未修改回报、吸收态、
 数据池、loss 权重或采样协议，不把模型架构版本误当成新的 RL 算法。
+
+### Q/V 生命周期和 GC 配置（2026-09-24修正）
+
+新训练配置由 phase 唯一决定 `models.include_critics`：pretrain/Stage1 为 false，
+Stage2 为 true。无 Q/V 的模型不分配相应参数，不在 checkpoint 保存 Q/V。
+首次进入 Stage2，从加载后的当前 World 权重初始化 Q/V；Stage2 checkpoint
+已有 Q/V 时严格恢复，绝不重新随机初始化。历史未包含此字段的格式固定含有 Q/V，
+按原格式严格读取；用于新的 Stage1 时先移除 Q/V，再将 World/Action 搬到 GPU。
+无 Q/V checkpoint 只能运行 action-only 推理，Q rejection 明确报错。
+
+新生成配置只保留 `models.gradient_checkpointing` 和
+`models.gradient_checkpointing_single_stride`；删除 `train.activation_checkpointing`。
+RoboNanaTrainer 接管 FACT 的外层 checkpointing hook，使用模型内部实现，不叠加
+wrapper；显式开启旧外层开关会报错。启动日志直接打印 backend=model-native、
+enabled、double_blocks=all、single_stride。stride2 表示 single blocks 隔层重计算，
+double blocks 仍全部重计算；模型开关为 false 时均关闭。

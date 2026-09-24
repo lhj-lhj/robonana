@@ -172,7 +172,7 @@ def build_training_config(o: TrainOptions):
             params=copy.deepcopy(MODEL_PARAMS), action_dim=ACTION_DIM, state_dim=ACTION_DIM, reward_dim=CHUNK,
             success_dim=1, q_dim=1, reward_head_type='binary_chunk', max_horizon=CHUNK,
             pred_action_bidirectional=True, chunk_horizon=CHUNK, value_dim=1, dino_dim=None,
-            expert_hidden_dim=o.expert_hidden_dim, train_mode=phase, world_conditioning=o.world_conditioning,
+            expert_hidden_dim=o.expert_hidden_dim, train_mode=phase, include_critics=phase=='critic', world_conditioning=o.world_conditioning,
             # 复用模型现有部分重计算开关；不改变精度或动作/World注意力规则。
             gradient_checkpointing=o.gradient_checkpointing, gradient_checkpointing_single_stride=o.single_checkpoint_stride,
             vae_dtype='float32'),
@@ -182,7 +182,7 @@ def build_training_config(o: TrainOptions):
         # 预算仅定义一次，checkpoint终点和调度器衰减随 steps 联动。
         schedulers=dict(type='WarmupCosineScheduler', warmup_steps=1 if o.smoke_steps else o.warmup_steps, decay_steps=o.steps),
         train=dict(max_steps=o.steps, gradient_accumulation_steps=accumulation(o.gpus,o.microbatch,o.global_batch),
-            mixed_precision='bf16', activation_checkpointing=False, checkpoint_interval=1 if o.smoke_save else o.checkpoint_interval,
+            mixed_precision='bf16', checkpoint_interval=1 if o.smoke_save else o.checkpoint_interval,
             early_checkpoint_steps=(), checkpoint_keeps=keeps, checkpoint_total_limit=o.checkpoint_total_limit,
             checkpoint_save_optimizer=True, disable_checkpointing=bool(o.smoke_steps and not o.smoke_save),
             resume=False, allow_uncertified_pretrain=False, seed=o.seed, log_with=o.log_with,

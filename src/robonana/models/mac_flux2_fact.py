@@ -70,12 +70,16 @@ class MacFlux2FACTModel(Flux2FACTModel):
         expert_hidden_dim: int | None = None,
         world_conditioning: str = "fixed48",
         architecture_version: str = "mac_mot_v2",
+        include_critics: bool = False,
     ) -> None:
         if architecture_version not in {"mac_mot_v2", "mac_mot_v3"}:
             raise ValueError("architecture_version must be mac_mot_v2 or mac_mot_v3")
         if architecture_version == "mac_mot_v3" and world_conditioning != "fixed48":
             raise ValueError("v3 currently requires fixed48")
         self.architecture_version = architecture_version
+        if type(include_critics) is not bool:
+            raise ValueError("include_critics must be a boolean")
+        self.include_critics = include_critics
         if world_conditioning not in {"fixed48", "rope_prefix"}:
             raise ValueError("world_conditioning must be fixed48 or rope_prefix")
         self.world_conditioning = world_conditioning
@@ -127,10 +131,12 @@ class MacFlux2FACTModel(Flux2FACTModel):
             num_layers_single=len(self.single_blocks),
             mlp_ratio=float(params.mlp_ratio),
         )
-        self.value_expert = DeterministicFlux2ScalarExpert(**expert_kwargs)
-        self.q_expert = DeterministicFlux2ScalarExpert(**expert_kwargs)
-        self.value_expert.reset_parameters()
-        self.q_expert.reset_parameters()
+        self._expert_kwargs = expert_kwargs
+        if include_critics:
+            self.value_expert = DeterministicFlux2ScalarExpert(**expert_kwargs)
+            self.q_expert = DeterministicFlux2ScalarExpert(**expert_kwargs)
+            self.value_expert.reset_parameters()
+            self.q_expert.reset_parameters()
         if self.architecture_version == "mac_mot_v3":
             # G keeps action_in; only the predicted-action output moves to MoT.
             self.action_expert = FlowActionExpert(
@@ -142,6 +148,23 @@ class MacFlux2FACTModel(Flux2FACTModel):
         # even-index blocks only. Double blocks retain the existing policy.
         self.gradient_checkpointing_single_stride = 1
 
+    def initialize_critics(self) -> None:
+        """Create Stage2 Q/V from the loaded world backbone, once per transition."""
+        if self.include_critics:
+            raise ValueError("Q/V already exist; restore their checkpoint instead of reinitializing")
+        from .flux2_scalar_expert import initialize_scalar_expert_from_flux
+        for name in ("value_expert", "q_expert"):
+            expert = DeterministicFlux2ScalarExpert(**self._expert_kwargs)
+            expert.reset_parameters()
+            initialize_scalar_expert_from_flux(expert, self)
+            setattr(self, name, expert.to(device=self.img_in.weight.device, dtype=self.img_in.weight.dtype))
+        self.include_critics = True
+        self.set_training_phase(self._mac_training_phase)
+
+    def require_critics(self) -> None:
+        if not self.include_critics:
+            raise ValueError("Q/V are absent: load a Stage2 checkpoint for critic inference")
+
     def set_gradient_checkpointing_single_stride(self, stride: int) -> None:
         if type(stride) is not int or stride < 1:
             raise ValueError("gradient_checkpointing_single_stride must be a positive integer")
@@ -152,6 +175,8 @@ class MacFlux2FACTModel(Flux2FACTModel):
 
         if phase not in {"world_policy", "critic"}:
             raise ValueError("MAC phase must be world_policy or critic")
+        if phase == "critic":
+            self.require_critics()
         self._mac_training_phase = phase
         train_experts = phase == "critic"
         trainable: list[str] = []
@@ -173,7 +198,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
                     child.train(False)
             self.value_expert.train(mode)
             self.q_expert.train(mode)
-        else:
+        elif self.include_critics:
             self.value_expert.train(False)
             self.q_expert.train(False)
         return self
@@ -709,6 +734,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
         return self.action_out(hidden)
 
     def predict_q_cached(self, cache, clean_action, *, batch_indices):
+        self.require_critics()
         _, branch = self._action_from_cache(
             cache, clean_action, batch_indices=batch_indices,
             timestep=torch.zeros((), device=clean_action.device), clean=True,
@@ -844,6 +870,8 @@ class MacFlux2FACTModel(Flux2FACTModel):
         expert: nn.Module | None = None,
         cache: FrozenFluxKVCache | None = None,
     ) -> Tensor:
+        if expert is None:
+            self.require_critics()
         cache = cache if cache is not None else self.prefill_condition_cache(
             context=context,
             context_ids=context_ids,

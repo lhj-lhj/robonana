@@ -19,7 +19,7 @@ def tiny_params():
 
 def tiny_model():
     return MacFlux2FACTModel(tiny_params(), action_dim=6, state_dim=5,
-                             expert_hidden_dim=32)
+                             expert_hidden_dim=32, include_critics=True)
 
 
 def test_trained_mac_checkpoint_loads_exactly(tmp_path):

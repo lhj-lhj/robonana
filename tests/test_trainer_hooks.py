@@ -8,6 +8,17 @@ from robonana.training.posttraining import ValueExpertEMA
 from robonana.training.robotwin_trainer import RoboNanaTrainer, resolve_cuda_device_index
 
 
+def test_fact_wrapper_checkpointing_cannot_override_native_gc():
+    with pytest.raises(ValueError, match="models.gradient_checkpointing"):
+        RoboNanaTrainer(activation_checkpointing=True)
+    trainer = object.__new__(RoboNanaTrainer)
+    trainer._models = [SimpleNamespace(gradient_checkpointing=True, gradient_checkpointing_single_stride=2)]
+    messages = []
+    trainer.logger = SimpleNamespace(info=lambda *args: messages.append(args))
+    trainer.apply_activation_checkpointing()
+    assert messages == [("Activation checkpointing: backend=model-native enabled=%s double_blocks=all single_stride=%d", True, 2)]
+
+
 def test_cuda_device_without_index_uses_current_device(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 7)
     assert resolve_cuda_device_index(torch.device("cuda")) == 7

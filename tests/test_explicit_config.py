@@ -65,6 +65,18 @@ def test_no_import_time_environment_or_shared_mutation(tmp_path, monkeypatch):
     assert build_training_config(o)['models']['params']['axes_dim'][0]==32
 
 
+@pytest.mark.parametrize('phase', ['pretrain', 'stage1', 'stage2'])
+def test_critic_presence_and_checkpointing_have_one_source(tmp_path, phase):
+    extra = {} if phase == 'pretrain' else dict(checkpoint=tmp_path/'source.bin',
+        model_config=tmp_path/'source.json', replay_root=tmp_path/'replay')
+    config = build_training_config(options(tmp_path, phase=phase,
+        gradient_checkpointing=True, single_checkpoint_stride=2, **extra))
+    assert config['models']['include_critics'] == (phase == 'stage2')
+    assert 'activation_checkpointing' not in config['train']
+    assert config['models']['gradient_checkpointing'] is True
+    assert config['models']['gradient_checkpointing_single_stride'] == 2
+
+
 @pytest.mark.parametrize('filename,cls',[('train.json',TrainOptions),('eval.json',EvalOptions),('resume.json',ResumeOptions)])
 def test_examples_are_complete_and_paths_anchor_to_config(filename,cls):
     o=load_options(cls,ROOT/'configs'/filename)

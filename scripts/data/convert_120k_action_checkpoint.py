@@ -78,12 +78,13 @@ def main():
     torch.manual_seed(0)
     with torch.device('meta'):
         model = MacFlux2FACTModel(Flux2Params(**source_model['params']),
-                                 action_dim=source_model['action_dim'], state_dim=source_model['state_dim'])
+                                 action_dim=source_model['action_dim'], state_dim=source_model['state_dim'],
+                                 include_critics=True)
     source = torch.load(args.source, map_location='cpu', weights_only=True, mmap=True)
     report = migrate_actor(source, model)
     models = dict(source_model, architecture_version='mac_mot_v2', chunk_horizon=48,
                   reward_dim=48, success_dim=1, q_dim=1, value_dim=1,
-                  reward_head_type='binary_chunk', dino_dim=None, expert_hidden_dim=1024)
+                  reward_head_type='binary_chunk', dino_dim=None, expert_hidden_dim=1024, include_critics=True)
     config['models'] = models
     # Export metadata is not a runnable training configuration.
     (args.output / 'model_config.json').write_text(json.dumps({'models': models}, indent=2))

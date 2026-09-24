@@ -115,6 +115,7 @@ def load_flux2_fact_trained_checkpoint(
     dtype: torch.dtype = torch.bfloat16,
     params: Flux2Params | None = None,
     config_path: str | Path | None = None,
+    include_critics: bool | None = None,
 ) -> tuple[MacFlux2FACTModel, PretrainedLoadReport]:
     """Strictly load a complete fixed-48 MAC checkpoint and its recorded schema."""
 
@@ -144,6 +145,7 @@ def load_flux2_fact_trained_checkpoint(
             dino_dim=config.dino_dim,
             expert_hidden_dim=config.expert_hidden_dim,
             world_conditioning=config.world_conditioning,
+            include_critics=config.include_critics,
         ).to(dtype=dtype)
     incompatible = model.load_state_dict(state_dict, strict=True, assign=True)
     if incompatible.missing_keys or incompatible.unexpected_keys:
@@ -151,6 +153,18 @@ def load_flux2_fact_trained_checkpoint(
             "trained MAC checkpoint does not exactly match its recorded schema: "
             f"missing={incompatible.missing_keys}, unexpected={incompatible.unexpected_keys}"
         )
+    if include_critics is not None and type(include_critics) is not bool:
+        raise ValueError("include_critics must be a boolean")
+    initialized_critics = ()
+    skipped_critics = ()
+    if include_critics is False and model.include_critics:
+        skipped_critics = tuple(name for name in state_dict if name.startswith(("value_expert.", "q_expert.")))
+        del model.value_expert
+        del model.q_expert
+        model.include_critics = False
+    if include_critics is True and not model.include_critics:
+        model.initialize_critics()
+        initialized_critics = tuple(name for name in model.state_dict() if name.startswith(("value_expert.", "q_expert.")))
     model.to(device=torch.device(device), dtype=dtype)
     meta_parameters = [name for name, parameter in model.named_parameters() if parameter.is_meta]
     if meta_parameters:
@@ -159,7 +173,9 @@ def load_flux2_fact_trained_checkpoint(
         checkpoint=str(path),
         checkpoint_parameters=sum(tensor.numel() for tensor in state_dict.values()),
         model_config=config,
-        loaded_parameter_names=tuple(sorted(state_dict)),
+        initialized_robot_parameters=initialized_critics,
+        skipped_checkpoint_parameters=skipped_critics,
+        loaded_parameter_names=tuple(sorted(set(state_dict) - set(skipped_critics))),
     )
 
 

@@ -231,6 +231,8 @@ class RoboNanaRobotWinPolicy:
             params=model_params,
             config_path=model_config,
         )
+        if self.inference_mode == InferenceMode.ACTION_Q_REJECTION:
+            self.model.require_critics()
         self.action_dim = int(self.model.action_dim)
         self.state_dim = int(self.model.state_dim)
         self.max_horizon = int(self.model.max_horizon)

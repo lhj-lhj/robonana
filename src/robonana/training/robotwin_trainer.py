@@ -99,6 +99,8 @@ class RoboNanaTrainer(Trainer):
     """Reuse FACT's DataLoader, Accelerate, optimizer, checkpoint, and logging loop."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if kwargs.pop("activation_checkpointing", False):
+            raise ValueError("Use models.gradient_checkpointing; FACT wrapper checkpointing is unsupported")
         super().__init__(*args, **kwargs)
         initial_global_step = int(self.kwargs.get("initial_global_step", 0))
         if initial_global_step:
@@ -186,6 +188,12 @@ class RoboNanaTrainer(Trainer):
         ema = dict(self.posttrain_config.get("ema", {}))
         if ema.get("target") != "value_expert_only":
             raise ValueError("mac_mot_v2 EMA target must be value_expert_only")
+
+    def apply_activation_checkpointing(self, models=None) -> None:
+        for model in (self.models if models is None else models):
+            self.logger.info(
+                "Activation checkpointing: backend=model-native enabled=%s double_blocks=all single_stride=%d",
+                model.gradient_checkpointing, model.gradient_checkpointing_single_stride)
 
     def set_ema_models(self) -> None:
         if self.with_ema:
@@ -304,6 +312,9 @@ class RoboNanaTrainer(Trainer):
         # Only a deliberate new Stage-1 adaptation may start from old weights;
         # Stage 2 freezes FLUX and cannot certify a changed input representation.
         original_flux = _config_value(model_config, "initialization", "trained") == "flux_backbone"
+        include_critics = self.mac_phase == "critic"
+        if _config_value(model_config, "include_critics", include_critics) != include_critics:
+            raise ValueError("models.include_critics must agree with Stage2/critic training phase")
         if original_flux and self.mac_phase != "world_policy":
             raise ValueError("Original FLUX initialization is only valid for world-policy pretraining")
         converted_actor = False if original_flux else validate_training_initialization(
@@ -327,6 +338,7 @@ class RoboNanaTrainer(Trainer):
                 value_dim=value_dim, expert_hidden_dim=expert_hidden_dim,
                 device=self.device, dtype=self.dtype, params=params,
                 config_path=_config_value(model_config, "checkpoint_config", None),
+                include_critics=include_critics,
             )
         if model.world_conditioning != self.world_conditioning:
             if self.mac_phase != "world_policy" or self.kwargs.get("resume", False):
@@ -339,6 +351,8 @@ class RoboNanaTrainer(Trainer):
             # Preserve actor weights and freshly initialized scalar queries/heads.
             from robonana.models.flux2_scalar_expert import initialize_scalar_expert_from_flux
             for name in ('value_expert', 'q_expert'):
+                if not hasattr(model, name):
+                    continue
                 copied, resized = initialize_scalar_expert_from_flux(getattr(model, name), model)
                 self.logger.info('Converted actor %s initialization: copied=%s resized=%s', name, copied, resized)
         initialization_label = f"{'original FLUX' if original_flux else 'trained MAC'} checkpoint parameters={report.checkpoint_parameters}"
@@ -374,6 +388,7 @@ class RoboNanaTrainer(Trainer):
                 "bidirectional" if model.pred_action_bidirectional else "causal",
                 "causal-prefix/RoPE" if model.world_conditioning == "rope_prefix" else "bidirectional/full-48",
             )
+            self.logger.info("Expert lifecycle: phase=%s Q/V_loaded=%s", self.mac_phase, model.include_critics)
         return model
 
     def get_optimizers(self, optimizers):

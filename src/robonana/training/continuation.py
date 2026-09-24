@@ -30,6 +30,7 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
     while retaining global step and Adam moments.
     """
     config = restore_config_tuples(copy.deepcopy(source))
+    config['train'].pop('activation_checkpointing', None)
     if type(single_checkpoint_stride) is not int or single_checkpoint_stride < 1:
         raise ValueError("single_checkpoint_stride must be a positive integer")
     if (
@@ -54,7 +55,7 @@ def build_world_policy_resume(source, *, checkpoint, source_config, project_dir,
     )
     config["train"].update(
         resume=True, resume_from=str(checkpoint), rebase_scheduler_on_resume=False,
-        allow_uncertified_pretrain=False, activation_checkpointing=False,
+        allow_uncertified_pretrain=False,
         checkpoint_save_optimizer=True, mixed_precision="bf16",
     )
     if gpu_ids is not None or batch_size_per_gpu is not None or accumulation_steps is not None:
@@ -113,6 +114,7 @@ def build_critic_continuation(source, *, checkpoint, source_config, project_dir,
     Value EMA, Adam moments, RNG and progress. It is NOT a new critic phase.
     """
     config = restore_config_tuples(copy.deepcopy(source))
+    config['train'].pop('activation_checkpointing', None)
     if not isinstance(batch_size_per_gpu, int) or batch_size_per_gpu < 1:
         raise ValueError("batch_size_per_gpu must be a positive integer")
     if config["models"]["train_mode"] != "critic":

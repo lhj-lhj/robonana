@@ -28,6 +28,7 @@ class RoboNanaCheckpointConfig:
     source: str
     expert_hidden_dim: int = 1024
     world_conditioning: str = "fixed48"
+    include_critics: bool = True
 
 
 def discover_model_config(checkpoint_path: str | Path) -> Path | None:
@@ -80,6 +81,9 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
     world_conditioning = str(models.get("world_conditioning", "fixed48"))
     if world_conditioning not in {"fixed48", "rope_prefix"}:
         raise ValueError("world_conditioning must be fixed48 or rope_prefix")
+    include_critics = models.get("include_critics", True)
+    if type(include_critics) is not bool:
+        raise ValueError("include_critics must be a boolean")
     return RoboNanaCheckpointConfig(
         params=Flux2Params(**dict(raw_params)), action_dim=int(models["action_dim"]),
         state_dim=int(models["state_dim"]), reward_dim=48,
@@ -89,6 +93,7 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
         chunk_horizon=48, value_dim=1, source=str(path),
         expert_hidden_dim=int(models.get("expert_hidden_dim", 1024)),
         world_conditioning=world_conditioning,
+        include_critics=include_critics,
     )
 
 
