@@ -313,7 +313,7 @@ def sample_mac_world(
         raise ValueError("world_horizon must be integer [B] in [1,chunk_horizon]")
     world_horizon = world_horizon.to(device)
     if getattr(model_spec, "world_conditioning", "fixed48") == "fixed48" and not bool(torch.all(world_horizon == model_spec.chunk_horizon)):
-        raise ValueError("fixed endpoint requires world_horizon=chunk_horizon")
+        raise ValueError("fixed48 mode requires world_horizon=chunk_horizon")
     # Cached world prefixes encode h=chunk_horizon. Other horizons use the
     # maintained full forward so neither RoPE nor attention can be stale.
     use_cache = use_cache and bool(torch.all(world_horizon == model_spec.chunk_horizon))

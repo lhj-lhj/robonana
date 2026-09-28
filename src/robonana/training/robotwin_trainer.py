@@ -696,7 +696,7 @@ class RoboNanaTrainer(Trainer):
         if world_horizon.shape != horizon.shape or bool(torch.any((world_horizon < 1) | (world_horizon > int(self.posttrain_config["chunk_horizon"])))):
             raise ValueError("Batch world_horizon must lie in [1,chunk_horizon] with shape [B]")
         if mode == "fixed48" and not bool(torch.all(world_horizon == int(self.posttrain_config["chunk_horizon"]))):
-            raise ValueError("fixed endpoint requires world_horizon=chunk_horizon")
+            raise ValueError("fixed48 mode requires world_horizon=chunk_horizon")
         expected_tokens = self.grid_height * self.grid_width
         if current.shape[1] != expected_tokens or future.shape[1] != expected_tokens:
             raise ValueError(f"cached FLUX image tensors must contain {expected_tokens} tokens")

@@ -292,7 +292,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
         if bool(torch.any((world_horizon < 1) | (world_horizon > self.chunk_horizon))):
             raise ValueError("world_horizon must lie in [1,chunk_horizon]")
         if self.world_conditioning == "fixed48" and not bool(torch.all(world_horizon == self.chunk_horizon)):
-            raise ValueError("fixed endpoint requires world_horizon=chunk_horizon")
+            raise ValueError("fixed48 mode requires world_horizon=chunk_horizon")
         del chunk_horizon, noisy_reward, noisy_q
         if noisy_future_dino is not None or dino_ids is not None:
             raise ValueError("mac_mot_v2 does not accept DINO future tokens")
