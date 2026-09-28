@@ -170,8 +170,8 @@ class RoboNanaTrainer(Trainer):
             raise ValueError("mac_mot_v2 posttraining requires algorithm='mac_mot_v2'")
         if self.mac_phase not in {"world_policy", "critic"}:
             raise ValueError("mac_mot_v2 phase must be world_policy or critic")
-        if int(self.posttrain_config.get("chunk_horizon", 0)) != 48:
-            raise ValueError("mac_mot_v2 requires chunk_horizon=48")
+        if int(self.posttrain_config.get("chunk_horizon", 0)) <= 0:
+            raise ValueError("posttrain requires a positive chunk_horizon")
         imagination = dict(self.posttrain_config.get("imagination", {}))
         if int(imagination.get("rollout_chunks", 0)) != 1:
             raise ValueError("mac_mot_v2 supports exactly one imaginary rollout chunk")
@@ -272,11 +272,16 @@ class RoboNanaTrainer(Trainer):
         success_dim = int(_config_value(model_config, "success_dim", 1))
         q_dim = int(_config_value(model_config, "q_dim", 1))
         reward_head_type = str(_config_value(model_config, "reward_head_type", "binary_chunk"))
-        max_horizon = int(_config_value(model_config, "max_horizon", 48))
+        for name in ("max_horizon", "chunk_horizon", "reward_dim"):
+            if _config_value(model_config, name, None) is None:
+                raise ValueError(f"models.{name} must be explicit")
+        max_horizon = int(_config_value(model_config, "max_horizon"))
         architecture_version = str(_config_value(model_config, "architecture_version", "mac_mot_v2"))
         if architecture_version not in {"mac_mot_v2", "mac_mot_v3"}:
             raise ValueError("RoboNana supports mac_mot_v2 and mac_mot_v3")
         chunk_horizon = int(_config_value(model_config, "chunk_horizon", max_horizon))
+        if chunk_horizon <= 0 or max_horizon != chunk_horizon or chunk_horizon != self.posttrain_config["chunk_horizon"]:
+            raise ValueError("model and posttrain chunk horizons must agree")
         self.world_conditioning = str(_config_value(model_config, "world_conditioning", "fixed48"))
         if self.world_conditioning not in {"fixed48", "rope_prefix"}:
             raise ValueError("world_conditioning must be fixed48 or rope_prefix")
@@ -327,6 +332,7 @@ class RoboNanaTrainer(Trainer):
             model, report = load_flux2_backbone_checkpoint(
                 checkpoint, params=params, action_dim=action_dim, state_dim=state_dim,
                 expert_hidden_dim=expert_hidden_dim, architecture_version=architecture_version,
+                chunk_horizon=chunk_horizon, world_conditioning=self.world_conditioning,
                 device=self.device, dtype=self.dtype)
         else:
             model, report = load_flux2_fact_trained_checkpoint(
@@ -386,8 +392,10 @@ class RoboNanaTrainer(Trainer):
                 "Attention layout: architecture=%s; A=%s; clean_action=%s",
                 architecture_version,
                 "bidirectional" if model.pred_action_bidirectional else "causal",
-                "causal-prefix/RoPE" if model.world_conditioning == "rope_prefix" else "bidirectional/full-48",
+                "causal-prefix/RoPE" if model.world_conditioning == "rope_prefix" else f"bidirectional/full-{model.chunk_horizon}",
             )
+            self.logger.info("Chunk contract: action=%d reward=%d future_image=t+%d future_state=t+%d success=t+%d",
+                             model.chunk_horizon, model.reward_dim, model.chunk_horizon, model.chunk_horizon, model.chunk_horizon)
             self.logger.info("Expert lifecycle: phase=%s Q/V_loaded=%s", self.mac_phase, model.include_critics)
         return model
 
@@ -676,8 +684,8 @@ class RoboNanaTrainer(Trainer):
         horizon = batch_dict["chunk_horizon"].to(
             device=self.device, dtype=torch.long
         ).reshape(-1)
-        if not bool(torch.all(horizon == 48)):
-            raise ValueError("mac_mot_v2 batches must use the fixed 48-step horizon")
+        if not bool(torch.all(horizon == int(self.posttrain_config["chunk_horizon"]))):
+            raise ValueError("mac_mot_v2 batches must use the configured chunk horizon")
         world_horizon = batch_dict.get("world_horizon", horizon).to(
             device=self.device, dtype=torch.long
         ).reshape(-1)
@@ -685,10 +693,10 @@ class RoboNanaTrainer(Trainer):
         prefix = batch_dict.get("world_prefix_causal", torch.zeros_like(horizon, dtype=torch.bool)).to(device=self.device)
         if not bool(torch.all(prefix == (mode == "rope_prefix"))):
             raise ValueError("Dataset and model world_conditioning disagree")
-        if world_horizon.shape != horizon.shape or bool(torch.any((world_horizon < 1) | (world_horizon > 48))):
-            raise ValueError("Batch world_horizon must lie in [1,48] with shape [B]")
-        if mode == "fixed48" and not bool(torch.all(world_horizon == 48)):
-            raise ValueError("fixed48 requires world_horizon=48")
+        if world_horizon.shape != horizon.shape or bool(torch.any((world_horizon < 1) | (world_horizon > int(self.posttrain_config["chunk_horizon"])))):
+            raise ValueError("Batch world_horizon must lie in [1,chunk_horizon] with shape [B]")
+        if mode == "fixed48" and not bool(torch.all(world_horizon == int(self.posttrain_config["chunk_horizon"]))):
+            raise ValueError("fixed endpoint requires world_horizon=chunk_horizon")
         expected_tokens = self.grid_height * self.grid_width
         if current.shape[1] != expected_tokens or future.shape[1] != expected_tokens:
             raise ValueError(f"cached FLUX image tensors must contain {expected_tokens} tokens")
@@ -819,7 +827,7 @@ class RoboNanaTrainer(Trainer):
                 action_noise=torch.randn(
                     batch,
                     candidate_count,
-                    48,
+                    rollout_model.chunk_horizon,
                     values["action"].shape[-1],
                     device=self.device,
                     dtype=self.dtype,

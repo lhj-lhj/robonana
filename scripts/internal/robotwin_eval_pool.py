@@ -123,6 +123,14 @@ def main():
     configuration["source_episodes"] = [str(p) for p in opts.source_episodes]
     configuration["commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     (output / "config.json").write_text(json.dumps(configuration, indent=2), encoding="utf-8")
+    model_metadata = json.loads(opts.model_config.read_text())
+    model_metadata = model_metadata.get("models", model_metadata)
+    model_metadata = model_metadata.get("train", model_metadata)
+    execution_horizon = model_metadata["chunk_horizon"]
+    if type(execution_horizon) is not int or execution_horizon <= 0 or any(
+        model_metadata[key] != execution_horizon for key in ("max_horizon", "reward_dim")
+    ):
+        raise ValueError("Model config chunk/reward horizons must agree")
     fixture = manifest if opts.jobs_json else dict(task_name=task_name, task_config=task_config, jobs=jobs)
     (output / "seeds.json").write_text(json.dumps(fixture, indent=2), encoding="utf-8")
     children, logs, workers = [], [], []
@@ -157,7 +165,7 @@ def main():
             worker = subprocess.Popen([str(opts.sim_python.absolute()),
                 str(ROOT / "scripts/internal/collect_robotwin_pool_worker.py"), "--jobs", str(job_path),
                 "--robotwin", str(opts.robotwin.resolve()), "--output", str(worker_dir),
-                "--queue", str(queue_path), "--worker-id", str(rank),
+                "--queue", str(queue_path), "--execute-actions-per-plan", str(execution_horizon), "--worker-id", str(rank),
                 "--port", str(opts.port), '--capture-mode',opts.capture_mode], cwd=ROOT, env=worker_env, stdout=logs[-1],
                 stderr=subprocess.STDOUT, start_new_session=True)
             children.append(worker)

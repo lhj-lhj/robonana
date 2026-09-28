@@ -41,8 +41,12 @@ def sampling_contract(posttrain):
         raise ValueError("Inference settings must be finite")
     if result["flow_shift"] <= 0 or result["q_return_scale"] <= 0 or not 0 < result["discount"] <= 1:
         raise ValueError("Invalid flow_shift, return_scale or discount")
-    if result["action_chunk"] != 48 or result["horizon"] != 48 or environment["execute_actions_per_plan"] != 48:
-        raise ValueError("Inference contract requires fixed/executed horizon 48")
+    horizon = result["horizon"]
+    if type(horizon) is not int or horizon <= 0 or any(
+        type(value) is not int or value != horizon
+        for value in (result["action_chunk"], environment["execute_actions_per_plan"])
+    ):
+        raise ValueError("Inference contract requires equal positive chunk and executed horizons")
     if imagination["candidate_selection"] != "argmax_q" or environment["candidate_selection"] != "argmax_q":
         raise ValueError("Inference contract requires argmax_q")
     return result

@@ -40,7 +40,10 @@ def main():
     parser.add_argument('--capture-mode', choices=('full','full_failures','scout','scout_replay','paired_benchmark'),default='full')
     parser.add_argument('--candidate-limit', type=int, default=None,
                         help='Bound expert seed attempts; production supervisor uses one candidate per watchdog')
+    parser.add_argument("--execute-actions-per-plan", type=int)
     opts = parser.parse_args()
+    if not opts.prepare_seeds and (opts.execute_actions_per_plan is None or opts.execute_actions_per_plan <= 0):
+        parser.error("--execute-actions-per-plan must be explicit and positive")
     if not opts.jobs and not opts.prepare_seeds:
         parser.error('--jobs is required for collection')
     payload = json.loads(opts.jobs.read_text()) if opts.jobs else dict(
@@ -149,7 +152,7 @@ def main():
             slot.reset(env_seed=int(job['seed']))
             while not slot.done:
                 info = slot.step(None)['info']
-                if info['steps'] % 48 == 0:
+                if info['steps'] % model.execute_actions_per_plan == 0:
                     print(json.dumps({'progress':info,'record':record,'worker':opts.worker_id}),flush=True)
             result = dict(info, duration_seconds=time.perf_counter()-start,
                           rgb_steps=slot.rgb_steps)
@@ -192,8 +195,8 @@ def main():
                             result['replay_verified'] = False
                     result['pipeline_seconds'] = result['scout_seconds'] + (
                         result.get('replay_seconds',0.) if not result['success'] else 0.)
-                    result['sampling_seed_base'] = adapter.sampling_seed_for_step(int(job['seed']),0,48)
-                    result['sampling_seed_rule'] = 'seed * 1000003 + control_step // 48'
+                    result['sampling_seed_base'] = adapter.sampling_seed_for_step(int(job['seed']),0,model.execute_actions_per_plan)
+                    result['sampling_seed_rule'] = f'seed * 1000003 + control_step // {model.execute_actions_per_plan}'
                 result["duration_seconds"] = time.perf_counter() - start
                 results.append(result)
                 with (output / "episodes.jsonl").open("a", encoding="utf-8") as handle:
@@ -215,7 +218,7 @@ def main():
              "policy_name": "robonana_robotwin.adapter", "ckpt_setting": "pool_probe",
              "instruction_type": "seen", "seed": 0, "test_num": len(payload["jobs"]),
              "host": "127.0.0.1", "port": opts.port, "action_dim": 14,
-             "execute_actions_per_plan": 48, "server_wait_seconds": 600,
+             "execute_actions_per_plan": opts.execute_actions_per_plan, "server_wait_seconds": 600,
              "server_timeout_ms": 600000, "low_frequency_rgb": False,
              "skip_action_render_sync": False, "enable_value_vis": False,
              "trace_value_only": True})

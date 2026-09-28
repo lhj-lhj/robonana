@@ -72,10 +72,10 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
         if models["world_conditioning"] != "fixed48":
             raise ValueError("v3 currently requires fixed48")
     horizon = int(models.get("chunk_horizon", 0))
-    if horizon != 48 or int(models["max_horizon"]) != 48:
-        raise ValueError("the maintained model requires max_horizon=chunk_horizon=48")
-    if str(models.get("reward_head_type")) != "binary_chunk" or int(models["reward_dim"]) != 48:
-        raise ValueError("the maintained model requires a 48-logit binary_chunk reward head")
+    if horizon <= 0 or int(models["max_horizon"]) != horizon:
+        raise ValueError("the maintained model requires equal positive max_horizon=chunk_horizon")
+    if str(models.get("reward_head_type")) != "binary_chunk" or int(models["reward_dim"]) != horizon:
+        raise ValueError("the maintained model requires reward_dim=chunk_horizon for the binary_chunk reward head")
     if any(int(models[name]) != 1 for name in ("success_dim", "q_dim", "value_dim")):
         raise ValueError("success, Q and Value dimensions must be one")
     world_conditioning = str(models.get("world_conditioning", "fixed48"))
@@ -86,11 +86,11 @@ def _load_complete_config(path: Path) -> RoboNanaCheckpointConfig:
         raise ValueError("include_critics must be a boolean")
     return RoboNanaCheckpointConfig(
         params=Flux2Params(**dict(raw_params)), action_dim=int(models["action_dim"]),
-        state_dim=int(models["state_dim"]), reward_dim=48,
-        success_dim=1, q_dim=1, reward_head_type="binary_chunk", max_horizon=48,
+        state_dim=int(models["state_dim"]), reward_dim=horizon,
+        success_dim=1, q_dim=1, reward_head_type="binary_chunk", max_horizon=horizon,
         dino_dim=None if models.get("dino_dim") is None else int(models["dino_dim"]),
         pred_action_bidirectional=True, architecture_version=architecture,
-        chunk_horizon=48, value_dim=1, source=str(path),
+        chunk_horizon=horizon, value_dim=1, source=str(path),
         expert_hidden_dim=int(models.get("expert_hidden_dim", 1024)),
         world_conditioning=world_conditioning,
         include_critics=include_critics,
@@ -124,14 +124,16 @@ def resolve_checkpoint_config(
             raise FileNotFoundError("complete mac_mot_v2 config is required beside the checkpoint")
         if architecture_version not in (None, "mac_mot_v2", "mac_mot_v3"):
             raise ValueError("architecture_version must be mac_mot_v2 or mac_mot_v3")
-        if int(max_horizon) != 48 or int(reward_dim) != 48 or int(success_dim) != 1 or int(q_dim) != 1:
-            raise ValueError("explicit metadata must describe fixed-48 mac_mot_v2")
+        if int(max_horizon) <= 0 or int(reward_dim) != int(max_horizon) or int(success_dim) != 1 or int(q_dim) != 1:
+            raise ValueError("explicit metadata requires reward_dim=max_horizon > 0 and scalar success/Q")
+        if chunk_horizon is None or int(chunk_horizon) != int(max_horizon):
+            raise ValueError("explicit metadata requires chunk_horizon=max_horizon")
         return RoboNanaCheckpointConfig(
             params=params, action_dim=int(action_dim), state_dim=int(state_dim),
             reward_dim=int(reward_dim), success_dim=int(success_dim), q_dim=int(q_dim),
             reward_head_type=str(reward_head_type), max_horizon=int(max_horizon),
             dino_dim=dino_dim, pred_action_bidirectional=True,
-            architecture_version=architecture_version or "mac_mot_v2", chunk_horizon=48,
+            architecture_version=architecture_version or "mac_mot_v2", chunk_horizon=int(chunk_horizon),
             value_dim=1 if value_dim is None else int(value_dim), source="explicit metadata",
             expert_hidden_dim=1024 if expert_hidden_dim is None else int(expert_hidden_dim),
         )

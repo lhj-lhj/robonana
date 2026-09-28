@@ -29,11 +29,11 @@ class StudentRobotWinPolicy(BatchedRoboNanaRobotWinPolicy):
     def _sample_action_batch(self, *, context,context_mask,current,state,sampling_seeds):
         self._last_batch_rejection=None
         batch=state.shape[0]
-        template=torch.zeros(batch,48,self.action_dim,device=self.model_device,dtype=self.dtype)
+        template=torch.zeros(batch,self.model.chunk_horizon,self.action_dim,device=self.model_device,dtype=self.dtype)
         noise=torch.cat([seeded_randn_like(template[i:i+1],seed) for i,seed in enumerate(sampling_seeds)])
         cache=prefill_mac_condition(model=self.model,context=context,context_mask=context_mask,
             current_latents=current,state=state,grid_height=self.grid_height,grid_width=self.grid_width)
-        ids=self.model._robot_ids(batch_size=batch,length=48,segment_id=3,device=self.model_device,
-            dtype=torch.long,time_ids=torch.arange(1,49,device=self.model_device)[None].expand(batch,-1))
+        ids=self.model._robot_ids(batch_size=batch,length=self.model.chunk_horizon,segment_id=3,device=self.model_device,
+            dtype=torch.long,time_ids=torch.arange(1,self.model.chunk_horizon + 1,device=self.model_device)[None].expand(batch,-1))
         with torch.autocast('cuda',dtype=torch.bfloat16):
             return self.student(cache,noise=noise,query_pe=self.model.pe_embedder(ids))

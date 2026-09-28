@@ -15,7 +15,7 @@ def predict_selected_world(policy, *, context, context_mask, current, state,
     MAC reference: https://github.com/kwanyoungpark/MAC
     This is the same one-transition world sampler used by our critic training,
     with an independent RNG so enabling diagnostics cannot advance policy RNG.
-    The image is the fixed t+48 endpoint, not a generated 48-frame video.
+    The image is the configured t+chunk_horizon endpoint, a single future frame.
     """
     world_seed = (int(sampling_seed or 0) + 2_000_000_011) % (2**63 - 1)
     generator = torch.Generator(device=current.device).manual_seed(world_seed)

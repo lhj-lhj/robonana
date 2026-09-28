@@ -5,7 +5,6 @@ import sys
 from .schema import accumulation
 
 # 这些是模型/动作合同，不是每个实验各写一份的超参。
-CHUNK = 48
 ACTION_DIM = 14
 MODEL_PARAMS = dict(in_channels=128, context_in_dim=7680, hidden_size=3072, num_heads=24,
                     depth=5, depth_single_blocks=20, axes_dim=[32,32,32,32], theta=2000,
@@ -42,6 +41,7 @@ class TrainOptions:
     lr: float
     robot_lr: float
     world_conditioning: str
+    chunk_horizon: int
     gradient_checkpointing: bool
     single_checkpoint_stride: int
     checkpoint_interval: int
@@ -71,6 +71,8 @@ class TrainOptions:
             raise ValueError("max_steps, lr and robot_lr must be explicit")
         if self.architecture_version not in ('mac_mot_v2', 'mac_mot_v3'):
             raise ValueError('architecture_version must be mac_mot_v2 or mac_mot_v3')
+        if type(self.chunk_horizon) is not int or self.chunk_horizon <= 0:
+            raise ValueError("chunk_horizon must be an explicit positive integer")
         if self.expert_hidden_dim <= 0:
             raise ValueError('expert_hidden_dim must be positive')
         if self.architecture_version == 'mac_mot_v3' and self.world_conditioning != 'fixed48':
@@ -111,8 +113,8 @@ def build_training_config(o: TrainOptions):
                    collected_success_replay=0., historical_failure_replay=0.,
                    latest_failure=0. if o.phase=='pretrain' else .5)
     # o.world_conditioning = “fixed48”或“rope_prefix“
-    shared = dict(stats_path=str(o.stats_path), action_chunk=CHUNK, action_dim=ACTION_DIM,
-        max_horizon=CHUNK, fixed_horizon=CHUNK, discount=o.discount, reward_non_goal=-1.,
+    shared = dict(stats_path=str(o.stats_path), action_chunk=o.chunk_horizon, action_dim=ACTION_DIM,
+        max_horizon=o.chunk_horizon, fixed_horizon=o.chunk_horizon, discount=o.discount, reward_non_goal=-1.,
         reward_goal=0., q_target_mode='mac_mot_v2', world_conditioning=o.world_conditioning)
 
     original = dict(shared, _class_name='RoboTwinLeRobotDataset', data_path=str(o.dataset_root),
@@ -137,7 +139,7 @@ def build_training_config(o: TrainOptions):
              redistribute_empty_historical_failure_to_latest=True, redistribute_empty_collected_success_to_original=True))
 
     posttrain = dict(enabled=True, algorithm='mac_mot_v2', q_target_mode='mac_mot_v2', phase=phase,
-        chunk_horizon=CHUNK, discount=o.discount, reward_non_goal=-1., reward_goal=0., return_scale=1000.,
+        chunk_horizon=o.chunk_horizon, discount=o.discount, reward_non_goal=-1., reward_goal=0., return_scale=1000.,
         current_collection_round=o.collection_round,
         ema=dict(decay=.995, update_every_optimizer_steps=1, start_step=0, target='value_expert_only'),
         imagination=dict(rollout_chunks=1, candidate_count=o.train_candidates, sampling_steps=o.sampling_steps,
@@ -145,7 +147,7 @@ def build_training_config(o: TrainOptions):
         data_mixture=dict(weights, success_only_action_bc=True, all_real_rollouts_train_world=True,
             redistribute_empty_historical_failure_to_latest=True, redistribute_empty_collected_success_to_original=True),
         environment_policy=dict(candidate_count=o.eval_candidates, candidate_selection='argmax_q',
-            action_chunk=CHUNK, execute_actions_per_plan=CHUNK))
+            action_chunk=o.chunk_horizon, execute_actions_per_plan=o.chunk_horizon))
     
     from robonana.inference_contract import sampling_contract
     sampling_contract(posttrain)
@@ -169,9 +171,9 @@ def build_training_config(o: TrainOptions):
         models=dict(architecture_version=o.architecture_version, initialization='flux_backbone' if o.phase=='pretrain' else 'trained',
             checkpoint=str(o.flux_checkpoint_dir/'flux-2-klein-base-4b.safetensors') if o.phase=='pretrain' else str(o.checkpoint),
             checkpoint_config=None if o.phase=='pretrain' else str(o.model_config), checkpoint_dir=str(o.flux_checkpoint_dir),
-            params=copy.deepcopy(MODEL_PARAMS), action_dim=ACTION_DIM, state_dim=ACTION_DIM, reward_dim=CHUNK,
-            success_dim=1, q_dim=1, reward_head_type='binary_chunk', max_horizon=CHUNK,
-            pred_action_bidirectional=True, chunk_horizon=CHUNK, value_dim=1, dino_dim=None,
+            params=copy.deepcopy(MODEL_PARAMS), action_dim=ACTION_DIM, state_dim=ACTION_DIM, reward_dim=o.chunk_horizon,
+            success_dim=1, q_dim=1, reward_head_type='binary_chunk', max_horizon=o.chunk_horizon,
+            pred_action_bidirectional=True, chunk_horizon=o.chunk_horizon, value_dim=1, dino_dim=None,
             expert_hidden_dim=o.expert_hidden_dim, train_mode=phase, include_critics=phase=='critic', world_conditioning=o.world_conditioning,
             # 复用模型现有部分重计算开关；不改变精度或动作/World注意力规则。
             gradient_checkpointing=o.gradient_checkpointing, gradient_checkpointing_single_stride=o.single_checkpoint_stride,

@@ -151,8 +151,8 @@ def sample_flux2_action(
     model_spec = getattr(model, "module", model)
     if getattr(model_spec, "architecture_version", None) not in {"mac_mot_v2", "mac_mot_v3"}:
         raise ValueError("action sampling requires a mac_mot_v2 or mac_mot_v3 model")
-    if not bool(torch.all(horizon == 48)) or action_noise.shape[1] != 48:
-        raise ValueError("mac_mot_v2 action sampling requires a full 48-step chunk")
+    if not bool(torch.all(horizon == model_spec.chunk_horizon)) or action_noise.shape[1] != model_spec.chunk_horizon:
+        raise ValueError("mac_mot_v2 action sampling requires the configured full action chunk")
     cache = model_spec.prefill_condition_cache(
         context=context, context_ids=context_ids, current_latents=current_latents,
         current_ids=current_ids, state=state, context_mask=context_mask,
@@ -309,14 +309,14 @@ def sample_mac_world(
     if world_horizon is None:
         world_horizon = horizon
     if (world_horizon.shape != (batch_size,) or world_horizon.dtype not in (torch.int32, torch.int64)
-            or bool(torch.any((world_horizon < 1) | (world_horizon > 48)))):
-        raise ValueError("world_horizon must be integer [B] in [1,48]")
+            or bool(torch.any((world_horizon < 1) | (world_horizon > model_spec.chunk_horizon)))):
+        raise ValueError("world_horizon must be integer [B] in [1,chunk_horizon]")
     world_horizon = world_horizon.to(device)
-    if getattr(model_spec, "world_conditioning", "fixed48") == "fixed48" and not bool(torch.all(world_horizon == 48)):
-        raise ValueError("fixed48 requires world_horizon=48")
-    # Cached world prefixes currently encode h=48. Other horizons use the
+    if getattr(model_spec, "world_conditioning", "fixed48") == "fixed48" and not bool(torch.all(world_horizon == model_spec.chunk_horizon)):
+        raise ValueError("fixed endpoint requires world_horizon=chunk_horizon")
+    # Cached world prefixes encode h=chunk_horizon. Other horizons use the
     # maintained full forward so neither RoPE nor attention can be stale.
-    use_cache = use_cache and bool(torch.all(world_horizon == 48))
+    use_cache = use_cache and bool(torch.all(world_horizon == model_spec.chunk_horizon))
     future_ids = image_position_ids(
         batch_size,
         grid_height=grid_height,

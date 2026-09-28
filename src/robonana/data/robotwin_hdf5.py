@@ -263,12 +263,12 @@ class RoboTwinHDF5Dataset(BaseDataset):
         if self.q_target_mode != "mac_mot_v2":
             raise ValueError("the maintained dataset format is mac_mot_v2 only")
         if (
-            self.action_chunk != 48
+            self.action_chunk <= 0
             or self.max_horizon != self.action_chunk
             or self.fixed_horizon not in (0, self.action_chunk)
         ):
             raise ValueError(
-                "mac_mot_v2 requires action_chunk=max_horizon=48 and fixed_horizon=0 or 48"
+                "mac_mot_v2 requires positive action_chunk=max_horizon and fixed_horizon=0 or action_chunk"
             )
         if self.episode_filter not in {"all", "success", "failure"}:
             raise ValueError("episode_filter must be all, success, or failure")

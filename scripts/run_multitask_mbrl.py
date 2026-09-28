@@ -321,7 +321,7 @@ def collect_task(opts, task, task_config, lane, server_opts, server, env, sim_gp
         atomic_json(task_root / "seeds.json", dict(
             task_name=task, task_config=task_config, jobs=accepted, expert_validated=True,
             robotwin_commit=revision, task_config_sha256=sha256_file(opts.robotwin / "task_config" / f"{task_config}.yml"),
-            sampling_seed_rule="seed * 1000003 + control_step // 48"))
+            sampling_seed_rule="seed * 1000003 + control_step // execute_actions_per_plan"))
     (task_root / "blocked.json").unlink(missing_ok=True)
     atomic_json(task_root / "summary.json", dict(
         evaluated=len(accepted), errors=sum(r["status"] != "evaluated" for r in ledger),

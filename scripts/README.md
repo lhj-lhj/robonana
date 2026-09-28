@@ -91,3 +91,16 @@ V3 模板是 fixed48 + 吸收态修复、global256、120k，从原始 FLUX 初�
 `architecture_version` 和 `expert_hidden_dim` 现在是新训练 JSON 的必填字段，
 旧的自定义训练 JSON 需显式补入 `mac_mot_v2` / `1024`；续训读取保存的模型配置。
 实现与梯度拓扑见 [模型继承说明](../docs/INHERITANCE.md#v3独立-action-expert2026-09-24)。
+
+### Chunk 长度（2026-09-28）
+
+新训练配置必须显式填写 `chunk_horizon`；当前 `train.json` 和 `train_v3.json` 为 **16**。
+同一个字段决定 action 长度、reward logits 数量、固定未来 image/state 的 `t+H`、
+success 的 `t+H` 标签、吸收态 padding、推理每次执行步数以及 Stage2 rollout 长度。
+Success 仍输出一个标量，future image 仍输出一帧。`rope_prefix` 的 h 范围随 H 变为 `[1,H]`。
+`world_conditioning: fixed48` 暂保留为历史模式标识，含义是“固定 chunk 终点”；实际步数只读 `chunk_horizon`。
+启动日志会打印 action/reward/future image/state/success 的实际长度或时刻。
+
+旧48步权重仍按保存配置读取48步；不允许用16步配置静默加载旧 reward head。
+已有训练的 resume 保留原保存合同；更改新训练 JSON 不会修改正在运行的实验。
+验证位置按本次用户指令改为71；使用隔离 checkout，不覆盖服务器旧实验代码。

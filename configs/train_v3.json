@@ -33,6 +33,7 @@
   "warmup_steps": 500,
   "lr": 2e-05,
   "robot_lr": 0.0001,
+  "chunk_horizon": 16,
   "world_conditioning": "fixed48",
   "gradient_checkpointing": true,
   "single_checkpoint_stride": 1,

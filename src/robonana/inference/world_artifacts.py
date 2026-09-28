@@ -18,6 +18,9 @@ def _array(value):
 def save_selected_world(root, *, task, seed, step, request, response):
     """One folder per seed; use the pre-execution control step as chunk identity."""
     world = dict(response["selected_world"])
+    horizon = world["horizon"]
+    if type(horizon) is not int or horizon <= 0:
+        raise ValueError("selected world requires an explicit positive horizon")
     image = _array(world.pop("image"))
     if image.ndim != 5 or image.shape[:3] != (1, 3, 1):
         raise ValueError(f"expected selected future [1,3,1,H,W], got {image.shape}")
@@ -26,7 +29,7 @@ def save_selected_world(root, *, task, seed, step, request, response):
     stem = f"step_{step:04d}"
     frame = np.transpose(image[0, :, 0], (1, 2, 0))
     Image.fromarray(np.clip((frame + 1) * 127.5, 0, 255).astype(np.uint8)).save(
-        directory / f"{stem}_predicted_t48.png"
+        directory / f"{stem}_predicted_t{horizon}.png"
     )
     for key in ("observation.images.cam_high", "observation.images.cam_left_wrist",
                 "observation.images.cam_right_wrist"):
@@ -45,7 +48,7 @@ def save_selected_world(root, *, task, seed, step, request, response):
         candidate_q=(_array(response["candidate_q"]).tolist() if "candidate_q" in response else []),
         action=_array(response["action"]).tolist(),
         instruction=request.get("instruction", request.get("prompt", "")),
-        image=f"{stem}_predicted_t48.png",
+        image=f"{stem}_predicted_t{horizon}.png",
         timing_ms=response.get("_policy_timing_ms", {}),
     )
     (directory / f"{stem}.json").write_text(json.dumps(world, indent=2, allow_nan=False), encoding="utf-8")

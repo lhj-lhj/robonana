@@ -96,6 +96,7 @@ def build_mac_attention_bias(
     device: torch.device | str,
     context_mask: torch.Tensor | None = None,
     world_conditioning: str = "fixed48",
+    chunk_horizon: int = 48,
     world_horizon: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build the explicit fixed-chunk MAC dependency graph.
@@ -113,6 +114,8 @@ def build_mac_attention_bias(
         raise ValueError("world_conditioning must be fixed48 or rope_prefix")
     if world_conditioning == "fixed48" and world_horizon is not None:
         raise ValueError("world_horizon is only accepted by rope_prefix")
+    if type(chunk_horizon) is not int or chunk_horizon <= 0:
+        raise ValueError("chunk_horizon must be positive")
     n = segments.total_length
     allowed = torch.zeros(batch_size, n, n, dtype=torch.bool, device=device)
     c = segments.clean_condition
@@ -139,10 +142,10 @@ def build_mac_attention_bias(
         if world_horizon.dtype not in (torch.int32, torch.int64):
             raise ValueError("world_horizon must contain integer frame offsets")
         h = world_horizon.to(device=device)
-        if bool(torch.any((h < 1) | (h > 48))):
-            raise ValueError("world_horizon must lie in [1,48]")
-        if g.stop - g.start not in (0, 48):
-            raise ValueError("rope_prefix requires an empty or 48-step clean action chunk")
+        if bool(torch.any((h < 1) | (h > chunk_horizon))):
+            raise ValueError("world_horizon must lie in [1,chunk_horizon]")
+        if g.stop - g.start not in (0, chunk_horizon):
+            raise ValueError("rope_prefix requires an empty or configured-length clean action chunk")
         # C cannot read actions, A is an isolated sink, and G is causal.
         # Dense R sees the full chunk. U/S'/I' must never read R,
         # otherwise R would carry suffix actions across transformer layers.

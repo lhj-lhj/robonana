@@ -64,7 +64,8 @@ def _load_state(path: Path) -> dict[str, torch.Tensor]:
 
 def load_flux2_backbone_checkpoint(checkpoint_path, *, params, action_dim=14,
                                    state_dim=14, expert_hidden_dim=1024,
-                                   architecture_version="mac_mot_v2",
+                                   architecture_version="mac_mot_v2", chunk_horizon=48,
+                                   world_conditioning="fixed48",
                                    device="cpu", dtype=torch.bfloat16):
     """中文：原始 FLUX 初始化，不接受缺失 backbone 或夹带旧 robot head。
 
@@ -77,7 +78,9 @@ def load_flux2_backbone_checkpoint(checkpoint_path, *, params, action_dim=14,
     from .flux2_scalar_expert import initialize_scalar_expert_from_flux
 
     model = MacFlux2FACTModel(params, action_dim=action_dim, state_dim=state_dim,
-                             expert_hidden_dim=expert_hidden_dim, architecture_version=architecture_version)
+                             expert_hidden_dim=expert_hidden_dim, architecture_version=architecture_version,
+                             chunk_horizon=chunk_horizon, reward_dim=chunk_horizon,
+                             world_conditioning=world_conditioning)
     state = load_file(str(checkpoint_path), device="cpu")
     robot_names = set(robot_parameter_names(model))
     backbone = set(model.state_dict()) - robot_names

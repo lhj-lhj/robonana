@@ -29,7 +29,7 @@ def test_failed_tail_is_unknown_and_not_padded():
     torch.testing.assert_close(mask, torch.ones(48))
 
 
-def episode_dataset(tmp_path, monkeypatch, *, source, success=True, length=11, mode="fixed48"):
+def episode_dataset(tmp_path, monkeypatch, *, source, success=True, length=11, mode="fixed48", chunk_horizon=48):
     """Real adapter I/O; only frozen image/language caches are synthetic."""
     states = np.arange(length * 14, dtype=np.float32).reshape(length, 14) / 100
     states[:, 6], states[:, 13] = 1., .25
@@ -50,7 +50,8 @@ def episode_dataset(tmp_path, monkeypatch, *, source, success=True, length=11, m
             handle["policy_action/vector"] = actions
             handle["transition_valid"] = np.arange(length) < length - 1
         cls = RoboTwinHDF5Dataset
-    ds = cls(str(tmp_path), stats_path="/unused", world_conditioning=mode, allow_empty=True)
+    ds = cls(str(tmp_path), stats_path="/unused", world_conditioning=mode, allow_empty=True,
+             action_chunk=chunk_horizon, max_horizon=chunk_horizon, fixed_horizon=chunk_horizon)
     ds._set_records([EpisodeRecord("task", tmp_path, path, 0, length, success=success,
                                   has_final_observation=True, time_limit_truncated=not success)])
     mean = np.linspace(.1, 1.4, 14, dtype=np.float32)

@@ -236,8 +236,8 @@ class RoboNanaRobotWinPolicy:
         self.action_dim = int(self.model.action_dim)
         self.state_dim = int(self.model.state_dim)
         self.max_horizon = int(self.model.max_horizon)
-        if self.action_chunk != 48 or self.horizon != 48 or self.max_horizon != 48:
-            raise ValueError("mac_mot_v2 live inference requires action_chunk=horizon=max_horizon=48")
+        if self.action_chunk <= 0 or self.action_chunk != self.horizon or self.horizon != self.max_horizon:
+            raise ValueError("mac_mot_v2 live inference requires equal positive action_chunk=horizon=max_horizon")
         self.model.eval().requires_grad_(False)
         if getattr(self.model, "architecture_version", None) not in {"mac_mot_v2", "mac_mot_v3"}:
             raise ValueError("live inference requires a mac_mot_v2 or mac_mot_v3 checkpoint")
