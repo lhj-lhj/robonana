@@ -668,7 +668,7 @@ class RoboNanaTrainer(Trainer):
         super().print_after_train()
 
     def _mac_real_batch(self, batch_dict: dict[str, Any]) -> dict[str, Tensor]:
-        """Move and validate the fixed-48 fields shared by both MAC phases."""
+        """Move and validate the configured-length fields shared by both MAC phases."""
 
         context = batch_dict["context"].to(device=self.device, dtype=self.dtype)
         current = batch_dict["current_latents"].to(device=self.device, dtype=self.dtype)

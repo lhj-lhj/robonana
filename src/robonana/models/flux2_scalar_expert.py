@@ -29,7 +29,7 @@ from flux2.model import MLPEmbedder, Modulation, QKNorm, SiLUActivation, apply_r
 class FrozenFluxKVCache:
     """Detached K/V with an optional shared condition prefix.
 
-    For an action branch, double/single store only its 48 tokens. The parent
+    For an action branch, double/single store only its chunk_horizon tokens. The parent
     retains C once at observation batch size B; batch_indices maps the bounded
     candidate batch back to B. Materialize combined K/V one layer at a time,
     never a persistent [B*M, C+G] cache for every FLUX layer.

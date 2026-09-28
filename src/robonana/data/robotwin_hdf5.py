@@ -325,7 +325,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
         # row, and repeats the terminal action through the full BC chunk.
         # With T real transitions and T+1 observations, success starts are
         # 0..T (the final start explicitly teaches holding still). Failures
-        # retain complete real windows only: starts 0..T-48, never padded.
+        # retain complete real windows only: starts 0..T-chunk_horizon, never padded.
         def window_count(record):
             return max(0, record.length - (0 if record.success else self.action_chunk))
 
@@ -551,7 +551,7 @@ class RoboTwinHDF5Dataset(BaseDataset):
                 & transition_valid[action_indices]
             ),
             "future_state": torch.from_numpy(norm_future_state.copy()),
-            # The maintained world model consumes the fixed-48 binary reward
+            # The maintained world model consumes the fixed-length binary reward
             # chunk; scalar reward_h remains a compact compatibility field for
             # downstream logging only.
             "reward": torch.tensor([direct_reward_h], dtype=torch.float32),

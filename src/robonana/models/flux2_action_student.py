@@ -25,7 +25,7 @@ class OneStepActionExpert(DeterministicFlux2ScalarExpert):
 
     def forward(self, cache, *, noise, query_pe):
         if tuple(noise.shape[1:]) != (self.horizon, self.action_dim):
-            raise ValueError("student noise must be [batch, 48, action_dim]")
+            raise ValueError("student noise must be [batch, horizon, action_dim]")
         # C-only cache: reject a clean-action branch (teacher-label leakage).
         if cache.parent is not None:
             raise ValueError("action student accepts only the L/S/I condition cache")
@@ -60,7 +60,7 @@ class FlowActionExpert(OneStepActionExpert):
 
     def prepare(self, action, timestep):
         if action.ndim != 3 or action.shape[1:] != (self.horizon, self.action_dim):
-            raise ValueError("flow action must be [batch,48,action_dim]")
+            raise ValueError("flow action must be [batch,horizon,action_dim]")
         if timestep.shape != (action.shape[0],):
             raise ValueError("flow timestep must be [batch]")
         dtype = self.action_encoder.weight.dtype

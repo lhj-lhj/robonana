@@ -315,9 +315,9 @@ class MacFlux2FACTModel(Flux2FACTModel):
             if value.ndim != 3 or value.shape[0] != batch or value.shape[-1] != width:
                 raise ValueError(f"{name} must have shape [B, tokens, {width}]")
         if noisy_pred_action.shape[1] not in (0, self.chunk_horizon):
-            raise ValueError("predicted action must be empty or one 48-step chunk")
+            raise ValueError("predicted action must be empty or one configured-length chunk")
         if gt_action_cond.shape[1] not in (0, self.chunk_horizon):
-            raise ValueError("clean action must be empty or one 48-step chunk")
+            raise ValueError("clean action must be empty or one configured-length chunk")
 
         # V3 removes A from the shared sequence, retaining C/G/world order.
         # Its separate branch consumes exactly the same per-layer C K/V below.
@@ -583,7 +583,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
             raise ValueError("world prefill requires a same-precision condition-only cache")
         batch, device = clean_action.shape[0], clean_action.device
         if clean_action.shape != (batch, self.chunk_horizon, self.action_dim):
-            raise ValueError("world prefill requires one clean 48-step action chunk")
+            raise ValueError("world prefill requires one configured-length clean action chunk")
         segments = MacSegmentMap.from_lengths(
             language=language_length, state=state_length, ref_image=image_length,
             pred_action=0, clean_action=self.chunk_horizon, reward=1, success=1,
@@ -652,7 +652,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
         """
         batch = action.shape[0]
         if action.shape != (batch, self.chunk_horizon, self.action_dim):
-            raise ValueError("cached action must have shape [batch,48,action_dim]")
+            raise ValueError("cached action must have shape [batch,chunk_horizon,action_dim]")
         if cache.parent is not None or batch_indices.shape != (batch,):
             raise ValueError("action branch requires a condition-only cache and batch mapping")
         device = action.device
@@ -749,7 +749,7 @@ class MacFlux2FACTModel(Flux2FACTModel):
 
     def score_q_candidates(self, cache, clean_actions, *, candidate_batch_size=8):
         if clean_actions.ndim != 4 or candidate_batch_size <= 0 or clean_actions.shape[1] == 0:
-            raise ValueError("expected nonempty [B,M,48,A] actions and positive candidate_batch_size")
+            raise ValueError("expected nonempty [B,M,chunk_horizon,A] actions and positive candidate_batch_size")
         batch, count = clean_actions.shape[:2]
         if cache.key_mask.shape[0] != batch:
             raise ValueError("condition cache batch must match candidate observations")

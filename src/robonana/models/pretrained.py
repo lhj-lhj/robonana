@@ -120,7 +120,7 @@ def load_flux2_fact_trained_checkpoint(
     config_path: str | Path | None = None,
     include_critics: bool | None = None,
 ) -> tuple[MacFlux2FACTModel, PretrainedLoadReport]:
-    """Strictly load a complete fixed-48 MAC checkpoint and its recorded schema."""
+    """Strictly load a complete MAC checkpoint and its recorded schema."""
 
     path = Path(checkpoint_path).expanduser().resolve()
     state_dict = _load_state(path)

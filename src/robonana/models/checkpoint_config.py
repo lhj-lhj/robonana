@@ -1,4 +1,4 @@
-"""Schema for the one maintained fixed-48 MAC checkpoint format."""
+"""Schema for the maintained MAC checkpoint format with an explicit chunk horizon."""
 
 from __future__ import annotations
 
@@ -112,8 +112,11 @@ def resolve_checkpoint_config(
     discovered = Path(config_path).expanduser().resolve() if config_path else discover_model_config(checkpoint_path)
     contract_path = Path(checkpoint_path).expanduser().parent / "inference_contract.json"
     recorded_mode = None
+    recorded_horizon = None
     if contract_path.is_file():
-        recorded_mode = json.loads(contract_path.read_text(encoding="utf-8")).get("world_conditioning", "fixed48")
+        recorded_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        recorded_mode = recorded_contract.get("world_conditioning", "fixed48")
+        recorded_horizon = recorded_contract.get("sampling", {}).get("horizon")
     if discovered is None:
         if architecture_version == "mac_mot_v3":
             raise FileNotFoundError("v3 checkpoint requires its recorded model config")
@@ -138,6 +141,8 @@ def resolve_checkpoint_config(
             expert_hidden_dim=1024 if expert_hidden_dim is None else int(expert_hidden_dim),
         )
     config = _load_complete_config(discovered)
+    if recorded_horizon is not None and recorded_horizon != config.chunk_horizon:
+        raise ValueError("Checkpoint contract and config chunk_horizon disagree")
     # The fingerprinted sidecar pins semantics even if a caller supplies a
     # different config with identical parameter shapes. Older exports are fixed48.
     if recorded_mode is not None and recorded_mode != config.world_conditioning:

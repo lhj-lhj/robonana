@@ -17,7 +17,7 @@ class MacSegmentMap:
 
         [L | S | I | A | G | R | U | S' | I']
 
-    ``R`` is one learned query whose output head produces all 48 reward logits.
+    ``R`` is one learned query whose output head produces all chunk_horizon reward logits.
     ``U`` is the success-terminal query.  Value and Q are separate MoT-style
     experts and therefore never appear in this shared sequence.
     """
@@ -129,7 +129,7 @@ def build_mac_attention_bias(
     _allow(allowed, c, c)
     _allow(allowed, a, c, a)
     # A candidate is a complete known chunk, so the clean conditioning track
-    # is bidirectional and every downstream query may inspect all 48 actions.
+    # is bidirectional and every downstream query may inspect all actions in the chunk.
     _allow(allowed, g, c, g)
     _allow(allowed, r, c, g, r)
     _allow(allowed, u, c, g, r, u)
