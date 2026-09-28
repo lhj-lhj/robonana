@@ -27,13 +27,14 @@ def test_flow_noise_preserves_sigma_and_unrounded_velocity_target():
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("world_conditioning", ["fixed48", "rope_prefix"])
-def test_bf16_stage1_full_world_policy_backward(device, world_conditioning):
+@pytest.mark.parametrize("horizon", [16, 48])
+def test_bf16_stage1_full_world_policy_backward(device, world_conditioning, horizon):
     from types import SimpleNamespace
     import robonana.training.robotwin_trainer as training
     RoboNanaTrainer = training.RoboNanaTrainer
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA integration requires a GPU")
-    model, inputs = model_and_inputs()
+    model, inputs = model_and_inputs(chunk_horizon=horizon)
     model.world_conditioning = world_conditioning
     model.to(device=device, dtype=torch.bfloat16).set_training_phase("world_policy")
     trainer = object.__new__(RoboNanaTrainer)
@@ -43,14 +44,15 @@ def test_bf16_stage1_full_world_policy_backward(device, world_conditioning):
     trainer.grid_height, trainer.grid_width, trainer.flow_shift = 1, 2, 1.
     trainer._posttrain_metrics = {}
     trainer.world_conditioning = world_conditioning
+    trainer.posttrain_config = {"chunk_horizon": horizon}
     batch = dict(context=inputs["context"], context_mask=inputs["context_mask"],
                  current_latents=inputs["current_latents"], future_latents=torch.randn(2, 2, 8),
                  state=inputs["state"][:, 0], future_state=torch.randn(2, 6),
-                 action=torch.randn(2, 48, 6), chunk_horizon=torch.full((2,), 48),
-                 action_loss_mask=torch.tensor([1., 0.]), action_valid_mask=torch.ones(2, 48),
-                 reward_chunk=torch.zeros(2, 48), reward_chunk_mask=torch.ones(2, 48),
+                 action=torch.randn(2, horizon, 6), chunk_horizon=torch.full((2,), horizon),
+                 action_loss_mask=torch.tensor([1., 0.]), action_valid_mask=torch.ones(2, horizon),
+                 reward_chunk=torch.zeros(2, horizon), reward_chunk_mask=torch.ones(2, horizon),
                  success=torch.tensor([1., 0.]))
-    batch["world_horizon"] = torch.tensor([1, 32]) if world_conditioning == "rope_prefix" else batch["chunk_horizon"]
+    batch["world_horizon"] = torch.tensor([1, min(32, horizon)]) if world_conditioning == "rope_prefix" else batch["chunk_horizon"]
     batch["world_prefix_causal"] = torch.full((2,), world_conditioning == "rope_prefix")
     sigma = torch.tensor([.999, .37], device=device)
     trainer._sample_timestep = lambda batch_size: sigma

@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 
+import pytest
 import numpy as np
 import torch
 from PIL import Image
@@ -39,21 +40,23 @@ def test_world_uses_selected_action_and_private_rng(monkeypatch):
     assert abs(result["chunk_return"] - expected) < 1e-4
 
 
-def test_artifact_retains_selected_action_reward_curve_and_image(tmp_path):
-    world = dict(image=torch.zeros(1, 3, 1, 4, 6), rewards=[-1.] * 48,
-                 success_probability=.2, predicted_terminal=False)
+@pytest.mark.parametrize("horizon", [16, 48])
+def test_artifact_retains_selected_action_reward_curve_and_image(tmp_path, horizon):
+    world = dict(image=torch.zeros(1, 3, 1, 4, 6), rewards=[-1.] * horizon,
+                 success_probability=.2, predicted_terminal=False, horizon=horizon)
     response = dict(selected_world=world, selected_q=-212., selected_candidate_index=1,
-                    candidate_q=torch.tensor([-300., -212.]), action=torch.ones(48, 2))
+                    candidate_q=torch.tensor([-300., -212.]), action=torch.ones(horizon, 2))
     request = {"observation.images.cam_high": np.ones((3, 4, 6), dtype=np.float32)}
     directory = save_selected_world(tmp_path, task="hanging_mug", seed=100000,
-                                    step=48, request=request, response=response)
-    record = json.loads((directory / "step_0048.json").read_text())
+                                    step=horizon, request=request, response=response)
+    record = json.loads((directory / f"step_{horizon:04d}.json").read_text())
     assert record["selected_candidate_index"] == 1
-    assert len(record["rewards"]) == 48 and len(record["action"]) == 48
+    assert record["image"] == f"step_{horizon:04d}_predicted_t{horizon}.png"
+    assert len(record["rewards"]) == horizon and len(record["action"]) == horizon
     assert Image.open(directory / record["image"]).size == (6, 4)
-    assert np.asarray(Image.open(directory / "step_0048_cam_high.png")).min() == 255
+    assert np.asarray(Image.open(directory / f"step_{horizon:04d}_cam_high.png")).min() == 255
     assert "image" in response["selected_world"]
-    action_only = dict(selected_world=world, action=torch.ones(48,2), _inference_mode='action_only')
+    action_only = dict(selected_world=world, action=torch.ones(horizon,2), _inference_mode='action_only')
     directory=save_selected_world(tmp_path,task='hanging_mug',seed=100001,step=0,
                                   request=request,response=action_only)
     record=json.loads((directory/'step_0000.json').read_text())

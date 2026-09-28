@@ -14,7 +14,7 @@ def test_real_accelerate_two_rank_nonfinite_aborts_before_step(bad, micro):
     result = subprocess.run(
         [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nproc_per_node=2",
          str(script), "--bad", bad, "--micro", str(micro)],
-        env={**os.environ, "OMP_NUM_THREADS": "1"}, capture_output=True, text=True, timeout=60,
+        env={**os.environ, "OMP_NUM_THREADS": "1", "CUDA_VISIBLE_DEVICES": ""}, capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert '"status": "PASS"' in result.stdout

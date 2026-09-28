@@ -16,13 +16,14 @@ from robonana.sampling import (
 )
 
 
-def model_and_inputs():
+def model_and_inputs(chunk_horizon=48):
     torch.manual_seed(42)
     model = MacFlux2FACTModel(Flux2Params(
         in_channels=8, context_in_dim=16, hidden_size=32, num_heads=4,
         depth=2, depth_single_blocks=2, axes_dim=[2, 2, 2, 2],
         mlp_ratio=2.0, use_guidance_embed=False,
-    ), action_dim=6, state_dim=6, expert_hidden_dim=16, include_critics=True).eval()
+    ), action_dim=6, state_dim=6, expert_hidden_dim=16, include_critics=True,
+       chunk_horizon=chunk_horizon, reward_dim=chunk_horizon).eval()
     # A mixed batch with padding catches incorrect B/M indexing and key masks.
     inputs = dict(
         context=torch.randn(2, 3, 16), context_ids=text_position_ids(2, 3, "cpu"),
